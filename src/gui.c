@@ -553,6 +553,30 @@ static int run_process_stderr_redirect(const char *cmdline, const char *stderr_p
 }
 
 
+/* Read the last ~480 bytes of a log file into buf (null-terminated).
+ * Skips to the first complete line if the file is longer than the buffer. */
+static void read_log_tail(const char *path, char *buf, size_t buf_len)
+{
+    buf[0] = '\0';
+    if (buf_len < 2) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    size_t max = buf_len - 1;
+    if (max > 480) max = 480;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    long start = (long)max < sz ? sz - (long)max : 0;
+    fseek(f, start, SEEK_SET);
+    size_t nr = fread(buf, 1, max, f);
+    buf[nr] = '\0';
+    fclose(f);
+    /* Skip partial first line when we seeked mid-file */
+    if (start > 0) {
+        char *nl = strchr(buf, '\n');
+        if (nl) memmove(buf, nl + 1, strlen(nl + 1) + 1);
+    }
+}
+
 /* --- Demodulation thread ---
  * Runs dsd-fme.exe and dsdfme_dsp_to_bin.py directly via CreateProcessA,
  * without cmd.exe as an intermediary, to avoid shell metacharacter injection. */
@@ -641,27 +665,16 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
             SetWindowTextA(g_app.demod_label, g_lang.err_dll_not_found_exit);
         } else {
-            /* Show log tail so the user can see why dsd-fme failed */
-            char fmsg[1024], ftail[400] = {0};
-            FILE *fl = fopen(logfile, "r");
-            if (fl) {
-                fseek(fl, 0, SEEK_END);
-                long fsz = ftell(fl);
-                long fst = fsz > 380 ? fsz - 380 : 0;
-                fseek(fl, fst, SEEK_SET);
-                size_t fnr = fread(ftail, 1, sizeof(ftail) - 1, fl);
-                ftail[fnr] = '\0';
-                fclose(fl);
-                char *fnl = strchr(ftail, '\n');
-                if (fst > 0 && fnl) memmove(ftail, fnl + 1, strlen(fnl + 1) + 1);
-            }
-            if (ftail[0])
-                snprintf(fmsg, sizeof(fmsg), "%s (exit %lu)\n\n%s",
-                         g_lang.err_dsd_failed, (unsigned long)proc_exit, ftail);
+            char tail[512], detail[768];
+            read_log_tail(logfile, tail, sizeof(tail));
+            if (tail[0])
+                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\n%s",
+                         g_lang.err_dsd_failed, (unsigned long)proc_exit, tail);
             else
-                snprintf(fmsg, sizeof(fmsg), "%s (exit %lu)",
+                snprintf(detail, sizeof(detail), "%s (exit %lu)",
                          g_lang.err_dsd_failed, (unsigned long)proc_exit);
-            SetWindowTextA(g_app.demod_label, fmsg);
+            SetWindowTextA(g_app.demod_label, g_lang.err_dsd_failed);
+            MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONERROR);
         }
         goto done;
     }
@@ -677,33 +690,16 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
             if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
         }
         if (!found) {
-            /* No DSP output: read the last few lines of the log to show the user
-             * what dsd-fme reported, so they don't have to open the file manually. */
-            char msg[1024];
-            char tail[512] = {0};
-            FILE *lf = fopen(logfile, "r");
-            if (lf) {
-                /* Read up to last ~500 bytes of the log */
-                fseek(lf, 0, SEEK_END);
-                long sz = ftell(lf);
-                long start = sz > 480 ? sz - 480 : 0;
-                fseek(lf, start, SEEK_SET);
-                size_t nr = fread(tail, 1, sizeof(tail) - 1, lf);
-                tail[nr] = '\0';
-                fclose(lf);
-                /* Skip to start of first complete line if we seeked mid-file */
-                char *first_nl = strchr(tail, '\n');
-                if (start > 0 && first_nl) {
-                    memmove(tail, first_nl + 1, strlen(first_nl + 1) + 1);
-                }
-            }
-            if (tail[0]) {
-                snprintf(msg, sizeof(msg), "%s\n\ndsd-fme log:\n%s",
-                         g_lang.err_no_dsp_output, tail);
-            } else {
-                snprintf(msg, sizeof(msg), "%s\n(no log output)", g_lang.err_no_dsp_output);
-            }
-            SetWindowTextA(g_app.demod_label, msg);
+            char tail[512], detail[768];
+            read_log_tail(logfile, tail, sizeof(tail));
+            if (tail[0])
+                snprintf(detail, sizeof(detail),
+                         "%s\n\ndsd-fme output:\n%s", g_lang.err_no_dsp_output, tail);
+            else
+                snprintf(detail, sizeof(detail),
+                         "%s\n\n(empty log — dsd-fme produced no output)", g_lang.err_no_dsp_output);
+            SetWindowTextA(g_app.demod_label, g_lang.err_no_dsp_output);
+            MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONWARNING);
             goto done;
         }
     }
