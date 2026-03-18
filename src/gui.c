@@ -505,8 +505,10 @@ static int run_process_and_wait(const char *cmdline, DWORD *exit_code)
 }
 
 /* Run a process without a shell, redirecting its stderr to a file.
+ * working_dir sets the child process CWD (NULL = inherit).
  * Uses bInheritHandles=TRUE so the child process can write to the log handle. */
-static int run_process_stderr_redirect(const char *cmdline, const char *stderr_path, DWORD *exit_code)
+static int run_process_stderr_redirect(const char *cmdline, const char *stderr_path,
+                                        const char *working_dir, DWORD *exit_code)
 {
     STARTUPINFOA si;
     PROCESS_INFORMATION pi;
@@ -535,7 +537,8 @@ static int run_process_stderr_redirect(const char *cmdline, const char *stderr_p
     }
 
     snprintf(cmd, sizeof(cmd), "%s", cmdline);
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL,
+                        (working_dir && working_dir[0]) ? working_dir : NULL, &si, &pi)) {
         if (hErr != INVALID_HANDLE_VALUE) CloseHandle(hErr);
         return 0;
     }
@@ -550,18 +553,16 @@ static int run_process_stderr_redirect(const char *cmdline, const char *stderr_p
 }
 
 /* Locate the DSP output file produced by dsd-fme -Q <qname>.
- * Checks CWD\DSP\qname and CWD\qname (the two locations dsd-fme uses). */
-static int find_dsp_file(const char *qname, char *out_path, size_t out_len)
+ * base_dir is the working directory dsd-fme ran in (the WAV file's directory).
+ * dsd-fme writes to base_dir\DSP\qname or base_dir\qname depending on version. */
+static int find_dsp_file(const char *qname, const char *base_dir,
+                          char *out_path, size_t out_len)
 {
-    char cwd[MAX_PATH];
     char candidate[MAX_PATH];
-
-    if (GetCurrentDirectoryA(MAX_PATH, cwd) > 0) {
-        snprintf(candidate, sizeof(candidate), "%s\\DSP\\%s", cwd, qname);
-        if (file_exists(candidate)) { snprintf(out_path, out_len, "%s", candidate); return 1; }
-        snprintf(candidate, sizeof(candidate), "%s\\%s", cwd, qname);
-        if (file_exists(candidate)) { snprintf(out_path, out_len, "%s", candidate); return 1; }
-    }
+    snprintf(candidate, sizeof(candidate), "%s\\DSP\\%s", base_dir, qname);
+    if (file_exists(candidate)) { snprintf(out_path, out_len, "%s", candidate); return 1; }
+    snprintf(candidate, sizeof(candidate), "%s\\%s", base_dir, qname);
+    if (file_exists(candidate)) { snprintf(out_path, out_len, "%s", candidate); return 1; }
     return 0;
 }
 
@@ -573,6 +574,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     char wav_path[MAX_PATH], err[256] = {0};
     char dsd_path[MAX_PATH], py_script[MAX_PATH];
     char out_bin[MAX_PATH], logfile[MAX_PATH], qname[MAX_PATH], dspfile[MAX_PATH];
+    char wav_dir[MAX_PATH];
     char cmdline[4096];
     char drive[_MAX_DRIVE], dir[_MAX_DIR], fname[_MAX_FNAME], ext[_MAX_EXT];
     char ob_drive[_MAX_DRIVE], ob_dir[_MAX_DIR], ob_fname[_MAX_FNAME], ob_ext[_MAX_EXT];
@@ -599,10 +601,13 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
 
     /* Build output paths */
     _splitpath_s(wav_path, drive, sizeof(drive), dir, sizeof(dir), fname, sizeof(fname), ext, sizeof(ext));
-    snprintf(out_bin, sizeof(out_bin), "%s%s%s.fromdsdfme.bin", drive, dir, fname);
-    snprintf(logfile, sizeof(logfile), "%s%s%s.dslog.txt",      drive, dir, fname);
+    snprintf(out_bin,  sizeof(out_bin),  "%s%s%s.fromdsdfme.bin", drive, dir, fname);
+    snprintf(logfile,  sizeof(logfile),  "%s%s%s.dslog.txt",      drive, dir, fname);
+    snprintf(wav_dir,  sizeof(wav_dir),  "%s%s", drive, dir);
+    /* Remove trailing backslash so CreateProcess lpCurrentDirectory is valid */
+    { size_t wdl = strlen(wav_dir); if (wdl > 1 && wav_dir[wdl-1] == '\\') wav_dir[wdl-1] = '\0'; }
 
-    /* qname matches what the bat file computes: stem(out_bin) + ".dsdsp.txt" */
+    /* qname is filename-only; dsd-fme writes it relative to its own CWD (wav_dir) */
     _splitpath_s(out_bin, ob_drive, sizeof(ob_drive), ob_dir, sizeof(ob_dir),
                  ob_fname, sizeof(ob_fname), ob_ext, sizeof(ob_ext));
     snprintf(qname, sizeof(qname), "%s.dsdsp.txt", ob_fname);
@@ -639,7 +644,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
     snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z",
              dsd_path, wav_path, qname);
-    if (!run_process_stderr_redirect(cmdline, logfile, &proc_exit) || proc_exit != 0) {
+    if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
         /* 0xC0000135 = STATUS_DLL_NOT_FOUND -- Cygwin runtime missing */
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
             SetWindowTextA(g_app.demod_label, g_lang.err_dll_not_found_exit);
@@ -651,7 +656,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     }
 
     /* Locate the DSP output file that dsd-fme wrote */
-    if (!find_dsp_file(qname, dspfile, sizeof(dspfile))) {
+    if (!find_dsp_file(qname, wav_dir, dspfile, sizeof(dspfile))) {
         SetWindowTextA(g_app.demod_label, g_lang.err_no_dsp_output);
         goto done;
     }
