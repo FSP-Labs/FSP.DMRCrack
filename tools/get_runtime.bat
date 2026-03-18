@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "RELEASE_URL=https://github.com/lwvmobile/dsd-fme/releases/download/v1.8-OHIO/dsd-fme-portable-win64-20251214.zip"
+set "RELEASE_URL=https://github.com/lwvmobile/dsd-fme/releases/download/20251214/dsd-fme-x86-64-cygwin-portable.zip"
 set "ZIP_FILE=%TEMP%\dsd-fme-portable.zip"
 set "TOOLS_DIR=%~dp0"
 
@@ -28,7 +28,7 @@ if errorlevel 1 (
 
 echo Extracting...
 powershell -NoProfile -Command ^
-    "try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [IO.Compression.ZipFile]::OpenRead('%ZIP_FILE%'); foreach ($e in $z.Entries) { if ($e.FullName -match '^dsd-fme/[^/]+$' -and ($e.Name -match '\.(dll|exe)$' -or $e.Name -eq 'dsd-fme.exe')) { $dst = '%TOOLS_DIR%' + $e.Name; [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true) } }; $z.Dispose() } catch { Write-Error $_.Exception.Message; exit 1 }"
+    "try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $z = [IO.Compression.ZipFile]::OpenRead('%ZIP_FILE%'); foreach ($e in $z.Entries) { if ($e.FullName -match '^dsd-fme-portable/dsd-fme/[^/]+$' -and ($e.Name -match '\.dll$' -or $e.Name -eq 'dsd-fme.exe')) { $dst = '%TOOLS_DIR%' + $e.Name; [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dst, $true) } }; $z.Dispose() } catch { Write-Error $_.Exception.Message; exit 1 }"
 if errorlevel 1 (
     echo ERROR: Extraction failed.
     del /q "%ZIP_FILE%" 2>nul

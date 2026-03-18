@@ -39,7 +39,7 @@ jobs:
         if: steps.cache-dsd.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
-          $url = "https://github.com/lwvmobile/dsd-fme/releases/download/v1.8-OHIO/dsd-fme-portable-win64-20251214.zip"
+          $url = "https://github.com/lwvmobile/dsd-fme/releases/download/20251214/dsd-fme-x86-64-cygwin-portable.zip"
           $tmp = "$env:RUNNER_TEMP\dsd-fme.zip"
           Write-Host "Downloading DSD-FME portable..."
           Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
@@ -47,13 +47,16 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $z = [IO.Compression.ZipFile]::OpenRead($tmp)
           foreach ($e in $z.Entries) {
-            if ($e.FullName -match '^dsd-fme/[^/]+$' -and $e.Name -match '\.(dll|exe)$') {
-              [IO.Compression.ZipFileExtensions]::ExtractToFile($e, "tools\$($e.Name)", $true)
+            if ($e.FullName -match '^dsd-fme-portable/dsd-fme/[^/]+$') {
+              if ($e.Name -match '\.dll$' -or $e.Name -eq 'dsd-fme.exe') {
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, "tools\$($e.Name)", $true)
+              }
             }
           }
           $z.Dispose()
           Remove-Item $tmp
-          Write-Host "Done. $(Get-ChildItem tools\*.dll | Measure-Object).Count DLLs extracted."
+          $dlls = (Get-ChildItem tools\*.dll | Measure-Object).Count
+          Write-Host "Done. $dlls DLLs + dsd-fme.exe extracted."
 
       # ── Build application ─────────────────────────────────────────────────
       - name: Build dmrcrack.exe
