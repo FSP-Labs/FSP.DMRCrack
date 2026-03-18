@@ -21,11 +21,12 @@ jobs:
 
       # ── CUDA ──────────────────────────────────────────────────────────────
       - name: Install CUDA Toolkit 12.6
-        uses: Jimver/cuda-toolkit@v0.2.19
+        uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: '12.6.0'
           method: 'network'
           sub-packages: '["nvcc", "visual_studio_integration"]'
+          use-github-env: true
 
       # ── DSD-FME runtime (gitignored — download fresh each run) ────────────
       - name: Cache DSD-FME runtime
