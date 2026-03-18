@@ -590,25 +590,29 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     /* Remove trailing backslash so CreateProcess lpCurrentDirectory is valid */
     { size_t wdl = strlen(wav_dir); if (wdl > 1 && wav_dir[wdl-1] == '\\') wav_dir[wdl-1] = '\0'; }
 
-    /* Build absolute DSP output path — passed directly to -Q so dsd-fme has no
-     * ambiguity about where to write regardless of its working directory. */
+    /* qname is filename-only; dsd-fme writes it relative to its CWD (wav_dir).
+     * dsd-fme (Cygwin) may create a DSP/ subdirectory — we search both locations. */
     _splitpath_s(out_bin, ob_drive, sizeof(ob_drive), ob_dir, sizeof(ob_dir),
                  ob_fname, sizeof(ob_fname), ob_ext, sizeof(ob_ext));
-    snprintf(dspfile, sizeof(dspfile), "%s\\%s.dsdsp.txt", wav_dir, ob_fname);
-    /* qname unused beyond this point; keep variable to avoid declaration change */
-    (void)qname;
+    snprintf(qname, sizeof(qname), "%s.dsdsp.txt", ob_fname);
 
     /* Paths are embedded in a quoted command line; '"' would break quoting. */
-    if (strchr(dsd_path, '"') || strchr(wav_path, '"') || strchr(dspfile, '"') ||
+    if (strchr(dsd_path, '"') || strchr(wav_path, '"') || strchr(qname,   '"') ||
         strchr(out_bin,  '"') || strchr(logfile,  '"')) {
         SetWindowTextA(g_app.demod_label, g_lang.err_path_has_quotes);
         goto done;
     }
 
-    /* Clean up outputs from previous runs */
+    /* Clean up outputs from previous runs (both possible locations) */
     DeleteFileA(out_bin);
     DeleteFileA(logfile);
-    DeleteFileA(dspfile);
+    {
+        char tmp[MAX_PATH];
+        snprintf(tmp, sizeof(tmp), "%s\\DSP\\%s", wav_dir, qname);
+        DeleteFileA(tmp);
+        snprintf(tmp, sizeof(tmp), "%s\\%s", wav_dir, qname);
+        DeleteFileA(tmp);
+    }
 
     /* Pre-flight: check that the Cygwin runtime is bundled next to dsd-fme.exe */
     {
@@ -628,10 +632,10 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     }
 
     /* Step 1/2: run dsd-fme.exe directly (no shell), stderr → log file.
-     * Pass absolute path to -Q so dsd-fme writes exactly where we expect. */
+     * -Q takes a relative filename; dsd-fme runs with CWD = wav_dir. */
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
     snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z",
-             dsd_path, wav_path, dspfile);
+             dsd_path, wav_path, qname);
     if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
         /* 0xC0000135 = STATUS_DLL_NOT_FOUND -- Cygwin runtime missing */
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
@@ -643,14 +647,24 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         goto done;
     }
 
-    /* Check for DSP output at the exact absolute path we requested */
-    if (!file_exists(dspfile)) {
-        /* No DSP output = no DMR signal found in the file, or unsupported format.
-         * Show the log path so the user can inspect it. */
-        char msg[512];
-        snprintf(msg, sizeof(msg), "%s\n%s", g_lang.err_no_dsp_output, logfile);
-        SetWindowTextA(g_app.demod_label, msg);
-        goto done;
+    /* Locate the DSP output: dsd-fme may write to wav_dir\DSP\qname or wav_dir\qname */
+    {
+        char cand[MAX_PATH];
+        int found = 0;
+        snprintf(cand, sizeof(cand), "%s\\DSP\\%s", wav_dir, qname);
+        if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
+        if (!found) {
+            snprintf(cand, sizeof(cand), "%s\\%s", wav_dir, qname);
+            if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
+        }
+        if (!found) {
+            /* No DSP output: most likely no DMR signal in the WAV file.
+             * Show the log path so the user can inspect dsd-fme's output. */
+            char msg[512];
+            snprintf(msg, sizeof(msg), "%s\nLog: %s", g_lang.err_no_dsp_output, logfile);
+            SetWindowTextA(g_app.demod_label, msg);
+            goto done;
+        }
     }
 
     /* Step 2/2: convert DSP output to .bin (native C, no Python needed) */
