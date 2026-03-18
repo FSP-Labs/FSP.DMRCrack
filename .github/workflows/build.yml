@@ -1,0 +1,90 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── CUDA ──────────────────────────────────────────────────────────────
+      - name: Install CUDA Toolkit 12.6
+        uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["nvcc", "visual_studio_integration"]'
+
+      # ── DSD-FME runtime (gitignored — download fresh each run) ────────────
+      - name: Cache DSD-FME runtime
+        id: cache-dsd
+        uses: actions/cache@v4
+        with:
+          path: tools
+          key: dsd-fme-portable-20251214
+
+      - name: Download DSD-FME runtime
+        if: steps.cache-dsd.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/lwvmobile/dsd-fme/releases/download/v1.8-OHIO/dsd-fme-portable-win64-20251214.zip"
+          $tmp = "$env:RUNNER_TEMP\dsd-fme.zip"
+          Write-Host "Downloading DSD-FME portable..."
+          Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+          Write-Host "Extracting..."
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [IO.Compression.ZipFile]::OpenRead($tmp)
+          foreach ($e in $z.Entries) {
+            if ($e.FullName -match '^dsd-fme/[^/]+$' -and $e.Name -match '\.(dll|exe)$') {
+              [IO.Compression.ZipFileExtensions]::ExtractToFile($e, "tools\$($e.Name)", $true)
+            }
+          }
+          $z.Dispose()
+          Remove-Item $tmp
+          Write-Host "Done. $(Get-ChildItem tools\*.dll | Measure-Object).Count DLLs extracted."
+
+      # ── Build application ─────────────────────────────────────────────────
+      - name: Build dmrcrack.exe
+        shell: cmd
+        run: |
+          if not exist bin mkdir bin
+          call build.bat
+          if errorlevel 1 exit /b 1
+
+      # ── Installer ─────────────────────────────────────────────────────────
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: cmd
+        run: '"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\FSP.DMRCrack.iss'
+
+      # ── Artifacts ─────────────────────────────────────────────────────────
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FSP.DMRCrack-installer
+          path: installer\output\*.exe
+          retention-days: 30
+
+      # ── Release (only on version tags: v0.1.0, v1.2.3, etc.) ─────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer\output\*.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
