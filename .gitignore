@@ -1,0 +1,74 @@
+# Compiled binaries
+bin/*.exe
+bin/*.dll
+bin/*.obj
+bin/*.pdb
+bin/*.ilk
+bin/*.exp
+bin/*.lib
+
+# Auto-generated GPU tuning config (created at runtime by autotuning)
+bin/cuda_tune_*.cfg
+
+# CUDA intermediate files
+*.o
+*.ptx
+*.cubin
+*.fatbin
+
+# MSVC build artifacts
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.res
+
+# Installer output
+installer/output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Test data (may contain captured radio traffic — do not publish)
+test/
+
+# Editor / IDE
+.vs/
+*.suo
+*.user
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+.idea/
+*.swp
+*.swo
+*~
+
+# Third-party binaries (download from dsd-fme releases)
+tools/*.exe
+tools/*.dll
+
+# Claude Code internal files
+CLAUDE.md
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

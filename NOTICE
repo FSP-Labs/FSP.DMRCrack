@@ -1,0 +1,27 @@
+FSP.DMRCrack
+Copyright (C) 2026 FSP-Labs
+
+This program is free software licensed under the GNU General Public License
+version 3 or later. See LICENSE for the full license text.
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+
+DSD-FME (Digital Speech Decoder - FM Enthusiasts Edition)
+  Homepage : https://github.com/lwvmobile/dsd-fme
+  License  : ISC License + GNU General Public License v2.0
+  Usage    : Required demodulation backend. dsd-fme.exe is distributed in
+             tools/ and invoked as a subprocess. Not linked into FSP.DMRCrack.
+
+Cygwin Runtime Libraries (cygwin1.dll and dependencies in tools/)
+  Homepage : https://cygwin.com
+  License  : GNU Lesser General Public License v2.1 or later (LGPL-2.1+)
+  Usage    : Runtime DLLs required by dsd-fme.exe on Windows. Distributed
+             in tools/ alongside dsd-fme.exe. Not linked into FSP.DMRCrack.
+
+mbelib (AMBE vocoder reference implementation)
+  Homepage : https://github.com/szechyjs/mbelib
+  License  : See mbelib repository
+  Usage    : Pipeline algorithm reference only. No mbelib source or binaries
+             are included in this repository.
