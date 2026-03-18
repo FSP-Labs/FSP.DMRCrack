@@ -6,6 +6,9 @@ FSP.DMRCrack is a native Windows application that performs exhaustive 40-bit RC4
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-blue)](https://github.com/FSP-Labs)
+[![Download](https://img.shields.io/github/v/release/FSP-Labs/FSP.DMRCrack?label=Download&color=green)](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)
+
+> **[Download the latest installer →](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)**
 
 ---
 
@@ -38,9 +41,9 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 2. Run the installer (requires Windows 10/11 x64, admin rights).
 3. Launch **FSP.DMRCrack** from the Start menu or desktop shortcut.
 
-### Portable
+### Build from source
 
-Download `dmrcrack.exe` and place it in a folder of your choice. No installation needed.
+Clone the repo, run `tools\get_runtime.bat` to download the DSD-FME runtime, then build with `build.bat` (requires CUDA Toolkit + Visual Studio). See [Building from source](#building-from-source) below.
 
 ---
 

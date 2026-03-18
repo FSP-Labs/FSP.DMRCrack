@@ -56,12 +56,12 @@ test/
 *.swo
 *~
 
-# Third-party binaries (download from dsd-fme releases)
-tools/*.exe
-tools/*.dll
-
 # Claude Code internal files
 CLAUDE.md
+
+# DSD-FME runtime (binaries — run tools/get_runtime.bat to download)
+tools/*.dll
+tools/*.exe
 
 # Environment / secrets
 .env
