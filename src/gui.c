@@ -572,7 +572,7 @@ static int find_dsp_file(const char *qname, const char *base_dir,
 static DWORD WINAPI demod_thread_proc(LPVOID param)
 {
     char wav_path[MAX_PATH], err[256] = {0};
-    char dsd_path[MAX_PATH], py_script[MAX_PATH];
+    char dsd_path[MAX_PATH];
     char out_bin[MAX_PATH], logfile[MAX_PATH], qname[MAX_PATH], dspfile[MAX_PATH];
     char wav_dir[MAX_PATH];
     char cmdline[4096];
@@ -594,10 +594,6 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
         goto done;
     }
-    if (!resolve_tool_path("tools\\dsdfme_dsp_to_bin.py", py_script, sizeof(py_script))) {
-        SetWindowTextA(g_app.demod_label, g_lang.err_py_script_missing);
-        goto done;
-    }
 
     /* Build output paths */
     _splitpath_s(wav_path, drive, sizeof(drive), dir, sizeof(dir), fname, sizeof(fname), ext, sizeof(ext));
@@ -613,8 +609,8 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     snprintf(qname, sizeof(qname), "%s.dsdsp.txt", ob_fname);
 
     /* Paths are embedded in a quoted command line; '"' would break quoting. */
-    if (strchr(dsd_path,  '"') || strchr(wav_path,  '"') || strchr(qname,     '"') ||
-        strchr(out_bin,   '"') || strchr(logfile,   '"') || strchr(py_script, '"')) {
+    if (strchr(dsd_path, '"') || strchr(wav_path, '"') || strchr(qname,   '"') ||
+        strchr(out_bin,  '"') || strchr(logfile,  '"')) {
         SetWindowTextA(g_app.demod_label, g_lang.err_path_has_quotes);
         goto done;
     }
@@ -661,14 +657,15 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         goto done;
     }
 
-    /* Step 2/2: run dsdfme_dsp_to_bin.py directly via py launcher (no shell) */
+    /* Step 2/2: convert DSP output to .bin (native C, no Python needed) */
     SetWindowTextA(g_app.demod_label, g_lang.status_converting);
-    snprintf(cmdline, sizeof(cmdline),
-             "py -3 \"%s\" --dsp \"%s\" --out \"%s\" --log \"%s\"",
-             py_script, dspfile, out_bin, logfile);
-    if (!run_process_and_wait(cmdline, &proc_exit) || proc_exit != 0) {
-        SetWindowTextA(g_app.demod_label, g_lang.err_dsp_conversion);
-        goto done;
+    {
+        char conv_err[256] = {0};
+        if (!dsp_convert_to_bin(dspfile, out_bin, logfile, conv_err, sizeof(conv_err))) {
+            SetWindowTextA(g_app.demod_label,
+                conv_err[0] ? conv_err : g_lang.err_dsp_conversion);
+            goto done;
+        }
     }
 
     payload_set_free(&g_app.payloads);

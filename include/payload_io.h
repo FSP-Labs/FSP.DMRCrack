@@ -53,6 +53,21 @@ void payload_set_free(PayloadSet *set);
 int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_set, char *err, size_t err_len);
 int payload_save_file(const char *path, const PayloadSet *payloads, char *err, size_t err_len);
 
+/*
+ * dsp_convert_to_bin - convert a DSD-FME -Q DSP output file into a .bin
+ * payload file understood by FSP.DMRCrack.
+ *
+ * dsp_path : path to the DSP structured output file produced by dsd-fme -Q
+ * out_path : path for the output .bin file
+ * log_path : path to the dsd-fme stderr log (for ALG/KID/MI tags); may be NULL
+ * err / err_len : optional error message buffer
+ *
+ * Returns 1 on success (>= 1 voice burst written), 0 on error.
+ * Replaces the Python script tools/dsdfme_dsp_to_bin.py — no Python needed.
+ */
+int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
+                       const char *log_path, char *err, size_t err_len);
+
 #ifdef __cplusplus
 }
 #endif

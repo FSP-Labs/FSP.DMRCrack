@@ -356,6 +356,191 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
     return 1;
 }
 
+/* =========================================================================
+ * DSP → BIN converter (native C replacement for dsdfme_dsp_to_bin.py)
+ * ========================================================================= */
+
+#define MAX_PI_PER_SLOT 8192
+
+typedef struct { uint32_t mi; uint8_t alg; uint8_t kid; } PiEntry;
+typedef struct { PiEntry *e; int n; int cap; } PiList;
+
+static uint32_t lfsr_advance(uint32_t mi, int steps)
+{
+    int i;
+    for (i = 0; i < steps; i++) {
+        uint32_t bit = ((mi >> 31) ^ (mi >> 3) ^ (mi >> 1)) & 1u;
+        mi = (mi << 1) | bit;
+    }
+    return mi;
+}
+
+/* Parse one log line for a PI header.
+ * Expected pattern (case-insensitive substrings):
+ *   "Slot N ... ALG ID: XX ... KEY ID: XX ... MI(32): XXXXXXXX"
+ * Returns 1 if all four fields found, 0 otherwise.
+ */
+static int parse_pi_line(const char *line, int *slot_out,
+                          uint8_t *alg_out, uint8_t *kid_out, uint32_t *mi_out)
+{
+    const char *p;
+    unsigned int v;
+
+    p = strstr(line, "Slot ");
+    if (!p) return 0;
+    p += 5;
+    while (*p == ' ') p++;
+    if (*p != '1' && *p != '2') return 0;
+    *slot_out = *p - '0';
+
+    p = strstr(line, "ALG ID:");
+    if (!p) return 0;
+    p += 7;
+    while (*p == ' ') p++;
+    if (sscanf(p, "%x", &v) != 1) return 0;
+    *alg_out = (uint8_t)v;
+
+    p = strstr(line, "KEY ID:");
+    if (!p) return 0;
+    p += 7;
+    while (*p == ' ') p++;
+    if (sscanf(p, "%x", &v) != 1) return 0;
+    *kid_out = (uint8_t)v;
+
+    p = strstr(line, "MI(32):");
+    if (!p) return 0;
+    p += 7;
+    while (*p == ' ') p++;
+    if (sscanf(p, "%x", &v) != 1) return 0;
+    *mi_out = (uint32_t)v;
+
+    return 1;
+}
+
+static void pi_list_push(PiList *pl, uint32_t mi, uint8_t alg, uint8_t kid)
+{
+    if (pl->n == pl->cap) {
+        int new_cap = pl->cap ? pl->cap * 2 : 64;
+        PiEntry *tmp = (PiEntry *)realloc(pl->e, (size_t)new_cap * sizeof(PiEntry));
+        if (!tmp) return;
+        pl->e = tmp;
+        pl->cap = new_cap;
+    }
+    pl->e[pl->n].mi  = mi;
+    pl->e[pl->n].alg = alg;
+    pl->e[pl->n].kid = kid;
+    pl->n++;
+}
+
+static void load_pi_lists(const char *log_path, PiList pi[2])
+{
+    FILE *f;
+    char line[2048];
+
+    pi[0].e = pi[1].e = NULL;
+    pi[0].n = pi[1].n = pi[0].cap = pi[1].cap = 0;
+
+    if (!log_path || !*log_path) return;
+    f = fopen(log_path, "r");
+    if (!f) return;
+
+    while (fgets(line, sizeof(line), f)) {
+        int slot;
+        uint8_t alg, kid;
+        uint32_t mi;
+        if (!parse_pi_line(line, &slot, &alg, &kid, &mi)) continue;
+        if (slot < 1 || slot > 2) continue;
+        if (pi[slot-1].n < MAX_PI_PER_SLOT)
+            pi_list_push(&pi[slot-1], mi, alg, kid);
+    }
+    fclose(f);
+}
+
+int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
+                       const char *log_path, char *err, size_t err_len)
+{
+    FILE *fin, *fout;
+    char line[16384];
+    char hex[16384];
+    PiList pi[2];
+    int burst_count[2] = {0, 0};
+    int voice_count = 0;
+
+    load_pi_lists(log_path, pi);
+
+    fin = fopen(dsp_path, "r");
+    if (!fin) {
+        free(pi[0].e); free(pi[1].e);
+        set_error(err, err_len, "Could not open DSP file");
+        return 0;
+    }
+
+    fout = fopen(out_path, "w");
+    if (!fout) {
+        fclose(fin);
+        free(pi[0].e); free(pi[1].e);
+        set_error(err, err_len, "Could not create output .bin file");
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fin)) {
+        int slot, si, sf_idx;
+        unsigned int burst_type;
+        size_t hexlen, k;
+        uint32_t mi = 0;
+        uint8_t alg = 0, kid = 0;
+        int has_meta = 0;
+
+        /* DSP line: "<slot> <type_hex> <payload_hex>" */
+        if (sscanf(line, "%d %x %16383s", &slot, &burst_type, hex) != 3) continue;
+        if (slot < 1 || slot > 2) continue;
+        if (burst_type != 0x10) continue;   /* 0x10 = voice burst */
+
+        hexlen = strlen(hex);
+        if (hexlen < 66) continue;
+        hex[66] = '\0';
+        for (k = 0; k < 66; k++)
+            if (hex[k] >= 'a' && hex[k] <= 'f') hex[k] = (char)(hex[k] - 'a' + 'A');
+
+        si = slot - 1;
+        if (pi[si].n > 0) {
+            sf_idx = burst_count[si] / 6;
+            if (sf_idx < pi[si].n) {
+                mi  = pi[si].e[sf_idx].mi;
+                alg = pi[si].e[sf_idx].alg;
+                kid = pi[si].e[sf_idx].kid;
+            } else {
+                int extra = sf_idx - (pi[si].n - 1);
+                mi  = lfsr_advance(pi[si].e[pi[si].n - 1].mi, 32 * extra);
+                alg = pi[si].e[pi[si].n - 1].alg;
+                kid = pi[si].e[pi[si].n - 1].kid;
+            }
+            has_meta = 1;
+        }
+
+        if (has_meta)
+            fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X\n", hex, alg, kid, mi);
+        else
+            fprintf(fout, "%s\n", hex);
+
+        burst_count[si]++;
+        voice_count++;
+    }
+
+    fclose(fin);
+    fclose(fout);
+    free(pi[0].e);
+    free(pi[1].e);
+
+    if (voice_count == 0) {
+        set_error(err, err_len, "No voice bursts found in DSP file");
+        return 0;
+    }
+    return 1;
+}
+
+/* ========================================================================= */
+
 int payload_save_file(const char *path, const PayloadSet *payloads, char *err, size_t err_len)
 {
     FILE *f;
