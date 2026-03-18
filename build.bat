@@ -16,6 +16,12 @@ if not defined VSINSTALL (
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64
 if errorlevel 1 exit /b %errorlevel%
 
+REM Ensure CUDA paths are available after vcvarsall resets the environment
+if defined CUDA_PATH (
+    set "PATH=%CUDA_PATH%\bin;%PATH%"
+    set "INCLUDE=%CUDA_PATH%\include;%INCLUDE%"
+)
+
 echo Building FSP.DMRCrack...
 nvcc -O3 -arch=sm_86 -cudart static -Iinclude -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c src\lang_en.c src\updater.c -o bin\dmrcrack.exe -luser32 -lgdi32 -lcomdlg32 -lkernel32 -ldwmapi -lshell32 -ladvapi32 -lwinhttp
 if %ERRORLEVEL% EQU 0 (

@@ -19,6 +19,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ── Determine version ───────────────────────────────────────────────
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
+            $ver = $Matches[1]
+          } else {
+            # Read from version.h
+            $line = Get-Content include\version.h | Where-Object { $_ -match 'DMRCRACK_VERSION\s+"([^"]+)"' }
+            $ver = $Matches[1]
+          }
+          Write-Host "Version: $ver"
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
       # ── CUDA ──────────────────────────────────────────────────────────────
       - name: Install CUDA Toolkit 12.6
         uses: Jimver/cuda-toolkit@v0.2.30
@@ -28,13 +43,13 @@ jobs:
           sub-packages: '["nvcc", "visual_studio_integration"]'
           use-github-env: true
 
-      # ── DSD-FME runtime (gitignored — download fresh each run) ────────────
+      # ── DSD-FME runtime (gitignored — download fresh or from cache) ─────
       - name: Cache DSD-FME runtime
         id: cache-dsd
         uses: actions/cache@v4
         with:
-          path: tools
-          key: dsd-fme-portable-20251214
+          path: tools/*.dll
+          key: dsd-fme-portable-20251214-v2
 
       - name: Download DSD-FME runtime
         if: steps.cache-dsd.outputs.cache-hit != 'true'
@@ -59,6 +74,18 @@ jobs:
           $dlls = (Get-ChildItem tools\*.dll | Measure-Object).Count
           Write-Host "Done. $dlls DLLs + dsd-fme.exe extracted."
 
+      - name: Verify DSD-FME files
+        shell: pwsh
+        run: |
+          $exe = Test-Path "tools\dsd-fme.exe"
+          $dlls = (Get-ChildItem tools\cyg*.dll -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "dsd-fme.exe present: $exe"
+          Write-Host "Cygwin DLLs: $dlls"
+          if (-not $exe -or $dlls -lt 10) {
+            Write-Error "DSD-FME runtime is incomplete"
+            exit 1
+          }
+
       # ── Build application ─────────────────────────────────────────────────
       - name: Build dmrcrack.exe
         shell: cmd
@@ -66,6 +93,10 @@ jobs:
           if not exist bin mkdir bin
           call build.bat
           if errorlevel 1 exit /b 1
+          if not exist bin\dmrcrack.exe (
+            echo ERROR: dmrcrack.exe was not produced
+            exit /b 1
+          )
 
       # ── Installer ─────────────────────────────────────────────────────────
       - name: Install Inno Setup
@@ -74,7 +105,9 @@ jobs:
 
       - name: Build installer
         shell: cmd
-        run: '"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\FSP.DMRCrack.iss'
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DMyAppVersion="${{ steps.version.outputs.VERSION }}" installer\FSP.DMRCrack.iss
+          if errorlevel 1 exit /b 1
 
       # ── Artifacts ─────────────────────────────────────────────────────────
       - name: Upload installer artifact

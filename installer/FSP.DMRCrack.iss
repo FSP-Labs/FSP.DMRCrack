@@ -4,7 +4,10 @@
 ; To compile: open in Inno Setup Compiler and press Build (Ctrl+F9)
 
 #define MyAppName      "FSP.DMRCrack"
-#define MyAppVersion   "0.1.0"
+; MyAppVersion can be overridden from CLI: ISCC /DMyAppVersion="0.2.0" ...
+#ifndef MyAppVersion
+  #define MyAppVersion "0.1.2"
+#endif
 #define MyAppPublisher "FSP-Labs"
 #define MyAppURL       "https://github.com/FSP-Labs"
 #define MyAppExeName   "dmrcrack.exe"
