@@ -86,6 +86,8 @@ const Lang g_lang = {
     .err_wnd_create = "Failed to create main window",
 
     /* ---- Auto-update ---- */
-    .update_available = "Version %s is available.\nOpen the download page?",
-    .update_title     = "Update Available",
+    .update_available   = "Version %s is available.\nDownload and install now?",
+    .update_title       = "Update Available",
+    .update_downloading = "Downloading update...",
+    .update_failed      = "Update download failed. Opening download page instead.",
 };

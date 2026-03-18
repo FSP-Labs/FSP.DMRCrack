@@ -57,8 +57,9 @@
 #define ID_BTN_EXPORT   1014
 
 #define IDT_UI_REFRESH  2001
-#define WM_APP_DEMOD_DONE       (WM_APP + 1)
-#define WM_APP_UPDATE_AVAILABLE (WM_APP + 2)
+#define WM_APP_DEMOD_DONE        (WM_APP + 1)
+#define WM_APP_UPDATE_AVAILABLE  (WM_APP + 2)
+#define WM_APP_UPDATE_DOWNLOADED (WM_APP + 3)
 
 /* --- Dark theme colors --- */
 #define CLR_BG          RGB(30, 30, 30)
@@ -1142,14 +1143,41 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
     case WM_APP_UPDATE_AVAILABLE:
     {
-        char *ver = (char *)lparam;
+        UpdateInfo *info = (UpdateInfo *)lparam;
+        if (!info) return 0;
         char msg[256];
-        snprintf(msg, sizeof(msg), g_lang.update_available, ver ? ver : "");
-        free(ver);
+        snprintf(msg, sizeof(msg), g_lang.update_available, info->version);
         if (MessageBoxA(hwnd, msg, g_lang.update_title,
                         MB_ICONINFORMATION | MB_YESNO | MB_DEFBUTTON1) == IDYES) {
+            if (info->download_url[0]) {
+                /* Download installer in background, then auto-launch */
+                SetWindowTextA(g_app.demod_label, g_lang.update_downloading);
+                updater_download_and_install(info->download_url,
+                                             hwnd, WM_APP_UPDATE_DOWNLOADED);
+            } else {
+                /* No download URL found — fall back to browser */
+                ShellExecuteA(NULL, "open",
+                    "https://github.com/" DMRCRACK_GITHUB_OWNER
+                    "/" DMRCRACK_GITHUB_REPO "/releases/latest",
+                    NULL, NULL, SW_SHOWNORMAL);
+            }
+        }
+        free(info);
+        return 0;
+    }
+
+    case WM_APP_UPDATE_DOWNLOADED:
+    {
+        if (wparam) {
+            /* Installer launched successfully — close the app */
+            DestroyWindow(hwnd);
+        } else {
+            /* Download failed — fall back to browser */
+            SetWindowTextA(g_app.demod_label, g_lang.update_failed);
+            MessageBoxA(hwnd, g_lang.update_failed, APP_TITLE, MB_ICONERROR);
             ShellExecuteA(NULL, "open",
-                "https://github.com/" DMRCRACK_GITHUB_OWNER "/" DMRCRACK_GITHUB_REPO "/releases/latest",
+                "https://github.com/" DMRCRACK_GITHUB_OWNER
+                "/" DMRCRACK_GITHUB_REPO "/releases/latest",
                 NULL, NULL, SW_SHOWNORMAL);
         }
         return 0;

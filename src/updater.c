@@ -15,7 +15,7 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * updater.c - Background update check using WinHTTP + GitHub Releases API
+ * updater.c - Background update check + download using WinHTTP + GitHub API
  */
 #include "../include/updater.h"
 #include "../include/version.h"
@@ -24,8 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <winhttp.h>
+#include <urlmon.h>
+#include <shellapi.h>
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "urlmon.lib")
 
 /* HTTP response buffer — GitHub releases JSON is well under 64 KB */
 #define BUF_SIZE   65536
@@ -36,7 +39,13 @@
 typedef struct {
     HWND hwnd;
     UINT msg_id;
-} UpdateCtx;
+} CheckCtx;
+
+typedef struct {
+    char url[1024];
+    HWND hwnd;
+    UINT msg_done;
+} DownloadCtx;
 
 /* Parse "major.minor.patch" -> integers.  Returns 1 on success. */
 static int parse_ver(const char *s, int *ma, int *mi, int *pa)
@@ -76,6 +85,35 @@ static int extract_tag(const char *json, char *buf, int len)
     return i > 0;
 }
 
+/*
+ * Extract the browser_download_url for the first .exe asset.
+ * Writes into buf (max len bytes).  Returns 1 on success.
+ */
+static int extract_download_url(const char *json, char *buf, int len)
+{
+    /* Find the "assets" array, then look for browser_download_url ending in .exe */
+    const char *assets = strstr(json, "\"assets\"");
+    if (!assets) return 0;
+
+    const char *p = assets;
+    while ((p = strstr(p, "\"browser_download_url\"")) != NULL) {
+        p = strchr(p, ':');
+        if (!p) return 0;
+        p++;
+        while (*p == ' ' || *p == '"') p++;
+        /* Copy the URL */
+        int i = 0;
+        while (*p && *p != '"' && i < len - 1)
+            buf[i++] = *p++;
+        buf[i] = '\0';
+        /* Check if it ends in -Setup.exe */
+        if (i > 10 && strstr(buf, "-Setup.exe")) return 1;
+        /* Also accept .exe as fallback */
+        if (i > 4 && strcmp(buf + i - 4, ".exe") == 0) return 1;
+    }
+    return 0;
+}
+
 /* Convert a narrow ASCII string to a newly-allocated wide string. */
 static wchar_t *to_wide(const char *s)
 {
@@ -86,9 +124,9 @@ static wchar_t *to_wide(const char *s)
     return w;
 }
 
-static DWORD WINAPI update_thread(LPVOID param)
+static DWORD WINAPI check_thread(LPVOID param)
 {
-    UpdateCtx *ctx     = (UpdateCtx *)param;
+    CheckCtx  *ctx     = (CheckCtx *)param;
     HINTERNET  session = NULL, conn = NULL, req = NULL;
     char      *body    = NULL;
     wchar_t   *ua      = NULL, *api_path = NULL;
@@ -152,10 +190,11 @@ static DWORD WINAPI update_thread(LPVOID param)
     body[total] = '\0';
 
     if (extract_tag(body, tag, sizeof(tag)) && is_newer(tag, DMRCRACK_VERSION)) {
-        char *ver = (char *)malloc(strlen(tag) + 1);
-        if (ver) {
-            strcpy(ver, tag);
-            PostMessageA(ctx->hwnd, ctx->msg_id, 0, (LPARAM)ver);
+        UpdateInfo *info = (UpdateInfo *)calloc(1, sizeof(UpdateInfo));
+        if (info) {
+            snprintf(info->version, sizeof(info->version), "%s", tag);
+            extract_download_url(body, info->download_url, sizeof(info->download_url));
+            PostMessageA(ctx->hwnd, ctx->msg_id, 0, (LPARAM)info);
         }
     }
 
@@ -172,14 +211,67 @@ done:
 
 void updater_check_async(HWND hwnd, UINT msg_id)
 {
-    UpdateCtx *ctx = (UpdateCtx *)malloc(sizeof(UpdateCtx));
+    CheckCtx *ctx = (CheckCtx *)malloc(sizeof(CheckCtx));
     if (!ctx) return;
     ctx->hwnd   = hwnd;
     ctx->msg_id = msg_id;
 
-    HANDLE t = CreateThread(NULL, 0, update_thread, ctx, 0, NULL);
+    HANDLE t = CreateThread(NULL, 0, check_thread, ctx, 0, NULL);
     if (t)
         CloseHandle(t);   /* detached — thread frees ctx on exit */
     else
         free(ctx);
+}
+
+/* --- Download + install -------------------------------------------------- */
+
+static DWORD WINAPI download_thread(LPVOID param)
+{
+    DownloadCtx *ctx = (DownloadCtx *)param;
+    int ok = 0;
+
+    /* Build temp path: %TEMP%\FSP.DMRCrack-Update-Setup.exe */
+    char tmp_dir[MAX_PATH], tmp_file[MAX_PATH];
+    GetTempPathA(MAX_PATH, tmp_dir);
+    snprintf(tmp_file, sizeof(tmp_file), "%sFSP.DMRCrack-Update-Setup.exe", tmp_dir);
+
+    /* Delete any previous download */
+    DeleteFileA(tmp_file);
+
+    /* URLDownloadToFile handles HTTPS + GitHub redirects automatically */
+    HRESULT hr = URLDownloadToFileA(NULL, ctx->url, tmp_file, 0, NULL);
+    if (SUCCEEDED(hr)) {
+        /* Verify the file was actually written and has some size */
+        DWORD attr = GetFileAttributesA(tmp_file);
+        if (attr != INVALID_FILE_ATTRIBUTES) {
+            /* Launch the installer and request app close */
+            HINSTANCE ret = ShellExecuteA(NULL, "open", tmp_file,
+                                          NULL, NULL, SW_SHOWNORMAL);
+            if ((INT_PTR)ret > 32) ok = 1;
+        }
+    }
+
+    PostMessageA(ctx->hwnd, ctx->msg_done, (WPARAM)ok, 0);
+    free(ctx);
+    return 0;
+}
+
+void updater_download_and_install(const char *url, HWND hwnd, UINT msg_done)
+{
+    DownloadCtx *ctx = (DownloadCtx *)calloc(1, sizeof(DownloadCtx));
+    if (!ctx) {
+        PostMessageA(hwnd, msg_done, 0, 0);
+        return;
+    }
+    snprintf(ctx->url, sizeof(ctx->url), "%s", url);
+    ctx->hwnd     = hwnd;
+    ctx->msg_done = msg_done;
+
+    HANDLE t = CreateThread(NULL, 0, download_thread, ctx, 0, NULL);
+    if (t)
+        CloseHandle(t);
+    else {
+        free(ctx);
+        PostMessageA(hwnd, msg_done, 0, 0);
+    }
 }

@@ -15,25 +15,41 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * updater.h - Automatic update check via GitHub Releases API
+ * updater.h - Automatic update check + download via GitHub Releases API
  *
- * Launches a background thread that queries:
- *   GET https://api.github.com/repos/<owner>/<repo>/releases/latest
+ * updater_check_async:
+ *   Background thread queries /repos/<owner>/<repo>/releases/latest.
+ *   If a newer version is found, posts msg_id to hwnd with a heap-allocated
+ *   UpdateInfo* in lParam.  The caller must free() it after handling.
  *
- * If a newer version is found the thread posts msg_id to hwnd with the
- * new version string (heap-allocated) in lParam.  The caller must free()
- * the lParam string after handling the message.
+ * updater_download_and_install:
+ *   Downloads the installer from the given URL to %TEMP%, launches it,
+ *   and posts msg_done to hwnd when done (or on error).
  */
 #ifndef UPDATER_H
 #define UPDATER_H
 
 #include <windows.h>
 
+typedef struct {
+    char version[64];
+    char download_url[1024];
+} UpdateInfo;
+
 /*
  * updater_check_async - start background update check (non-blocking).
  * hwnd   : window that receives msg_id when an update is found
  * msg_id : WM_APP+N message id defined by the caller
+ * lParam will be a heap-allocated UpdateInfo* (caller must free).
  */
 void updater_check_async(HWND hwnd, UINT msg_id);
+
+/*
+ * updater_download_and_install - download installer and run it.
+ * url     : browser_download_url from GitHub releases
+ * hwnd    : window to notify
+ * msg_done: posted when download completes (wParam=1 success, 0 failure)
+ */
+void updater_download_and_install(const char *url, HWND hwnd, UINT msg_done);
 
 #endif /* UPDATER_H */

@@ -85,8 +85,10 @@ typedef struct {
     const char *err_wnd_create;
 
     /* ---- Auto-update ---- */
-    const char *update_available; /* printf format: %s = new version string */
+    const char *update_available;   /* printf format: %s = new version string */
     const char *update_title;
+    const char *update_downloading; /* "Downloading update..."                */
+    const char *update_failed;      /* "Update download failed"               */
 } Lang;
 
 /* Implemented in lang_en.c (or another lang_XX.c). */
