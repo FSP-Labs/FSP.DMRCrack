@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # required to create GitHub Releases and upload assets
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Version ──────────────────────────────────────────────────────────────
+      - name: Extract version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $ver = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          if ($ver -notmatch '^\d+\.\d+\.\d+$') {
+            Write-Error "Tag does not match vX.Y.Z format: $env:GITHUB_REF"
+            exit 1
+          }
+          Write-Host "Version: $ver"
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      # ── CUDA ─────────────────────────────────────────────────────────────────
+      - name: Cache CUDA Toolkit
+        id: cache-cuda
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\NVIDIA GPU Computing Toolkit
+          key: cuda-12.6.0-windows
+
+      - name: Install CUDA Toolkit
+        if: steps.cache-cuda.outputs.cache-hit != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart"]'
+          use-github-env: true
+
+      - name: Set CUDA environment after cache restore
+        if: steps.cache-cuda.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+          echo "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+          echo "$cuda\bin" >> $env:GITHUB_PATH
+
+      - name: Verify CUDA installation
+        run: nvcc --version
+
+      # ── DSD-FME runtime ───────────────────────────────────────────────────────
+      - name: Cache DSD-FME runtime
+        id: cache-dsd
+        uses: actions/cache@v4
+        with:
+          path: .github/dsd-fme-cache
+          key: dsd-fme-portable-20251214-v2
+
+      - name: Download DSD-FME runtime
+        if: steps.cache-dsd.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/lwvmobile/dsd-fme/releases/download/20251214/dsd-fme-x86-64-cygwin-portable.zip"
+          $tmp = "$env:RUNNER_TEMP\dsd-fme.zip"
+          New-Item -ItemType Directory -Force -Path .github/dsd-fme-cache | Out-Null
+          Write-Host "Downloading DSD-FME portable..."
+          Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+          Write-Host "Extracting..."
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [IO.Compression.ZipFile]::OpenRead($tmp)
+          foreach ($e in $z.Entries) {
+            if ($e.FullName -match '^dsd-fme-portable/dsd-fme/[^/]+$') {
+              if ($e.Name -match '\.dll$' -or $e.Name -eq 'dsd-fme.exe') {
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, ".github/dsd-fme-cache/$($e.Name)", $true)
+              }
+            }
+          }
+          $z.Dispose()
+          Remove-Item $tmp
+          Copy-Item .github/dsd-fme-cache/* tools/
+          Write-Host "Done: $((Get-ChildItem tools/cyg*.dll | Measure-Object).Count) DLLs + dsd-fme.exe"
+
+      - name: Restore DSD-FME from cache
+        if: steps.cache-dsd.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: Copy-Item .github/dsd-fme-cache/* tools/ -Force
+
+      - name: Verify DSD-FME files
+        shell: pwsh
+        run: |
+          $exe  = Test-Path "tools/dsd-fme.exe"
+          $dlls = (Get-ChildItem tools/cyg*.dll -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "dsd-fme.exe present: $exe  |  Cygwin DLLs: $dlls"
+          if (-not $exe -or $dlls -lt 10) { Write-Error "DSD-FME runtime incomplete"; exit 1 }
+
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Create bin directory
+        run: New-Item -ItemType Directory -Force -Path bin
+
+      - name: Build dmrcrack.exe
+        shell: cmd
+        run: |
+          call build.bat
+          if errorlevel 1 exit /b 1
+          if not exist bin\dmrcrack.exe (
+            echo ERROR: dmrcrack.exe not produced
+            exit /b 1
+          )
+
+      # ── Installer ─────────────────────────────────────────────────────────────
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build installer
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DMyAppVersion="${{ steps.version.outputs.VERSION }}" installer\FSP.DMRCrack.iss
+          if errorlevel 1 exit /b 1
+
+      - name: Verify installer output
+        shell: pwsh
+        run: |
+          $f = "installer\output\FSP.DMRCrack-${{ steps.version.outputs.VERSION }}-Setup.exe"
+          if (-not (Test-Path $f)) { Write-Error "Installer not found: $f"; exit 1 }
+          Write-Host "Installer: $f ($([Math]::Round((Get-Item $f).Length / 1MB, 1)) MB)"
+
+      # ── EdDSA signing ─────────────────────────────────────────────────────────
+      # Sign the installer with the EdDSA private key so WinSparkle can verify
+      # integrity before installing the update.  The key is stored as a secret.
+      - name: Sign installer with EdDSA
+        id: sign
+        shell: pwsh
+        env:
+          EDDSA_PRIVATE_KEY: ${{ secrets.WINSPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          $installer = "installer\output\FSP.DMRCrack-${{ steps.version.outputs.VERSION }}-Setup.exe"
+          $keyFile   = "$env:RUNNER_TEMP\eddsa_priv.key"
+
+          Set-Content -Path $keyFile -Value $env:EDDSA_PRIVATE_KEY -NoNewline
+          $sig = & vendor\winsparkle\bin\winsparkle-tool.exe sign -f $keyFile $installer 2>&1
+          if ($LASTEXITCODE -ne 0) { Write-Error "Signing failed: $sig"; exit 1 }
+
+          $size = (Get-Item $installer).Length
+          Write-Host "Signature: $sig"
+          Write-Host "Size: $size bytes"
+
+          echo "SIG=$sig"   >> $env:GITHUB_OUTPUT
+          echo "SIZE=$size" >> $env:GITHUB_OUTPUT
+          Remove-Item $keyFile -Force
+
+      # ── Appcast ─────────────────────────────────────────────────────────────────
+      # Generate the WinSparkle appcast XML with the signed installer metadata.
+      - name: Generate appcast.xml
+        shell: pwsh
+        run: |
+          $ver  = "${{ steps.version.outputs.VERSION }}"
+          $sig  = "${{ steps.sign.outputs.SIG }}"
+          $size = "${{ steps.sign.outputs.SIZE }}"
+          $url  = "https://github.com/FSP-Labs/FSP.DMRCrack/releases/download/v${ver}/FSP.DMRCrack-${ver}-Setup.exe"
+
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>FSP.DMRCrack</title>
+              <item>
+                <title>Version $ver</title>
+                <sparkle:version>$ver</sparkle:version>
+                <link>https://github.com/FSP-Labs/FSP.DMRCrack/releases/tag/v$ver</link>
+                <sparkle:releaseNotesLink>https://github.com/FSP-Labs/FSP.DMRCrack/releases/tag/v$ver</sparkle:releaseNotesLink>
+                <enclosure url="$url"
+                           sparkle:edSignature="$sig"
+                           sparkle:version="$ver"
+                           length="$size"
+                           type="application/octet-stream"/>
+              </item>
+            </channel>
+          </rss>
+          "@ | Set-Content -Path "appcast.xml" -Encoding UTF8
+
+          Write-Host "Appcast generated for v$ver"
+
+      # ── Release ─────────────────────────────────────────────────────────────────
+      # WinSparkle fetches appcast.xml from the fixed 'appcast' release tag.
+      # The version release hosts the installer and raw binary.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: FSP.DMRCrack v${{ steps.version.outputs.VERSION }}
+          files: |
+            installer\output\FSP.DMRCrack-${{ steps.version.outputs.VERSION }}-Setup.exe
+            bin\dmrcrack.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
+
+      - name: Upload appcast to update feed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $exists = gh release view appcast 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create appcast --title "Appcast" --notes "WinSparkle auto-update feed — do not delete" --latest=false
+          }
+          gh release upload appcast appcast.xml --clobber

@@ -1,54 +1,65 @@
-name: Build & Release
+name: Build
 
 on:
   push:
-    branches: [master]
-    tags: ['v*']
+    branches: ['**']
   pull_request:
     branches: [master]
-  workflow_dispatch:
 
 permissions:
-  contents: write   # needed to create releases
+  contents: read
 
 jobs:
   build:
+    name: Compile dmrcrack.exe
     runs-on: windows-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Determine version ───────────────────────────────────────────────
-      - name: Determine version
-        id: version
-        shell: pwsh
-        run: |
-          if ($env:GITHUB_REF -match '^refs/tags/v(.+)$') {
-            $ver = $Matches[1]
-          } else {
-            # Read from version.h
-            $line = Get-Content include\version.h | Where-Object { $_ -match 'DMRCRACK_VERSION\s+"([^"]+)"' }
-            $ver = $Matches[1]
-          }
-          Write-Host "Version: $ver"
-          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+      # ── CUDA ─────────────────────────────────────────────────────────────────
+      # The cache stores the full CUDA Toolkit tree.  On a cache hit we re-export
+      # the env vars that the Jimver action would normally set, so that build.bat
+      # can find nvcc and cuda_runtime.h after vcvarsall resets PATH.
+      - name: Cache CUDA Toolkit
+        id: cache-cuda
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\NVIDIA GPU Computing Toolkit
+          key: cuda-12.6.0-windows
 
-      # ── CUDA ──────────────────────────────────────────────────────────────
-      - name: Install CUDA Toolkit 12.6
+      - name: Install CUDA Toolkit
+        if: steps.cache-cuda.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: '12.6.0'
           method: 'network'
-          sub-packages: '["nvcc", "visual_studio_integration"]'
+          sub-packages: '["nvcc", "cudart"]'
           use-github-env: true
 
-      # ── DSD-FME runtime (gitignored — download fresh or from cache) ─────
+      - name: Set CUDA environment after cache restore
+        if: steps.cache-cuda.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+          echo "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
+          echo "$cuda\bin" >> $env:GITHUB_PATH
+
+      - name: Verify CUDA installation
+        run: nvcc --version
+
+      # ── DSD-FME runtime ───────────────────────────────────────────────────────
+      # tools/*.dll and tools/dsd-fme.exe are gitignored; they must be downloaded
+      # from the official portable release.  We cache them in .github/dsd-fme-cache
+      # (separate from tools/) so that git-tracked scripts in tools/ are never
+      # overwritten by stale cache content.
       - name: Cache DSD-FME runtime
         id: cache-dsd
         uses: actions/cache@v4
         with:
-          path: tools/*.dll
+          path: .github/dsd-fme-cache
           key: dsd-fme-portable-20251214-v2
 
       - name: Download DSD-FME runtime
@@ -57,6 +68,7 @@ jobs:
         run: |
           $url = "https://github.com/lwvmobile/dsd-fme/releases/download/20251214/dsd-fme-x86-64-cygwin-portable.zip"
           $tmp = "$env:RUNNER_TEMP\dsd-fme.zip"
+          New-Item -ItemType Directory -Force -Path .github/dsd-fme-cache | Out-Null
           Write-Host "Downloading DSD-FME portable..."
           Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
           Write-Host "Extracting..."
@@ -65,63 +77,45 @@ jobs:
           foreach ($e in $z.Entries) {
             if ($e.FullName -match '^dsd-fme-portable/dsd-fme/[^/]+$') {
               if ($e.Name -match '\.dll$' -or $e.Name -eq 'dsd-fme.exe') {
-                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, "tools\$($e.Name)", $true)
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($e, ".github/dsd-fme-cache/$($e.Name)", $true)
               }
             }
           }
           $z.Dispose()
           Remove-Item $tmp
-          $dlls = (Get-ChildItem tools\*.dll | Measure-Object).Count
-          Write-Host "Done. $dlls DLLs + dsd-fme.exe extracted."
+          Copy-Item .github/dsd-fme-cache/* tools/
+          Write-Host "Done: $((Get-ChildItem tools/cyg*.dll | Measure-Object).Count) DLLs + dsd-fme.exe"
+
+      - name: Restore DSD-FME from cache
+        if: steps.cache-dsd.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: Copy-Item .github/dsd-fme-cache/* tools/ -Force
 
       - name: Verify DSD-FME files
         shell: pwsh
         run: |
-          $exe = Test-Path "tools\dsd-fme.exe"
-          $dlls = (Get-ChildItem tools\cyg*.dll -ErrorAction SilentlyContinue | Measure-Object).Count
-          Write-Host "dsd-fme.exe present: $exe"
-          Write-Host "Cygwin DLLs: $dlls"
-          if (-not $exe -or $dlls -lt 10) {
-            Write-Error "DSD-FME runtime is incomplete"
-            exit 1
-          }
+          $exe  = Test-Path "tools/dsd-fme.exe"
+          $dlls = (Get-ChildItem tools/cyg*.dll -ErrorAction SilentlyContinue | Measure-Object).Count
+          Write-Host "dsd-fme.exe present: $exe  |  Cygwin DLLs: $dlls"
+          if (-not $exe -or $dlls -lt 10) { Write-Error "DSD-FME runtime incomplete"; exit 1 }
 
-      # ── Build application ─────────────────────────────────────────────────
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Create bin directory
+        run: New-Item -ItemType Directory -Force -Path bin
+
       - name: Build dmrcrack.exe
         shell: cmd
         run: |
-          if not exist bin mkdir bin
           call build.bat
           if errorlevel 1 exit /b 1
           if not exist bin\dmrcrack.exe (
-            echo ERROR: dmrcrack.exe was not produced
+            echo ERROR: dmrcrack.exe not produced
             exit /b 1
           )
 
-      # ── Installer ─────────────────────────────────────────────────────────
-      - name: Install Inno Setup
-        shell: pwsh
-        run: choco install innosetup --yes --no-progress
-
-      - name: Build installer
-        shell: cmd
-        run: |
-          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /DMyAppVersion="${{ steps.version.outputs.VERSION }}" installer\FSP.DMRCrack.iss
-          if errorlevel 1 exit /b 1
-
-      # ── Artifacts ─────────────────────────────────────────────────────────
-      - name: Upload installer artifact
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FSP.DMRCrack-installer
-          path: installer\output\*.exe
-          retention-days: 30
-
-      # ── Release (only on version tags: v0.1.0, v1.2.3, etc.) ─────────────
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: installer\output\*.exe
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          name: dmrcrack-${{ github.sha }}
+          path: bin\dmrcrack.exe
+          retention-days: 7

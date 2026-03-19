@@ -1,0 +1,49 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday at 06:00 UTC
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [c-cpp, python]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      # C/C++ requires a traced build.  We use build_test.bat (MSVC only, no
+      # CUDA) which compiles the core C sources and is available on any runner
+      # that has Visual Studio — no CUDA Toolkit installation needed.
+      # Python is interpreted; CodeQL scans it without a build step.
+      - name: Build C sources for analysis
+        if: matrix.language == 'c-cpp'
+        shell: cmd
+        run: |
+          if not exist bin mkdir bin
+          call build_test.bat
+          if errorlevel 1 exit /b 1
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: ${{ matrix.language }}

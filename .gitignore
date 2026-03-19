@@ -67,6 +67,8 @@ tools/*.exe
 .env
 .env.*
 !.env.example
+*.pem
+eddsa_priv.key
 
 # OS
 Thumbs.db

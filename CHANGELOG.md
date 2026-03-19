@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Auto-update system replaced with WinSparkle**: Removed the custom WinHTTP + GitHub API
+  updater (`updater.c`, 278 lines) which had no integrity verification. Replaced with WinSparkle
+  0.9.2 (MIT license), which provides its own UI, EdDSA (Ed25519) signature verification, and
+  Sparkle appcast support. The release workflow now signs the installer and publishes an appcast
+  XML alongside each release.
+
+### Fixed
+- **Demodulation silent failure**: `run_process_stderr_redirect` redirected only stderr to the log
+  file; stdout was set to `GetStdHandle(STD_OUTPUT_HANDLE)` which returns NULL in a GUI process
+  (no console). Cygwin apps (dsd-fme) received a NULL stdout handle, which could cause silent
+  failures with exit code 0 and no DSP output produced. Both stdout and stderr are now redirected
+  to the log file, giving dsd-fme a valid write handle and capturing all its output.
+- **DSP output search too narrow**: after dsd-fme ran, the app only looked for the DSP file in
+  `wav_dir\DSP\qname` and `wav_dir\qname`. Some versions of dsd-fme write relative to their own
+  executable directory. Two additional candidate paths under the dsd-fme.exe directory are now
+  searched before reporting failure.
+- **Opaque error messages**: "DSD output not found — check .dslog.txt" gave no path. All error
+  dialogs now include the full resolved path of the log file and its last ~480 bytes, so the user
+  sees what went wrong without hunting for a file.
+- **No startup warning for broken install**: if `tools\dsd-fme.exe` was missing the app started
+  normally and only failed when the user clicked Demodulate. The Demodulate button is now disabled
+  at startup and a permanent label warns immediately if dsd-fme.exe is not found.
+- **Unhelpful "missing dsd-fme" message**: previous message suggested the user install dsd-fme
+  manually. Since the app is fully self-contained (dsd-fme and all Cygwin DLLs are bundled by the
+  installer), the message now says "reinstall the app" instead.
+
+---
+
 ## [0.1.0] - 2026-03-18
 
 ### Added

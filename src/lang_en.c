@@ -57,11 +57,11 @@ const Lang g_lang = {
                                  "(cygwin1.dll, cyggcc_s-seh-1.dll, ...)",
     .err_dll_not_found_exit    = "Error: DLL not found when launching DSD-FME "
                                  "(place cygwin1.dll and deps next to dsd-fme.exe)",
-    .err_dsd_failed            = "DSD-FME failed. Check .dslog.txt",
+    .err_dsd_failed            = "DSD-FME failed (see details)",
     .err_dsd_launch            = "Error launching DSD-FME",
-    .err_no_dsp_output         = "Error: DSP output not found. Check .dslog.txt",
+    .err_no_dsp_output         = "Error: DSP output not found (see details)",
     .err_dsp_conversion        = "Error: DSP->BIN conversion failed",
-    .err_dsd_missing           = "Error: missing DSD-FME (tools\\dsd-fme.exe)",
+    .err_dsd_missing           = "Error: dsd-fme.exe missing — reinstall the app",
     .err_py_script_missing     = "Error: missing tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error loading generated BIN file",
 
@@ -85,9 +85,4 @@ const Lang g_lang = {
     .err_wnd_class  = "Failed to register window class",
     .err_wnd_create = "Failed to create main window",
 
-    /* ---- Auto-update ---- */
-    .update_available   = "Version %s is available.\nDownload and install now?",
-    .update_title       = "Update Available",
-    .update_downloading = "Downloading update...",
-    .update_failed      = "Update download failed. Opening download page instead.",
 };

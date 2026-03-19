@@ -58,8 +58,6 @@
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
-#define WM_APP_UPDATE_AVAILABLE  (WM_APP + 2)
-#define WM_APP_UPDATE_DOWNLOADED (WM_APP + 3)
 
 /* --- Dark theme colors --- */
 #define CLR_BG          RGB(30, 30, 30)
@@ -531,7 +529,7 @@ static int run_process_stderr_redirect(const char *cmdline, const char *stderr_p
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hErr != INVALID_HANDLE_VALUE) {
             si.hStdError  = hErr;
-            si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+            si.hStdOutput = hErr;   /* capture stdout in the log too */
             si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
             si.dwFlags |= STARTF_USESTDHANDLES;
         }
@@ -604,6 +602,11 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     }
     if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path, sizeof(dsd_path))) {
         SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
+        MessageBoxA(g_app.hwnd,
+            "dsd-fme.exe was not found in the tools\\ folder.\n\n"
+            "The installation may be incomplete or corrupted.\n"
+            "Please reinstall FSP.DMRCrack.",
+            APP_TITLE, MB_ICONERROR);
         goto done;
     }
 
@@ -666,21 +669,22 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
             SetWindowTextA(g_app.demod_label, g_lang.err_dll_not_found_exit);
         } else {
-            char tail[512], detail[768];
+            char tail[512], detail[1024];
             read_log_tail(logfile, tail, sizeof(tail));
             if (tail[0])
-                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\n%s",
-                         g_lang.err_dsd_failed, (unsigned long)proc_exit, tail);
+                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\nLog: %s\n\n%s",
+                         g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile, tail);
             else
-                snprintf(detail, sizeof(detail), "%s (exit %lu)",
-                         g_lang.err_dsd_failed, (unsigned long)proc_exit);
+                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\nLog: %s\n\n(empty log)",
+                         g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile);
             SetWindowTextA(g_app.demod_label, g_lang.err_dsd_failed);
             MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONERROR);
         }
         goto done;
     }
 
-    /* Locate the DSP output: dsd-fme may write to wav_dir\DSP\qname or wav_dir\qname */
+    /* Locate the DSP output: dsd-fme may write to wav_dir\DSP\qname, wav_dir\qname,
+     * or (on some versions) relative to the dsd-fme.exe directory. */
     {
         char cand[MAX_PATH];
         int found = 0;
@@ -690,15 +694,33 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
             snprintf(cand, sizeof(cand), "%s\\%s", wav_dir, qname);
             if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
         }
+        /* Also check the dsd-fme.exe directory in case it writes there */
         if (!found) {
-            char tail[512], detail[768];
+            char *dsd_sep = strrchr(dsd_path, '\\');
+            if (dsd_sep) {
+                char dsd_dir[MAX_PATH];
+                size_t dlen = (size_t)(dsd_sep - dsd_path);
+                memcpy(dsd_dir, dsd_path, dlen);
+                dsd_dir[dlen] = '\0';
+                snprintf(cand, sizeof(cand), "%s\\DSP\\%s", dsd_dir, qname);
+                if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
+                if (!found) {
+                    snprintf(cand, sizeof(cand), "%s\\%s", dsd_dir, qname);
+                    if (file_exists(cand)) { snprintf(dspfile, sizeof(dspfile), "%s", cand); found = 1; }
+                }
+            }
+        }
+        if (!found) {
+            char tail[512], detail[1024];
             read_log_tail(logfile, tail, sizeof(tail));
             if (tail[0])
                 snprintf(detail, sizeof(detail),
-                         "%s\n\ndsd-fme output:\n%s", g_lang.err_no_dsp_output, tail);
+                         "%s\n\nLog: %s\n\ndsd-fme output:\n%s",
+                         g_lang.err_no_dsp_output, logfile, tail);
             else
                 snprintf(detail, sizeof(detail),
-                         "%s\n\n(empty log — dsd-fme produced no output)", g_lang.err_no_dsp_output);
+                         "%s\n\nLog: %s\n\n(empty log — dsd-fme produced no output)",
+                         g_lang.err_no_dsp_output, logfile);
             SetWindowTextA(g_app.demod_label, g_lang.err_no_dsp_output);
             MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONWARNING);
             goto done;
@@ -1083,7 +1105,19 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
         set_children_font(hwnd, g_app.ui_font);
         SetTimer(hwnd, IDT_UI_REFRESH, 200, NULL);
-        updater_check_async(hwnd, WM_APP_UPDATE_AVAILABLE);
+        updater_init();
+
+        /* Startup sanity check: verify the bundled dsd-fme is present.
+         * If the installation is incomplete the demod button is disabled
+         * and a permanent warning is shown in the demod status label. */
+        {
+            char dsd_path_check[MAX_PATH];
+            if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path_check, sizeof(dsd_path_check))) {
+                EnableWindow(g_app.btn_demod, FALSE);
+                SetWindowTextA(g_app.demod_label,
+                    "WARNING: dsd-fme.exe not found — reinstall the app");
+            }
+        }
         return 0;
     }
 
@@ -1141,48 +1175,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     case WM_APP_DEMOD_DONE:
         return 0;
 
-    case WM_APP_UPDATE_AVAILABLE:
-    {
-        UpdateInfo *info = (UpdateInfo *)lparam;
-        if (!info) return 0;
-        char msg[256];
-        snprintf(msg, sizeof(msg), g_lang.update_available, info->version);
-        if (MessageBoxA(hwnd, msg, g_lang.update_title,
-                        MB_ICONINFORMATION | MB_YESNO | MB_DEFBUTTON1) == IDYES) {
-            if (info->download_url[0]) {
-                /* Download installer in background, then auto-launch */
-                SetWindowTextA(g_app.demod_label, g_lang.update_downloading);
-                updater_download_and_install(info->download_url,
-                                             hwnd, WM_APP_UPDATE_DOWNLOADED);
-            } else {
-                /* No download URL found — fall back to browser */
-                ShellExecuteA(NULL, "open",
-                    "https://github.com/" DMRCRACK_GITHUB_OWNER
-                    "/" DMRCRACK_GITHUB_REPO "/releases/latest",
-                    NULL, NULL, SW_SHOWNORMAL);
-            }
-        }
-        free(info);
-        return 0;
-    }
-
-    case WM_APP_UPDATE_DOWNLOADED:
-    {
-        if (wparam) {
-            /* Installer launched successfully — close the app */
-            DestroyWindow(hwnd);
-        } else {
-            /* Download failed — fall back to browser */
-            SetWindowTextA(g_app.demod_label, g_lang.update_failed);
-            MessageBoxA(hwnd, g_lang.update_failed, APP_TITLE, MB_ICONERROR);
-            ShellExecuteA(NULL, "open",
-                "https://github.com/" DMRCRACK_GITHUB_OWNER
-                "/" DMRCRACK_GITHUB_REPO "/releases/latest",
-                NULL, NULL, SW_SHOWNORMAL);
-        }
-        return 0;
-    }
-
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
@@ -1215,6 +1207,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             CloseHandle(g_app.demod_thread);
             g_app.demod_thread = NULL;
         }
+        updater_cleanup();
         PostQuitMessage(0);
         return 0;
     }

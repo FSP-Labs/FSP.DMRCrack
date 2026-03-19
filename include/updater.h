@@ -15,41 +15,23 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * updater.h - Automatic update check + download via GitHub Releases API
+ * updater.h - Automatic updates via WinSparkle + EdDSA-signed appcast
  *
- * updater_check_async:
- *   Background thread queries /repos/<owner>/<repo>/releases/latest.
- *   If a newer version is found, posts msg_id to hwnd with a heap-allocated
- *   UpdateInfo* in lParam.  The caller must free() it after handling.
- *
- * updater_download_and_install:
- *   Downloads the installer from the given URL to %TEMP%, launches it,
- *   and posts msg_done to hwnd when done (or on error).
+ * Call updater_init() once at startup (after GUI is created) and
+ * updater_cleanup() before exit.  WinSparkle handles the rest:
+ * checking the appcast, showing UI, downloading, verifying the
+ * EdDSA signature, and launching the installer.
  */
 #ifndef UPDATER_H
 #define UPDATER_H
 
-#include <windows.h>
+/* Initialize WinSparkle (call once in WM_CREATE). */
+void updater_init(void);
 
-typedef struct {
-    char version[64];
-    char download_url[1024];
-} UpdateInfo;
+/* Shut down WinSparkle background threads (call in WM_DESTROY). */
+void updater_cleanup(void);
 
-/*
- * updater_check_async - start background update check (non-blocking).
- * hwnd   : window that receives msg_id when an update is found
- * msg_id : WM_APP+N message id defined by the caller
- * lParam will be a heap-allocated UpdateInfo* (caller must free).
- */
-void updater_check_async(HWND hwnd, UINT msg_id);
-
-/*
- * updater_download_and_install - download installer and run it.
- * url     : browser_download_url from GitHub releases
- * hwnd    : window to notify
- * msg_done: posted when download completes (wParam=1 success, 0 failure)
- */
-void updater_download_and_install(const char *url, HWND hwnd, UINT msg_done);
+/* Trigger a manual update check with WinSparkle's built-in UI. */
+void updater_check_now(void);
 
 #endif /* UPDATER_H */

@@ -25,3 +25,10 @@ mbelib (AMBE vocoder reference implementation)
   License  : See mbelib repository
   Usage    : Pipeline algorithm reference only. No mbelib source or binaries
              are included in this repository.
+
+WinSparkle (auto-update framework for Windows)
+  Homepage : https://github.com/vslavik/winsparkle
+  License  : MIT License
+  Usage    : WinSparkle.dll is bundled in vendor/winsparkle/ and distributed
+             with the installer. Provides automatic update checking, download,
+             EdDSA signature verification, and installation UI.

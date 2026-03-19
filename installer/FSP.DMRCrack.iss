@@ -66,6 +66,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; === Core application ===
 Source: "..\bin\{#MyAppExeName}";  DestDir: "{app}"; Components: main; Flags: ignoreversion
 
+; WinSparkle auto-update library
+Source: "..\vendor\winsparkle\x64\WinSparkle.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion
+
 ; CUDA runtime DLLs (included only when present next to the executable)
 Source: "..\bin\cudart64_*.dll"; DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist
 Source: "..\bin\*.dll";          DestDir: "{app}"; Components: main; Flags: ignoreversion skipifsourcedoesntexist

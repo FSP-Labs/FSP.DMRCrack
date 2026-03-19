@@ -22,8 +22,24 @@
 #define DMRCRACK_VERSION_MINOR  1
 #define DMRCRACK_VERSION_PATCH  0
 
-/* GitHub repository used for update checks. */
+/* Wide-string version for WinSparkle API */
+#define WIDE_(x) L##x
+#define WIDE(x)  WIDE_(x)
+#define DMRCRACK_VERSION_W  WIDE(DMRCRACK_VERSION)
+
+/* GitHub repository coordinates */
 #define DMRCRACK_GITHUB_OWNER  "FSP-Labs"
 #define DMRCRACK_GITHUB_REPO   "FSP.DMRCrack"
+
+/* WinSparkle appcast URL (hosted as a GitHub Release asset on the 'appcast' tag) */
+#define DMRCRACK_APPCAST_URL \
+    "https://github.com/" DMRCRACK_GITHUB_OWNER "/" DMRCRACK_GITHUB_REPO \
+    "/releases/download/appcast/appcast.xml"
+
+/* EdDSA (Ed25519) public key for update signature verification.
+ * Generated with: winsparkle-tool generate-key
+ * The corresponding private key must be stored as a GitHub Actions secret
+ * (WINSPARKLE_EDDSA_PRIVATE_KEY) and NEVER committed to the repository. */
+#define DMRCRACK_EDDSA_PUB_KEY  "eB8+6/FIXwTcE7iESdVD/aepKpM5z6NdA9Au5N4oStg="
 
 #endif /* VERSION_H */

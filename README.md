@@ -26,10 +26,10 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 |---|---|
 | OS | Windows 10/11, 64-bit |
 | GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer); CPU fallback available |
+| Runtime | None — DSD-FME and all Cygwin DLLs are bundled by the installer |
+| Python | 3.8+ (optional, for `verify_decrypt.py` and `diag_decrypt.py`) |
 | CUDA Toolkit | 12.x (build-time only) |
 | Visual Studio | 2022 with Desktop C++ workload (build-time only) |
-| Python | 3.8+ (optional, for conversion and verification tools) |
-| Cygwin DLLs | Bundled in `tools/` alongside `dsd-fme.exe` (required for demodulation) |
 
 ---
 
@@ -41,9 +41,11 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 2. Run the installer (requires Windows 10/11 x64, admin rights).
 3. Launch **FSP.DMRCrack** from the Start menu or desktop shortcut.
 
+Everything is included: the GPU brute-force engine, the DSD-FME demodulator, and all required Cygwin runtime DLLs. No additional downloads or configuration needed.
+
 ### Build from source
 
-Clone the repo, run `tools\get_runtime.bat` to download the DSD-FME runtime, then build with `build.bat` (requires CUDA Toolkit + Visual Studio). See [Building from source](#building-from-source) below.
+Clone the repo and build with `build.bat` (requires CUDA Toolkit + Visual Studio). `dsd-fme.exe` and the Cygwin DLLs are already in `tools/`. If they are missing (e.g. on a clean CI checkout), run `tools\get_runtime.bat` to fetch them. See [Building from source](#building-from-source) below.
 
 ---
 
@@ -153,10 +155,12 @@ Output: `bin\dmrcrack.exe`
 Or manually:
 
 ```bat
-nvcc -O3 -arch=sm_86 -Iinclude ^
+nvcc -O3 -arch=sm_86 -cudart static -Iinclude -Ivendor\winsparkle\include ^
   -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" ^
-  src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c ^
-  -o bin\dmrcrack.exe -luser32 -lgdi32 -lcomdlg32 -lkernel32 -ldwmapi -lshell32 -ladvapi32
+  src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c src\lang_en.c src\updater.c ^
+  -o bin\dmrcrack.exe ^
+  -luser32 -lgdi32 -lcomdlg32 -lkernel32 -ldwmapi -lshell32 -ladvapi32 ^
+  vendor\winsparkle\x64\WinSparkle.lib
 ```
 
 Adjust `-arch` for your GPU:
