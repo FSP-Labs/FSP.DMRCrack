@@ -155,7 +155,12 @@ Output: `bin\dmrcrack.exe`
 Or manually:
 
 ```bat
-nvcc -O3 -arch=sm_86 -cudart static -Iinclude -Ivendor\winsparkle\include ^
+nvcc -O3 ^
+  -gencode arch=compute_75,code=sm_75 ^
+  -gencode arch=compute_86,code=sm_86 ^
+  -gencode arch=compute_89,code=sm_89 ^
+  -gencode arch=compute_75,code=compute_75 ^
+  -cudart static -Iinclude -Ivendor\winsparkle\include ^
   -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" ^
   src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c src\lang_en.c src\updater.c ^
   -o bin\dmrcrack.exe ^
@@ -163,14 +168,7 @@ nvcc -O3 -arch=sm_86 -cudart static -Iinclude -Ivendor\winsparkle\include ^
   vendor\winsparkle\x64\WinSparkle.lib
 ```
 
-Adjust `-arch` for your GPU:
-
-| GPU generation | `-arch` |
-|---|---|
-| Turing (RTX 20xx) | `sm_75` |
-| Ampere (RTX 30xx) | `sm_86` |
-| Ada (RTX 40xx) | `sm_89` |
-| Blackwell (RTX 50xx) | `sm_100` |
+The default build targets sm_75/86/89 natively plus a PTX fallback for RTX 50xx and newer (JIT-compiled by the driver on first run). Supported GPUs: GTX 16xx, RTX 20xx–50xx.
 
 ### CPU-only test tools (MSVC, no CUDA)
 

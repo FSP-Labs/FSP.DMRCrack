@@ -23,7 +23,17 @@ if defined CUDA_PATH (
 )
 
 echo Building FSP.DMRCrack...
-nvcc -O3 -arch=sm_86 -cudart static -Iinclude -Ivendor\winsparkle\include ^
+REM Multi-arch: native SASS for sm_75/86/89; PTX fallback for sm_100+ (JIT on first run)
+REM sm_75 = GTX 16xx / RTX 20xx (Turing)
+REM sm_86 = RTX 30xx (Ampere)
+REM sm_89 = RTX 40xx (Ada Lovelace)
+REM compute_75 PTX = RTX 50xx + future GPUs (JIT-compiled by driver at first launch)
+nvcc -O3 ^
+  -gencode arch=compute_75,code=sm_75 ^
+  -gencode arch=compute_86,code=sm_86 ^
+  -gencode arch=compute_89,code=sm_89 ^
+  -gencode arch=compute_75,code=compute_75 ^
+  -cudart static -Iinclude -Ivendor\winsparkle\include ^
   -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" ^
   src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c src\lang_en.c src\updater.c ^
   -o bin\dmrcrack.exe ^
