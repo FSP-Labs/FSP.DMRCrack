@@ -632,6 +632,7 @@ void bruteforce_kernel_strict(
             update_best_score_dev(total_score, current_key, dev_best_score, dev_best_key);
         }
 
+        next_key:
         local_keys++;
         if (local_keys >= 16384) {
             atomicAdd((unsigned long long int*)dev_keys_tested, 16384ULL);
