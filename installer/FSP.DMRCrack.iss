@@ -6,7 +6,7 @@
 #define MyAppName      "FSP.DMRCrack"
 ; MyAppVersion can be overridden from CLI: ISCC /DMyAppVersion="0.2.0" ...
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.2"
+  #define MyAppVersion "0.2.2"
 #endif
 #define MyAppPublisher "FSP-Labs"
 #define MyAppURL       "https://github.com/FSP-Labs"

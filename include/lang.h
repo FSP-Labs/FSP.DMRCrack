@@ -84,6 +84,35 @@ typedef struct {
     const char *err_wnd_class;
     const char *err_wnd_create;
 
+    /* ---- Status panel format strings ---- */
+    const char *fmt_keys_tested;       /* "Keys tested: %llu / %llu (%.2f%%)" */
+    const char *fmt_speed;             /* "Speed: %.2f keys/s"                */
+    const char *fmt_time;              /* "Time: %s  |  ETA: %s"             */
+    const char *fmt_backend;           /* "Backend: %s"                       */
+    const char *fmt_best_candidate;    /* "Best candidate: %s"                */
+    const char *fmt_best_score;        /* "Best score: %s"                    */
+    const char *fmt_status;            /* "Status: %s"                        */
+    const char *fmt_cuda_error;        /* "CUDA error: %s"                    */
+    const char *fmt_payloads_loaded;   /* "%zu payloads loaded"               */
+
+    /* ---- State labels ---- */
+    const char *state_running;         /* "RUNNING"  */
+    const char *state_paused;          /* "PAUSED"   */
+    const char *state_stopped;         /* "STOPPED"  */
+
+    /* ---- Graph titles ---- */
+    const char *graph_keys_title;      /* "Keys/s (history)"       */
+    const char *graph_score_title;     /* "Best score (evolution)" */
+
+    /* ---- File dialog filters ---- */
+    const char *dlg_bin_filter;        /* "BIN payload (*.bin)\0*.bin\0All files (*.*)\0*.*\0" */
+    const char *dlg_audio_filter;      /* "DMR Audio (*.wav;...)\0...\0All files (*.*)\0*.*\0" */
+
+    /* ---- Copy / notification ---- */
+    const char *btn_copy_key;          /* "Copy"                              */
+    const char *msg_key_found;         /* "Key found! %s (score: %.1f)"      */
+    const char *msg_key_copied;        /* "Key copied to clipboard"           */
+
 } Lang;
 
 /* Implemented in lang_en.c (or another lang_XX.c). */

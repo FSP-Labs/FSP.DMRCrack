@@ -74,6 +74,9 @@ typedef struct BruteforceEngine {
     volatile LONG cuda_tpb;
     volatile LONG cuda_bpsm;
     volatile LONG cuda_chunk_mult;
+    volatile LONG cuda_sm_count;
+    volatile LONG cuda_compute_major;
+    volatile LONG cuda_compute_minor;
     volatile LONG64 cuda_last_update_ms;
 } BruteforceEngine;
 
@@ -84,9 +87,9 @@ extern "C" {
 // Host-side: Precompute cipher packs for all payloads (3x7 bytes per burst)
 void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_cipher_packs, int payload_limit);
 
-// Nota: El kernel CUDA asume que el primer payload del .bin corresponde a burst_pos=0 de un superframe.
-// Si el archivo no está alineado, el drop value será incorrecto y la puntuación no será válida.
-// Para máxima robustez, se recomienda validar la alineación en el host y/o añadir un campo burst_pos_start en PayloadItem.
+// Note: The CUDA kernel assumes the first payload in the .bin corresponds to burst_pos=0 of a superframe.
+// If the file is not aligned, the drop value will be incorrect and the scoring will not be valid.
+// For maximum robustness, validate alignment on the host and/or add a burst_pos_start field to PayloadItem.
 
 void bruteforce_engine_init(BruteforceEngine *engine);
 void bruteforce_engine_destroy(BruteforceEngine *engine);

@@ -22,5 +22,9 @@ int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev, LPSTR lp_cmd_line, in
 {
     (void)h_prev;
     (void)lp_cmd_line;
+
+    /* Enable per-monitor DPI awareness for crisp rendering on high-DPI displays */
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     return run_gui(h_instance, n_cmd_show);
 }

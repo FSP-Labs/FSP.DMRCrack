@@ -66,7 +66,7 @@ int main(int argc, char *argv[])
     int start;
 
     if (argc < 2) {
-        fprintf(stderr, "Uso: test_score_windows <archivo.bin> [key_hex] [window] [step] [n_random] [sample_bytes]\n");
+        fprintf(stderr, "Usage: test_score_windows <file.bin> [key_hex] [window] [step] [n_random] [sample_bytes]\n");
         return 1;
     }
     bin_path = argv[1];

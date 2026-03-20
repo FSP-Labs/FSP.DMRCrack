@@ -85,4 +85,34 @@ const Lang g_lang = {
     .err_wnd_class  = "Failed to register window class",
     .err_wnd_create = "Failed to create main window",
 
+    /* ---- Status panel format strings ---- */
+    .fmt_keys_tested    = "Keys tested: %llu / %llu (%.2f%%)",
+    .fmt_speed          = "Speed: %.2f keys/s",
+    .fmt_time           = "Time: %s  |  ETA: %s",
+    .fmt_backend        = "Backend: %s",
+    .fmt_best_candidate = "Best candidate: %s",
+    .fmt_best_score     = "Best score: %s",
+    .fmt_status         = "Status: %s",
+    .fmt_cuda_error     = "CUDA error: %s",
+    .fmt_payloads_loaded = "%zu payloads loaded",
+
+    /* ---- State labels ---- */
+    .state_running = "RUNNING",
+    .state_paused  = "PAUSED",
+    .state_stopped = "STOPPED",
+
+    /* ---- Graph titles ---- */
+    .graph_keys_title  = "Keys/s (history)",
+    .graph_score_title = "Best score (evolution)",
+
+    /* ---- File dialog filters ---- */
+    .dlg_bin_filter   = "BIN payload (*.bin)\0*.bin\0All files (*.*)\0*.*\0",
+    .dlg_audio_filter = "DMR Audio (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0"
+                        "WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0",
+
+    /* ---- Copy / notification ---- */
+    .btn_copy_key   = "Copy",
+    .msg_key_found  = "Key found! %s (score: %.1f)",
+    .msg_key_copied = "Key copied to clipboard",
+
 };

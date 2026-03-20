@@ -55,6 +55,8 @@
 #define ID_BTN_BROWSE_WAV 1012
 #define ID_BTN_DEMOD    1013
 #define ID_BTN_EXPORT   1014
+#define ID_BTN_COPY_KEY 1015
+#define ID_PAYLOAD_LABEL 1016
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -99,6 +101,8 @@ typedef struct {
     HWND btn_demod;
     HWND btn_export;
     HWND demod_label;
+    HWND btn_copy_key;
+    HWND payload_label;
 
     RECT graph_rect;
     RECT score_graph_rect;
@@ -127,6 +131,16 @@ typedef struct {
     HBRUSH br_input;
     char loaded_file[MAX_PATH];
     char loaded_wav[MAX_PATH];
+    int notified_completion;
+
+    /* Static label HWNDs for layout */
+    HWND lbl_audio;
+    HWND lbl_file;
+    HWND lbl_start;
+    HWND lbl_end;
+    HWND lbl_threads;
+    HWND lbl_samples;
+    HWND btn_browse_file;
 } AppState;
 
 static AppState g_app;
@@ -165,6 +179,106 @@ static void set_children_font(HWND parent, HFONT font)
         SendMessageA(child, WM_SETFONT, (WPARAM)font, TRUE);
         child = GetWindow(child, GW_HWNDNEXT);
     }
+}
+
+/* --- Clipboard --- */
+static void copy_key_to_clipboard(HWND hwnd)
+{
+    char key_str[16];
+    HGLOBAL hMem;
+    char *pMem;
+
+    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30)
+        return;
+
+    snprintf(key_str, sizeof(key_str), "%010llX",
+             (unsigned long long)(g_app.snapshot.best_key & 0xFFFFFFFFFFull));
+
+    hMem = GlobalAlloc(GMEM_MOVEABLE, strlen(key_str) + 1);
+    if (!hMem) return;
+    pMem = (char *)GlobalLock(hMem);
+    if (!pMem) { GlobalFree(hMem); return; }
+    strcpy(pMem, key_str);
+    GlobalUnlock(hMem);
+
+    if (OpenClipboard(hwnd)) {
+        EmptyClipboard();
+        SetClipboardData(CF_TEXT, hMem);
+        CloseClipboard();
+    } else {
+        GlobalFree(hMem);
+    }
+}
+
+/* --- Layout: reposition controls for current window size --- */
+static void layout_controls(int cw, int ch)
+{
+    int y, row2_y, ctrl_w, graph_h, gap;
+
+    if (cw < 940) cw = 940;
+    if (ch < 720) ch = 720;
+
+    ctrl_w = cw - 40;
+
+    /* CAPTURE section */
+    y = 40;
+    if (g_app.lbl_audio) MoveWindow(g_app.lbl_audio, 20, y + 2, 70, 20, TRUE);
+    if (g_app.edit_wav) MoveWindow(g_app.edit_wav, 95, y, ctrl_w - 290, 24, TRUE);
+    if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, cw - 235, y, 36, 24, TRUE);
+    if (g_app.btn_demod) MoveWindow(g_app.btn_demod, cw - 190, y, 100, 24, TRUE);
+    if (g_app.btn_export) MoveWindow(g_app.btn_export, cw - 80, y, 60, 24, TRUE);
+    y += 28;
+    if (g_app.demod_label) MoveWindow(g_app.demod_label, 95, y, ctrl_w - 80, 16, TRUE);
+
+    /* BRUTE FORCE section */
+    y = 125;
+    if (g_app.lbl_file) MoveWindow(g_app.lbl_file, 20, y + 2, 70, 20, TRUE);
+    if (g_app.edit_file) MoveWindow(g_app.edit_file, 95, y, ctrl_w - 290, 24, TRUE);
+    if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, cw - 235, y, 36, 24, TRUE);
+    if (g_app.payload_label) MoveWindow(g_app.payload_label, cw - 190, y + 2, 170, 20, TRUE);
+
+    row2_y = y + 34;
+    if (g_app.lbl_start) MoveWindow(g_app.lbl_start, 20, row2_y + 2, 70, 20, TRUE);
+    if (g_app.edit_start) MoveWindow(g_app.edit_start, 95, row2_y, 130, 24, TRUE);
+    if (g_app.lbl_end) MoveWindow(g_app.lbl_end, 230, row2_y + 2, 40, 20, TRUE);
+    if (g_app.edit_end) MoveWindow(g_app.edit_end, 275, row2_y, 130, 24, TRUE);
+    if (g_app.lbl_threads) MoveWindow(g_app.lbl_threads, 420, row2_y + 2, 50, 20, TRUE);
+    if (g_app.edit_threads) MoveWindow(g_app.edit_threads, 475, row2_y, 50, 24, TRUE);
+    if (g_app.lbl_samples) MoveWindow(g_app.lbl_samples, 540, row2_y + 2, 55, 20, TRUE);
+    if (g_app.edit_samples) MoveWindow(g_app.edit_samples, 600, row2_y, 50, 24, TRUE);
+
+    row2_y += 34;
+    if (g_app.btn_start) MoveWindow(g_app.btn_start, 95, row2_y, 110, 30, TRUE);
+    if (g_app.btn_pause) MoveWindow(g_app.btn_pause, 215, row2_y, 110, 30, TRUE);
+    if (g_app.btn_stop) MoveWindow(g_app.btn_stop, 335, row2_y, 110, 30, TRUE);
+    if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, 460, row2_y, 70, 30, TRUE);
+
+    /* Status text */
+    row2_y += 42;
+    if (g_app.status_text) MoveWindow(g_app.status_text, 25, row2_y, ctrl_w, 110, TRUE);
+
+    /* Graphs and progress: fill remaining vertical space */
+    gap = 10;
+    y = row2_y + 115;
+    graph_h = (ch - y - 35 - gap * 2) / 2;
+    if (graph_h < 80) graph_h = 80;
+
+    g_app.graph_rect.left = 20;
+    g_app.graph_rect.top = y;
+    g_app.graph_rect.right = cw - 20;
+    g_app.graph_rect.bottom = y + graph_h;
+
+    y += graph_h + gap;
+    g_app.score_graph_rect.left = 20;
+    g_app.score_graph_rect.top = y;
+    g_app.score_graph_rect.right = cw - 20;
+    g_app.score_graph_rect.bottom = y + graph_h;
+
+    y += graph_h + gap;
+    g_app.progress_rect.left = 20;
+    g_app.progress_rect.top = y;
+    g_app.progress_rect.right = cw - 20;
+    g_app.progress_rect.bottom = y + 25;
 }
 
 /* --- Utility --- */
@@ -220,27 +334,56 @@ static void update_status_text(void)
                  (unsigned long long)(g_app.snapshot.best_key & 0xFFFFFFFFFFull));
     }
 
-    snprintf(text, sizeof(text),
-        "Claves probadas: %llu / %llu (%.2f%%)\r\n"
-        "Velocidad: %.2f claves/s\r\n"
-        "Tiempo: %s  |  ETA: %s\r\n"
-        "Backend: %s\r\n"
-        "Mejor candidata: %s\r\n"
-        "Mejor score: %s\r\n"
-        "Estado: %s",
-        (unsigned long long)g_app.snapshot.keys_tested,
-        (unsigned long long)g_app.snapshot.total_keys, pct,
-        g_app.snapshot.keys_per_second,
-        elapsed, eta,
-        g_app.engine.cuda_active ? "CUDA GPU" : "CPU",
-        best_key_buf,
-        (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) ? "---" :
-            (snprintf(score_buf, sizeof(score_buf), "%.4f", g_app.snapshot.best_score), score_buf),
-        g_app.snapshot.running ? (g_app.snapshot.paused ? "PAUSADO" : "EJECUTANDO") : "DETENIDO");
+    {
+        char line[256];
+        int pos = 0;
+        snprintf(line, sizeof(line), g_lang.fmt_keys_tested,
+                 (unsigned long long)g_app.snapshot.keys_tested,
+                 (unsigned long long)g_app.snapshot.total_keys, pct);
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
 
-    if (g_app.engine.cuda_active && g_app.engine.cuda_device_name[0])
-        snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                 "\r\nGPU: %s", g_app.engine.cuda_device_name);
+        snprintf(line, sizeof(line), g_lang.fmt_speed, g_app.snapshot.keys_per_second);
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
+
+        snprintf(line, sizeof(line), g_lang.fmt_time, elapsed, eta);
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
+
+        snprintf(line, sizeof(line), g_lang.fmt_backend,
+                 g_app.engine.cuda_active ? "CUDA GPU" : "CPU");
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
+
+        snprintf(line, sizeof(line), g_lang.fmt_best_candidate, best_key_buf);
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
+
+        snprintf(line, sizeof(line), g_lang.fmt_best_score,
+                 (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) ? "---" :
+                     (snprintf(score_buf, sizeof(score_buf), "%.4f", g_app.snapshot.best_score), score_buf));
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
+
+        snprintf(line, sizeof(line), g_lang.fmt_status,
+                 g_app.snapshot.running ? (g_app.snapshot.paused ? g_lang.state_paused : g_lang.state_running) : g_lang.state_stopped);
+        pos = (int)strlen(text);
+        snprintf(text + pos, sizeof(text) - pos, "%s", line);
+    }
+
+    if (g_app.engine.cuda_active && g_app.engine.cuda_device_name[0]) {
+        LONG sm_count = InterlockedCompareExchange(&g_app.engine.cuda_sm_count, 0, 0);
+        LONG cc_major = InterlockedCompareExchange(&g_app.engine.cuda_compute_major, 0, 0);
+        LONG cc_minor = InterlockedCompareExchange(&g_app.engine.cuda_compute_minor, 0, 0);
+        if (sm_count > 0 && cc_major > 0)
+            snprintf(text + strlen(text), sizeof(text) - strlen(text),
+                     "\r\nGPU: %s (sm_%ld%ld, %ld SMs)",
+                     g_app.engine.cuda_device_name, cc_major, cc_minor, sm_count);
+        else
+            snprintf(text + strlen(text), sizeof(text) - strlen(text),
+                     "\r\nGPU: %s", g_app.engine.cuda_device_name);
+    }
 
     if (g_app.engine.cuda_active) {
         snprintf(text + strlen(text), sizeof(text) - strlen(text),
@@ -255,7 +398,12 @@ static void update_status_text(void)
 
     if (g_app.engine.cuda_error[0])
         snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                 "\r\nError CUDA: %s", g_app.engine.cuda_error);
+                 "\r\n");
+        {
+            char cuda_err_line[300];
+            snprintf(cuda_err_line, sizeof(cuda_err_line), g_lang.fmt_cuda_error, g_app.engine.cuda_error);
+            snprintf(text + strlen(text), sizeof(text) - strlen(text), "%s", cuda_err_line);
+        }
 
     SetWindowTextA(g_app.status_text, text);
 }
@@ -303,6 +451,30 @@ static void draw_graph(HDC hdc, const RECT *rect)
         if (v > max_val) max_val = v;
     }
 
+    /* Grid lines at 25%, 50%, 75% */
+    {
+        HPEN grid_pen = CreatePen(PS_DOT, 1, RGB(55, 55, 58));
+        HPEN old_pen2 = (HPEN)SelectObject(hdc, grid_pen);
+        int gh = rect->bottom - rect->top - 40;
+        int gi;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_DIM);
+        for (gi = 1; gi <= 3; ++gi) {
+            int gy = rect->bottom - 25 - (gh * gi) / 4;
+            char tick[32];
+            double tv = max_val * gi / 4.0;
+            MoveToEx(hdc, rect->left + 31, gy, NULL);
+            LineTo(hdc, rect->right - 10, gy);
+            if (tv >= 1e9) snprintf(tick, sizeof(tick), "%.0fG", tv / 1e9);
+            else if (tv >= 1e6) snprintf(tick, sizeof(tick), "%.0fM", tv / 1e6);
+            else if (tv >= 1e3) snprintf(tick, sizeof(tick), "%.0fK", tv / 1e3);
+            else snprintf(tick, sizeof(tick), "%.0f", tv);
+            TextOutA(hdc, rect->left + 2, gy - 7, tick, (int)strlen(tick));
+        }
+        SelectObject(hdc, old_pen2);
+        DeleteObject(grid_pen);
+    }
+
     if (g_app.hist_count > 1) {
         SelectObject(hdc, line_pen);
         for (i = 0; i < g_app.hist_count; ++i) {
@@ -319,16 +491,13 @@ static void draw_graph(HDC hdc, const RECT *rect)
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_GRAPH_LINE1);
-    {
-        char lbl[64];
-        snprintf(lbl, sizeof(lbl), "Claves/s (historial)");
-        TextOutA(hdc, rect->left + 35, rect->top + 6, lbl, (int)strlen(lbl));
-    }
+    TextOutA(hdc, rect->left + 35, rect->top + 6, g_lang.graph_keys_title, (int)strlen(g_lang.graph_keys_title));
     /* Current value top-right */
     if (g_app.hist_count > 0) {
         char val[32];
         double last = g_app.kps_history[(g_app.hist_pos + g_app.hist_count - 1) % 120];
-        if (last >= 1e6) snprintf(val, sizeof(val), "%.1f M/s", last / 1e6);
+        if (last >= 1e9) snprintf(val, sizeof(val), "%.1f G/s", last / 1e9);
+        else if (last >= 1e6) snprintf(val, sizeof(val), "%.1f M/s", last / 1e6);
         else if (last >= 1e3) snprintf(val, sizeof(val), "%.1f K/s", last / 1e3);
         else snprintf(val, sizeof(val), "%.0f /s", last);
         SetTextColor(hdc, CLR_BRIGHT);
@@ -359,6 +528,27 @@ static void draw_score_graph(HDC hdc, const RECT *rect)
         if (v > max_val) max_val = v;
     }
 
+    /* Grid lines at 25%, 50%, 75% */
+    {
+        HPEN grid_pen = CreatePen(PS_DOT, 1, RGB(55, 55, 58));
+        HPEN old_pen2 = (HPEN)SelectObject(hdc, grid_pen);
+        int gh = rect->bottom - rect->top - 40;
+        int gi;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, CLR_DIM);
+        for (gi = 1; gi <= 3; ++gi) {
+            int gy = rect->bottom - 25 - (gh * gi) / 4;
+            char tick[32];
+            double tv = max_val * gi / 4.0;
+            MoveToEx(hdc, rect->left + 31, gy, NULL);
+            LineTo(hdc, rect->right - 10, gy);
+            snprintf(tick, sizeof(tick), "%.0f", tv);
+            TextOutA(hdc, rect->left + 2, gy - 7, tick, (int)strlen(tick));
+        }
+        SelectObject(hdc, old_pen2);
+        DeleteObject(grid_pen);
+    }
+
     if (max_val > 0.0) {
         double thresh_norm = 400.0 / max_val;
         if (thresh_norm <= 1.0) {
@@ -386,7 +576,7 @@ static void draw_score_graph(HDC hdc, const RECT *rect)
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_GRAPH_LINE2);
-    TextOutA(hdc, rect->left + 35, rect->top + 6, "Mejor score (evolucion)", 23);
+    TextOutA(hdc, rect->left + 35, rect->top + 6, g_lang.graph_score_title, (int)strlen(g_lang.graph_score_title));
     /* Current value */
     if (g_app.score_hist_count > 0) {
         char val[32];
@@ -436,7 +626,7 @@ static void choose_file(HWND owner)
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = "BIN payload (*.bin)\0*.bin\0Todos (*.*)\0*.*\0";
+    ofn.lpstrFilter = g_lang.dlg_bin_filter;
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
@@ -451,8 +641,7 @@ static void choose_wav_file(HWND owner)
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = "Audio DMR (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0"
-                      "WAV (*.wav)\0*.wav\0Todos (*.*)\0*.*\0";
+    ofn.lpstrFilter = g_lang.dlg_audio_filter;
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
@@ -748,9 +937,11 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     strcpy_s(g_app.loaded_wav, sizeof(g_app.loaded_wav), wav_path);
     strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), out_bin);
     {
-        char msg[320];
+        char msg[320], plbl[64];
         snprintf(msg, sizeof(msg), "OK: %zu payloads -> %s", g_app.payloads.count, out_bin);
         SetWindowTextA(g_app.demod_label, msg);
+        snprintf(plbl, sizeof(plbl), g_lang.fmt_payloads_loaded, g_app.payloads.count);
+        SetWindowTextA(g_app.payload_label, plbl);
     }
     SetWindowTextA(g_app.edit_file, out_bin);
     EnableWindow(g_app.btn_export, TRUE);
@@ -844,6 +1035,22 @@ static void refresh_snapshot_and_ui(void)
         SetWindowTextA(g_app.btn_pause, g_app.snapshot.paused ? g_lang.btn_resume : g_lang.btn_pause);
     else
         SetWindowTextA(g_app.btn_pause, g_lang.btn_pause);
+
+    /* Key-found notification: flash taskbar when search completes with a result */
+    if (g_app.snapshot.finished && !g_app.notified_completion) {
+        g_app.notified_completion = 1;
+        if (isfinite(g_app.snapshot.best_score) && g_app.snapshot.best_score > -1e30) {
+            FLASHWINFO fwi;
+            fwi.cbSize = sizeof(fwi);
+            fwi.hwnd = g_app.hwnd;
+            fwi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+            fwi.uCount = 5;
+            fwi.dwTimeout = 0;
+            FlashWindowEx(&fwi);
+            MessageBeep(MB_ICONINFORMATION);
+        }
+    }
+
     InvalidateRect(g_app.hwnd, &g_app.graph_rect, FALSE);
     InvalidateRect(g_app.hwnd, &g_app.score_graph_rect, FALSE);
     InvalidateRect(g_app.hwnd, &g_app.progress_rect, FALSE);
@@ -900,6 +1107,11 @@ static int start_bruteforce(HWND hwnd)
         strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), file);
     }
 
+    {
+        char plbl[64];
+        snprintf(plbl, sizeof(plbl), g_lang.fmt_payloads_loaded, g_app.payloads.count);
+        SetWindowTextA(g_app.payload_label, plbl);
+    }
     if (g_app.payloads.count < 64)
         MessageBoxA(hwnd, g_lang.warn_few_payloads, APP_TITLE, MB_ICONWARNING);
 
@@ -918,6 +1130,7 @@ static int start_bruteforce(HWND hwnd)
         return 0;
     }
 
+    g_app.notified_completion = 0;
     g_app.hist_count = g_app.hist_pos = 0;
     g_app.score_hist_count = g_app.score_hist_pos = 0;
     ZeroMemory(g_app.kps_history, sizeof(g_app.kps_history));
@@ -964,25 +1177,33 @@ static void draw_button(DRAWITEMSTRUCT *dis)
         bg_clr = (dis->itemState & ODS_SELECTED) ? RGB(180, 40, 40) : RGB(200, 55, 55);
     }
 
-    br = CreateSolidBrush(bg_clr);
-    FillRect(dis->hDC, &r, br);
-    DeleteObject(br);
+    /* Rounded button with 4px corner radius */
+    {
+        HRGN rgn = CreateRoundRectRgn(r.left, r.top, r.right + 1, r.bottom + 1, 8, 8);
+        SelectClipRgn(dis->hDC, rgn);
+        br = CreateSolidBrush(bg_clr);
+        FillRect(dis->hDC, &r, br);
+        DeleteObject(br);
 
-    GetWindowTextA(dis->hwndItem, text, sizeof(text));
-    SetBkMode(dis->hDC, TRANSPARENT);
-    SetTextColor(dis->hDC, txt_clr);
-    SelectObject(dis->hDC, g_app.ui_font_bold);
-    DrawTextA(dis->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        GetWindowTextA(dis->hwndItem, text, sizeof(text));
+        SetBkMode(dis->hDC, TRANSPARENT);
+        SetTextColor(dis->hDC, txt_clr);
+        SelectObject(dis->hDC, g_app.ui_font_bold);
+        DrawTextA(dis->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    if (dis->itemState & ODS_FOCUS) {
-        HPEN pen = CreatePen(PS_SOLID, 1, CLR_BRIGHT);
-        HPEN old = (HPEN)SelectObject(dis->hDC, pen);
-        HBRUSH null_br = (HBRUSH)GetStockObject(NULL_BRUSH);
-        HBRUSH old_br = (HBRUSH)SelectObject(dis->hDC, null_br);
-        Rectangle(dis->hDC, r.left, r.top, r.right, r.bottom);
-        SelectObject(dis->hDC, old);
-        SelectObject(dis->hDC, old_br);
-        DeleteObject(pen);
+        SelectClipRgn(dis->hDC, NULL);
+
+        if (dis->itemState & ODS_FOCUS) {
+            HPEN pen = CreatePen(PS_SOLID, 1, CLR_BRIGHT);
+            HPEN old_p = (HPEN)SelectObject(dis->hDC, pen);
+            HBRUSH null_br = (HBRUSH)GetStockObject(NULL_BRUSH);
+            HBRUSH old_br = (HBRUSH)SelectObject(dis->hDC, null_br);
+            RoundRect(dis->hDC, r.left, r.top, r.right, r.bottom, 8, 8);
+            SelectObject(dis->hDC, old_p);
+            SelectObject(dis->hDC, old_br);
+            DeleteObject(pen);
+        }
+        DeleteObject(rgn);
     }
 }
 
@@ -1008,7 +1229,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         /* Section header drawn in WM_PAINT */
 
         y = 40;
-        CreateWindowA("STATIC", g_lang.label_audio, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_audio = CreateWindowA("STATIC", g_lang.label_audio, WS_CHILD | WS_VISIBLE | SS_RIGHT,
             20, y + 2, 70, 20, hwnd, NULL, NULL, NULL);
         g_app.edit_wav = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -1021,34 +1242,35 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             685, y, 100, 24, hwnd, (HMENU)ID_BTN_DEMOD, NULL, NULL);
         g_app.btn_export = CreateWindowA("BUTTON", g_lang.btn_export,
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW,
-            795, y, 85, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
+            795, y, 60, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
 
         y += 28;
         g_app.demod_label = CreateWindowA("STATIC", "",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             95, y, 690, 16, hwnd, NULL, NULL, NULL);
 
-        /* === FUERZA BRUTA section === */
-        y = 105;
-
+        /* === BRUTE FORCE section === */
         y = 125;
-        CreateWindowA("STATIC", g_lang.label_file, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_file = CreateWindowA("STATIC", g_lang.label_file, WS_CHILD | WS_VISIBLE | SS_RIGHT,
             20, y + 2, 70, 20, hwnd, NULL, NULL, NULL);
         g_app.edit_file = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             95, y, 540, 24, hwnd, (HMENU)ID_EDIT_FILE, NULL, NULL);
-        CreateWindowA("BUTTON", "...",
+        g_app.btn_browse_file = CreateWindowA("BUTTON", "...",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             640, y, 36, 24, hwnd, (HMENU)ID_BTN_BROWSE, NULL, NULL);
+        g_app.payload_label = CreateWindowA("STATIC", "",
+            WS_CHILD | WS_VISIBLE | SS_LEFT,
+            685, y + 2, 170, 20, hwnd, (HMENU)ID_PAYLOAD_LABEL, NULL, NULL);
 
         y += 34;
-        CreateWindowA("STATIC", g_lang.label_start_key, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_start = CreateWindowA("STATIC", g_lang.label_start_key, WS_CHILD | WS_VISIBLE | SS_RIGHT,
             20, y + 2, 70, 20, hwnd, NULL, NULL, NULL);
         g_app.edit_start = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "0000000000",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             95, y, 130, 24, hwnd, (HMENU)ID_EDIT_START, NULL, NULL);
 
-        CreateWindowA("STATIC", g_lang.label_end_key, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_end = CreateWindowA("STATIC", g_lang.label_end_key, WS_CHILD | WS_VISIBLE | SS_RIGHT,
             230, y + 2, 40, 20, hwnd, NULL, NULL, NULL);
         g_app.edit_end = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "FFFFFFFFFF",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -1057,14 +1279,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         { SYSTEM_INFO si; char at[16];
           GetSystemInfo(&si);
           snprintf(at, sizeof(at), "%lu", si.dwNumberOfProcessors);
-          CreateWindowA("STATIC", g_lang.label_threads, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+          g_app.lbl_threads = CreateWindowA("STATIC", g_lang.label_threads, WS_CHILD | WS_VISIBLE | SS_RIGHT,
               420, y + 2, 50, 20, hwnd, NULL, NULL, NULL);
           g_app.edit_threads = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", at,
               WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
               475, y, 50, 24, hwnd, (HMENU)ID_EDIT_THREADS, NULL, NULL);
         }
 
-        CreateWindowA("STATIC", g_lang.label_samples, WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_samples = CreateWindowA("STATIC", g_lang.label_samples, WS_CHILD | WS_VISIBLE | SS_RIGHT,
             540, y + 2, 55, 20, hwnd, NULL, NULL, NULL);
         g_app.edit_samples = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "100",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -1080,6 +1302,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.btn_stop = CreateWindowA("BUTTON", g_lang.btn_stop,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             335, y, 110, 30, hwnd, (HMENU)ID_BTN_STOP, NULL, NULL);
+        g_app.btn_copy_key = CreateWindowA("BUTTON", g_lang.btn_copy_key,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            460, y, 70, 30, hwnd, (HMENU)ID_BTN_COPY_KEY, NULL, NULL);
 
         /* Status text */
         y += 42;
@@ -1087,21 +1312,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             25, y, 850, 110, hwnd, (HMENU)ID_STATUS_TEXT, NULL, NULL);
 
-        /* Graph rects */
-        g_app.graph_rect.left = 20;
-        g_app.graph_rect.top = 340;
-        g_app.graph_rect.right = 890;
-        g_app.graph_rect.bottom = 475;
-
-        g_app.score_graph_rect.left = 20;
-        g_app.score_graph_rect.top = 485;
-        g_app.score_graph_rect.right = 890;
-        g_app.score_graph_rect.bottom = 620;
-
-        g_app.progress_rect.left = 20;
-        g_app.progress_rect.top = 635;
-        g_app.progress_rect.right = 890;
-        g_app.progress_rect.bottom = 660;
+        /* Initial layout */
+        { RECT rc; GetClientRect(hwnd, &rc);
+          layout_controls(rc.right, rc.bottom); }
 
         set_children_font(hwnd, g_app.ui_font);
         SetTimer(hwnd, IDT_UI_REFRESH, 200, NULL);
@@ -1118,6 +1331,23 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                     "WARNING: dsd-fme.exe not found — reinstall the app");
             }
         }
+        return 0;
+    }
+
+    case WM_SIZE:
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        layout_controls(rc.right, rc.bottom);
+        InvalidateRect(hwnd, NULL, TRUE);
+        return 0;
+    }
+
+    case WM_GETMINMAXINFO:
+    {
+        MINMAXINFO *mmi = (MINMAXINFO *)lparam;
+        mmi->ptMinTrackSize.x = 940;
+        mmi->ptMinTrackSize.y = 720;
         return 0;
     }
 
@@ -1165,6 +1395,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case ID_BTN_START:      start_bruteforce(hwnd); return 0;
         case ID_BTN_PAUSE:      on_pause_resume(); return 0;
         case ID_BTN_STOP:       on_stop(); return 0;
+        case ID_BTN_COPY_KEY:   copy_key_to_clipboard(hwnd); return 0;
         }
         break;
 

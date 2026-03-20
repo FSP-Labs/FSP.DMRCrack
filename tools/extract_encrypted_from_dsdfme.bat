@@ -2,9 +2,9 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 if "%~3"=="" (
-  echo Uso:
+  echo Usage:
   echo   %~nx0 ^<ruta_dsd-fme.exe^> ^<input.wav^> ^<output.bin^>
-  echo Ejemplo:
+  echo Example:
   echo   %~nx0 "C:\dsd-fme\dsd-fme.exe" "test\aaaaa\RC4-40.wav" "test\aaaaa\RC4-40.fromdsdfme.bin"
   exit /b 1
 )
@@ -14,11 +14,11 @@ set "INWAV=%~2"
 set "OUTBIN=%~3"
 
 if not exist "%DSDFME%" (
-  echo ERROR: no existe dsd-fme.exe: "%DSDFME%"
+  echo ERROR: dsd-fme.exe not found: "%DSDFME%"
   exit /b 2
 )
 if not exist "%INWAV%" (
-  echo ERROR: no existe WAV: "%INWAV%"
+  echo ERROR: WAV file not found: "%INWAV%"
   exit /b 3
 )
 
@@ -32,16 +32,16 @@ set "QNAME=%OUTNAME%.dsdsp.txt"
 set "DSPFILE="
 set "LOGFILE=%OUTDIR%%OUTNAME%.dslog.txt"
 
-REM Limpiar salidas previas para evitar acumulacion entre ejecuciones
+REM Clean up previous outputs to avoid accumulation between runs
 if exist "%OUTBIN%" del /f /q "%OUTBIN%" >nul 2>&1
 if exist "%LOGFILE%" del /f /q "%LOGFILE%" >nul 2>&1
 if exist "DSP\%QNAME%" del /f /q "DSP\%QNAME%" >nul 2>&1
 if exist "%QNAME%" del /f /q "%QNAME%" >nul 2>&1
 
-echo [1/2] Ejecutando DSD-FME y volcando DSP cifrado...
+echo [1/2] Running DSD-FME and dumping encrypted DSP...
 "%DSDFME%" -fs -i "%INWAV%" -Q "%QNAME%" -Z 2> "%LOGFILE%"
 if errorlevel 1 (
-  echo ERROR: dsd-fme fallo. Revisa: "%LOGFILE%"
+  echo ERROR: dsd-fme failed. Check: "%LOGFILE%"
   exit /b 4
 )
 
@@ -56,19 +56,19 @@ if exist "DSP\%QNAME%" (
 )
 
 if not defined DSPFILE (
-  echo ERROR: no se encontro el DSP de salida "%QNAME%"
-  echo Revisa el log: "%LOGFILE%"
+  echo ERROR: DSP output not found "%QNAME%"
+  echo Check the log: "%LOGFILE%"
   exit /b 6
 )
 
-echo [2/2] Convirtiendo DSP a BIN compatible con FSP.DMRCrack...
+echo [2/2] Converting DSP to BIN compatible with FSP.DMRCrack...
 py -3 "%~dp0dsdfme_dsp_to_bin.py" --dsp "%DSPFILE%" --out "%OUTBIN%" --log "%LOGFILE%"
 if errorlevel 1 (
-  echo ERROR: conversion fallo
+  echo ERROR: conversion failed
   exit /b 5
 )
 
-echo Listo:
+echo Done:
 echo   BIN:  "%OUTBIN%"
 echo   DSP:  "%DSPFILE%"
 echo   LOG:  "%LOGFILE%"

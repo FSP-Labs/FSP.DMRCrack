@@ -15,8 +15,8 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * bruteforce.cu - Motor de aceleración en GPU (NVIDIA CUDA) para FSP.DMRCrack
- * Archivo adaptado para NVCC. Reemplaza al bruteforce.c estándar original.
+ * bruteforce.cu - GPU acceleration engine (NVIDIA CUDA) for FSP.DMRCrack
+ * File adapted for NVCC. Replaces the original standard bruteforce.c.
  */
 
 #include "../include/bruteforce.h"
@@ -27,7 +27,7 @@
 #include <process.h>
 #include <string.h>
 
-// Cabeceras CUDA
+// CUDA headers
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
@@ -41,18 +41,18 @@ extern "C" {
 
 /*
  * =========================================================================
- * MACROS Y COPIAS DE PROTOCOLO RC4 PARA GPU (__device__)
+ * GPU RC4 PROTOCOL MACROS AND COPIES (__device__)
  * =========================================================================
  */
 
-// Memoria constante ultra-rápida (L1 Cache de 1 ciclo) para payloads compartidos por todos los hilos
+// Ultra-fast constant memory (1-cycle L1 cache) for payloads shared by all threads
 #define MAX_CONST_LINES 256
 __constant__ unsigned char d_const_payloads[8192];
-__constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * 21]; // 21 bytes por burst (3x7)
+__constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * 21]; // 21 bytes per burst (3x7)
 __constant__ unsigned int d_const_mi[MAX_CONST_LINES];
 __constant__ unsigned char d_const_algid[MAX_CONST_LINES];
 __constant__ unsigned char d_const_meta_flags[MAX_CONST_LINES];
-__constant__ float d_abs_floor[MAX_CONST_LINES + 1]; // Umbral absoluto de screening por burst count
+__constant__ float d_abs_floor[MAX_CONST_LINES + 1]; // Absolute screening threshold by burst count
 
 typedef struct {
     unsigned char S[256];
@@ -178,7 +178,7 @@ __device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
         unsigned char t = ctx->S[i];
         ctx->S[i] = ctx->S[j];
         ctx->S[j] = t;
-        // Eliminada lectura innecesaria de S-box
+        // Removed unnecessary S-box read
     }
     ctx->i = i;
     ctx->j = j;
@@ -610,15 +610,16 @@ void bruteforce_kernel_strict(
 
                 total_score += (float)(48 - h01 - h12);
                 processed_bursts++;
+
+                /* Per-burst absolute pruning: reject wrong keys as early as possible */
+                if (enable_prune && processed_bursts >= 3 &&
+                    total_score < d_abs_floor[processed_bursts]) {
+                    goto next_key;
+                }
             }
 
-            /* Pruning at superframe boundary (every 6 bursts) */
+            /* Relative pruning at superframe boundary: can't beat current global best */
             if (enable_prune && processed_bursts >= 6) {
-                /* Absolute threshold: reject clearly wrong keys based on statistics */
-                if (total_score < d_abs_floor[processed_bursts]) {
-                    break;
-                }
-                /* Relative pruning: can't beat current global best */
                 float best_now = __ldg((const float*)dev_best_score);
                 float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
                 if (max_possible <= best_now) {
@@ -667,7 +668,7 @@ void bruteforce_kernel(
     int local_keys = 0;
 
     for (uint64_t i = tid; i < total_keys; i += stride) {
-        // Check stop cada 1024 iteraciones para reducir tráfico global
+        // Check stop every 1024 iterations to reduce global memory traffic
         if ((i & 0x3FFu) == 0 && dev_stop_requested[0]) return;
         uint64_t current_key = start_key + i;
         unsigned char key[5];
@@ -678,9 +679,9 @@ void bruteforce_kernel(
             float total_score = 0.0f;
             int processed_bursts = 0;
             int pruned = 0;
-            // Procesar en grupos de 6 bursts (superframe)
+            // Process in groups of 6 bursts (superframe)
             for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
-                // Validar que todos los bursts del superframe tienen el mismo MI
+                // Validate all bursts in the superframe share the same MI
                 uint32_t line_mi = global_mi;
                 if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u)) {
                     line_mi = d_const_mi[sf_base];
@@ -691,14 +692,14 @@ void bruteforce_kernel(
                 RC4_CTX_DEV rc4;
                 rc4_init_dev_len(&rc4, kmi9, 9);
                 rc4_discard_dev(&rc4, 256);
-                // Procesar los 6 bursts del superframe
+                // Process the 6 bursts of the superframe
                 for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                     int p = sf_base + burst_pos;
                     if (p >= payload_count) break;
                     const unsigned char *cipher_packs = d_const_cipher_packs + (p * 21);
-                    // RC4 stream ya está en la posición correcta
-                    // Decrypt solo bytes necesarios para score (3 por sub-frame),
-                    // avanzando igualmente 7 bytes de keystream por sub-frame.
+                    // RC4 stream is already at the correct position
+                    // Decrypt only bytes needed for scoring (3 per sub-frame),
+                    // still advancing 7 bytes of keystream per sub-frame.
                     unsigned char p0[3], p1[3], p2[3];
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 0,  p0);
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 7,  p1);
@@ -713,8 +714,8 @@ void bruteforce_kernel(
                     total_score += (float)(48 - h01 - h12);
                     processed_bursts++;
 
-                    // Early-prune: incluso con el máximo posible restante (48/burst)
-                    // no puede superar el mejor global actual.
+                    // Early-prune: even with maximum possible remaining (48/burst),
+                    // cannot exceed current global best.
                     if (enable_prune && ((processed_bursts & 0x1) == 0)) {
                         float best_now = __ldg((const float*)dev_best_score);
                         float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
@@ -734,7 +735,7 @@ void bruteforce_kernel(
          * LEGACY PATH (mode_policy 0/1: no MI, statistical scoring)
          * ================================================================ */
 
-        /* Pre-compute RC4 KSA una vez por clave */
+        /* Pre-compute RC4 KSA once per key */
         RC4_CTX_DEV rc4_base;
         rc4_init_dev(&rc4_base, key);
 
@@ -871,7 +872,7 @@ void bruteforce_kernel(
                 has_prev_sig = 1;
 
             if (mode_policy != 3) {
-                /* A) Autocorrelación multi-lag (interleaving-safe) */
+                /* A) Multi-lag autocorrelation (interleaving-safe) */
                 {
                     int max_lag = bytes_to_test / 2;
                     if (max_lag > 13) max_lag = 13;
@@ -890,7 +891,7 @@ void bruteforce_kernel(
                     }
                 }
 
-                /* B) Tasa de transiciones bit */
+                /* B) Bit transition rate */
                 {
                     int transitions = 0;
                     int total_bit_pairs = (bytes_to_test * 8) - 1;
@@ -917,7 +918,7 @@ void bruteforce_kernel(
                     }
                 }
 
-                /* C) Bit-ratio deviation (acumulativa entre payloads) */
+                /* C) Bit-ratio deviation (cumulative across payloads) */
                 {
                     int total_bits = 0;
                     float bit_ratio, dev;
@@ -929,7 +930,7 @@ void bruteforce_kernel(
                     local_score += dev * dev * (float)(bytes_to_test * 8) * 60.0f;
                 }
 
-                /* D) Consistencia de pares de bytes */
+                /* D) Byte pair consistency */
                 if (bytes_to_test >= 10) {
                     const int pair_offsets[3] = { 1, 3, 9 };
                     for (int pidx = 0; pidx < 3; ++pidx) {
@@ -958,7 +959,7 @@ void bruteforce_kernel(
                     }
                 }
 
-                /* E) Penalización por runs largos (basura patente) */
+                /* E) Penalty for long runs (obvious garbage) */
                 {
                     int max_run = 1, run = 1;
                     for (int bx = 1; bx < bytes_to_test; ++bx) {
@@ -992,7 +993,7 @@ void bruteforce_kernel(
 
         } /* end else (legacy path) */
 
-        /* Actualización atómica del mejor score (float CAS, sin FP64) */
+        /* Atomic update of best score (float CAS, no FP64) */
         update_best_score_dev(score, current_key, dev_best_score, dev_best_key);
 
         local_keys++;
@@ -1002,7 +1003,7 @@ void bruteforce_kernel(
         }
     }
     
-    // Sumar el remanente de claves locales
+    // Add remaining local keys
     if (local_keys > 0) {
         atomicAdd((unsigned long long int*)dev_keys_tested, (unsigned long long)local_keys);
     }
@@ -1010,7 +1011,7 @@ void bruteforce_kernel(
 
 /*
  * =========================================================================
- * IMPLEMENTACIÓN DEL HOST (CONTROLA LA GPU DESDE WINDOWS/C)
+ * HOST IMPLEMENTATION (CONTROLS THE GPU FROM WINDOWS/C)
  * =========================================================================
  */
 
@@ -1124,7 +1125,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
     if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
     if (payload_limit <= 0) {
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "No hay payloads para CUDA");
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "No payloads for CUDA");
         goto cleanup;
     }
 
@@ -1148,7 +1149,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     if (payload_bytes > 8192) payload_bytes = 8192;
     host_payload_flat = (unsigned char *)malloc(payload_bytes);
     if (host_payload_flat == NULL) {
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "malloc payload_flat fallo");
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "malloc payload_flat failed");
         goto cleanup;
     }
     memset(host_payload_flat, 0, payload_bytes);
@@ -1214,10 +1215,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMemcpyToSymbol(cipher_packs): %s", cudaGetErrorString(cu_err));
         goto cleanup;
     }
-// DOCUMENTACIÓN: burst_pos alignment issue
-// Nota: El kernel asume que el primer payload del .bin corresponde a burst_pos=0 de un superframe.
-// Si el archivo no está alineado, el drop value será incorrecto y la puntuación no será válida.
-// Para máxima robustez, se recomienda validar la alineación en el host y/o añadir un campo burst_pos_start en PayloadItem.
+// DOCUMENTATION: burst_pos alignment issue
+// Note: The kernel assumes the first payload in the .bin corresponds to burst_pos=0 of a superframe.
+// If the file is not aligned, the drop value will be incorrect and the score will not be valid.
+// For maximum robustness, it is recommended to validate alignment on the host and/or add a burst_pos_start field to PayloadItem.
 
     cu_err = cudaMemcpyToSymbol(d_const_mi, host_mi, sizeof(host_mi));
     if (cu_err != cudaSuccess) {
@@ -1235,7 +1236,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         goto cleanup;
     }
 
-    /* Precompute absolute screening thresholds (Cambio 1: hashcat-style early reject) */
+    /* Precompute absolute screening thresholds (Change 1: hashcat-style early reject) */
     {
         float host_abs_floor[MAX_CONST_LINES + 1];
         host_abs_floor[0] = -FLT_MAX;
@@ -1292,6 +1293,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         goto cleanup;
     }
 
+    InterlockedExchange(&engine->cuda_sm_count, prop.multiProcessorCount);
+    InterlockedExchange(&engine->cuda_compute_major, prop.major);
+    InterlockedExchange(&engine->cuda_compute_minor, prop.minor);
+
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
     if (cu_err != cudaSuccess) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaStreamCreate compute: %s", cudaGetErrorString(cu_err));
@@ -1302,9 +1307,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaStreamCreate query: %s", cudaGetErrorString(cu_err));
         goto cleanup;
     }
-    /* Second compute stream for double-buffered dispatch (Cambio 6) */
+    /* Second compute stream for double-buffered dispatch (Change 6) */
     CUDA_CHECK(cudaStreamCreateWithFlags(&compute_stream2, cudaStreamNonBlocking), "cudaStreamCreate compute2");
-    /* Pinned host buffer for truly async D2H transfers (Cambio 5) */
+    /* Pinned host buffer for truly async D2H transfers (Change 5) */
     if (cudaHostAlloc(&h_poll, sizeof(*h_poll), cudaHostAllocDefault) != cudaSuccess) {
         h_poll = NULL;  /* fallback to stack vars in polling loop */
     }
@@ -1477,7 +1482,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     InterlockedExchange(&engine->cuda_stage, 2);
 
-    // Batch chunking (TDR-Safe): ajustado por autotune/cache
+    // Batch chunking (TDR-Safe): adjusted by autotune/cache
     {
         float init_score = -FLT_MAX;
         CUDA_CHECK(cudaMemset(d_keys_tested, 0, sizeof(unsigned long long)), "cudaMemset keys_tested (scan reset)");
@@ -1486,7 +1491,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
     }
 
-    /* === Double-buffer multi-stream dispatch (Cambio 6) + pinned polling (Cambio 5) === */
+    /* === Double-buffer multi-stream dispatch (Change 6) + pinned polling (Change 5) === */
     {
         cudaStream_t streams[2] = { compute_stream, compute_stream2 };
         int active = 0;
@@ -1627,7 +1632,7 @@ cleanup:
 
 #undef CUDA_CHECK
 
-// ==== EXPORTACIONES DE LA API DEL HOST ORIGINAL (bruteforce.h) ====
+// ==== ORIGINAL HOST API EXPORTS (bruteforce.h) ====
 
 void bruteforce_engine_init(BruteforceEngine *engine)
 {
@@ -1641,6 +1646,9 @@ void bruteforce_engine_init(BruteforceEngine *engine)
     engine->cuda_tpb = 0;
     engine->cuda_bpsm = 0;
     engine->cuda_chunk_mult = 0;
+    engine->cuda_sm_count = 0;
+    engine->cuda_compute_major = 0;
+    engine->cuda_compute_minor = 0;
     engine->cuda_last_update_ms = 0;
 }
 
@@ -1669,20 +1677,20 @@ int bruteforce_start(
     size_t err_len)
 {
     if (InterlockedCompareExchange(&engine->running, 0, 0) != 0) {
-        set_error(err, err_len, "Ya hay una busqueda activa");
+        set_error(err, err_len, "A search is already active");
         return 0;
     }
 
     if (cfg->start_key > cfg->end_key) {
-        set_error(err, err_len, "Start key debe ser <= End key");
+        set_error(err, err_len, "Start key must be <= End key");
         return 0;
     }
     if (cfg->end_key > 0xFFFFFFFFFFull) {
-        set_error(err, err_len, "End key excede 40 bits");
+        set_error(err, err_len, "End key exceeds 40 bits");
         return 0;
     }
     if (payloads == NULL || payloads->count == 0) {
-        set_error(err, err_len, "No hay payloads cargados");
+        set_error(err, err_len, "No payloads loaded");
         return 0;
     }
 
@@ -1692,7 +1700,7 @@ int bruteforce_start(
         engine->cuda_active = 0;
         engine->cuda_device_name[0] = '\0';
         snprintf(engine->cuda_error, sizeof(engine->cuda_error),
-                 "CUDA no disponible: %s", cudaGetErrorString(cu_err));
+                 "CUDA not available: %s", cudaGetErrorString(cu_err));
         set_error(err, err_len, "NVIDIA CUDA Error o no hay GPUs compatibles.");
         return 0;
     }
@@ -1746,15 +1754,18 @@ int bruteforce_start(
     InterlockedExchange(&engine->cuda_tpb, 0);
     InterlockedExchange(&engine->cuda_bpsm, 0);
     InterlockedExchange(&engine->cuda_chunk_mult, 0);
+    InterlockedExchange(&engine->cuda_sm_count, 0);
+    InterlockedExchange(&engine->cuda_compute_major, 0);
+    InterlockedExchange(&engine->cuda_compute_minor, 0);
     InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
-    
+
     engine->cuda_error[0] = '\0';
     QueryPerformanceCounter(&engine->qpc_start);
 
     /* Allocate handle array before launching thread so the handle is never lost. */
     engine->thread_handles = (HANDLE *)calloc(1, sizeof(HANDLE));
     if (engine->thread_handles == NULL) {
-        set_error(err, err_len, "Memoria insuficiente para handles");
+        set_error(err, err_len, "Insufficient memory for handles");
         return 0;
     }
 
@@ -1765,7 +1776,7 @@ int bruteforce_start(
         InterlockedExchange(&engine->running, 0);
         free(engine->thread_handles);
         engine->thread_handles = NULL;
-        set_error(err, err_len, "Error creando hilo Launcher CUDA");
+        set_error(err, err_len, "Error creating CUDA Launcher thread");
         return 0;
     }
     engine->thread_handles[0] = (HANDLE)th;

@@ -83,40 +83,41 @@ static void key_to_5bytes(uint64_t key, unsigned char out[5])
 
 /*
  * ==========================================================================
- * Heurística de scoring para DMR Basic Privacy (ARC4 40-bit) — v3
+ * Scoring heuristics for DMR Basic Privacy (ARC4 40-bit) -- v3
  * ==========================================================================
  *
- * PRINCIPIO FUNDAMENTAL:
- * En DMR, los 216 bits del burst están INTERLEAVED (BPTC), por lo que
- * los bytes consecutivos del payload NO corresponden a campos AMBE+2
- * específicos. Por tanto, patrones como "silence frame" (B9E88148) a
- * offsets fijos son INÚTILES.
+ * FUNDAMENTAL PRINCIPLE:
+ * In DMR, the 216 bits of the burst are INTERLEAVED (BPTC), so
+ * consecutive payload bytes do NOT correspond to specific AMBE+2
+ * fields. Therefore, patterns like "silence frame" (B9E88148) at
+ * fixed offsets are USELESS.
  *
- * La ÚNICA señal aprovechable es la estructura INTRA-PAYLOAD:
- * relaciones estadísticas entre posiciones dentro de un mismo payload,
- * que cambian con el keystream mask de cada clave candidata.
+ * The ONLY exploitable signal is the INTRA-PAYLOAD structure:
+ * statistical relationships between positions within the same payload,
+ * which change with the keystream mask of each candidate key.
  *
- * MÉTRICAS que SÍ discriminan:
+ * METRICS that DO discriminate:
  *
- * A) AUTOCORRELACIÓN MULTI-LAG: Hamming distance entre bytes a diferentes
- *    lags (distancias) dentro del payload. Datos estructurados tienden a
- *    tener autocorrelación a ciertos lags; datos random no.
+ * A) MULTI-LAG AUTOCORRELATION: Hamming distance between bytes at different
+ *    lags (distances) within the payload. Structured data tends to
+ *    have autocorrelation at certain lags; random data does not.
  *
- * B) TASA DE TRANSICIONES BIT: Contar cambios 0→1 y 1→0 en el stream
- *    de bits. Datos AMBE interleaved tienen tasas de transición
- *    diferentes al 50% teórico de datos random.
+ * B) BIT TRANSITION RATE: Count 0->1 and 1->0 changes in the bit
+ *    stream. Interleaved AMBE data has transition rates that differ
+ *    from the theoretical 50% of random data.
  *
- * C) BIT RATIO (distribución de unos): Con clave correcta, el plaintext
- *    tiene bit ratio diferente al 50% de datos random.
- *    NOTA: bit ratio PER PAYLOAD sí depende de la clave (la mask XOR
- *    altera qué bits están a 1). Es un señal débil pero acumulativo.
+ * C) BIT RATIO (ones distribution): With the correct key, the plaintext
+ *    has a bit ratio different from the 50% of random data.
+ *    NOTE: bit ratio PER PAYLOAD does depend on the key (the XOR mask
+ *    flips specific bits, changing the popcount). The effect is weak
+ *    but cumulative.
  *
- * MÉTRICAS INÚTILES (eliminadas):
+ * USELESS METRICS (removed):
  *
- * - Silence frame matching: requiere de-interleaving que no hacemos
- * - Cross-payload hamming: matemáticamente invariante al key (RC4)
- * - Per-position byte statistics: invariante (XOR con cte = biyección)
- * - Byte quartile distribution: invariante
+ * - Silence frame matching: requires de-interleaving which we do not perform
+ * - Cross-payload hamming: mathematically invariant to the key (RC4)
+ * - Per-position byte statistics: invariant (XOR with constant = bijection)
+ * - Byte quartile distribution: invariant
  * ==========================================================================
  */
 
@@ -125,7 +126,7 @@ static void key_to_5bytes(uint64_t key, unsigned char out[5])
 #include <intrin.h>
 #endif
 
-/* Popcount portátil para contar bits activos */
+/* Portable popcount for counting set bits */
 static int popcount_byte(unsigned char b)
 {
     int c = 0;
@@ -337,20 +338,20 @@ static double score_candidate(
         rc4_crypt(&rc4, line->data, out, bytes_to_test);
 
         /* ---------------------------------------------------------------
-         * A. AUTOCORRELACIÓN MULTI-LAG
+         * A. MULTI-LAG AUTOCORRELATION
          *
-         * Para cada lag l (1..max_lag), computar la distancia hamming
-         * entre out[0..n-l-1] y out[l..n-1].
+         * For each lag l (1..max_lag), compute the Hamming distance
+         * between out[0..n-l-1] and out[l..n-1].
          *
-         * Con datos estructurados: ciertos lags muestran baja hamming
-         * (estructura periódica del interleaving).
-         * Con datos random: hamming ≈ 50% para TODOS los lags.
+         * With structured data: certain lags show low Hamming distance
+         * (periodic structure from interleaving).
+         * With random data: Hamming ~50% for ALL lags.
          *
-         * Sumamos la desviación cuadrática del hamming respecto al
-         * valor esperado (n_bits/2). Mayor desviación = más estructura.
+         * We sum the squared deviation of the Hamming distance from the
+         * expected value (n_bits/2). Greater deviation = more structure.
          * ---------------------------------------------------------------*/
         {
-            /* Lags de interés: 1-13 (cubren hasta half-payload) */
+            /* Lags of interest: 1-13 (cover up to half-payload) */
             int lag;
             int max_lag = (int)(bytes_to_test / 2);
             if (max_lag > 13) max_lag = 13;
@@ -379,16 +380,16 @@ static double score_candidate(
         }
 
         /* ---------------------------------------------------------------
-         * B. TASA DE TRANSICIONES BIT
+         * B. BIT TRANSITION RATE
          *
-         * Contar el número de transiciones (0→1 o 1→0) en el stream
-         * de bits del payload descifrado.
+         * Count the number of transitions (0->1 or 1->0) in the
+         * decrypted payload bit stream.
          *
-         * Datos random: ~50% de los pares de bits consecutivos son
-         * transiciones (esperado = n_bits - 1) / 2.
-         * Datos AMBE: típicamente diferente (campos con runs de bits).
+         * Random data: ~50% of consecutive bit pairs are transitions
+         * (expected = (n_bits - 1) / 2).
+         * AMBE data: typically different (fields with bit runs).
          *
-         * Una desviación significativa del 50% indica datos estructurados.
+         * A significant deviation from 50% indicates structured data.
          * ---------------------------------------------------------------*/
         {
             int transitions = 0;
@@ -420,17 +421,17 @@ static double score_candidate(
         }
 
         /* ---------------------------------------------------------------
-         * C. BIT RATIO (distribución de unos)
+         * C. BIT RATIO (ones distribution)
          *
-         * Datos cifrados con clave errónea producen ~50% bits a 1.
-         * Con clave correcta, el plaintext (AMBE interleaved) puede
-         * tener un ratio consistentemente > 50% o < 50%.
+         * Data encrypted with the wrong key produces ~50% ones.
+         * With the correct key, the plaintext (interleaved AMBE) may
+         * have a ratio consistently > 50% or < 50%.
          *
-         * NOTA: bit ratio PER PAYLOAD depende del key porque la mask
-         * XOR flipa bits específicos, cambiando el popcount.
-         * El efecto es ACUMULATIVO sobre muchos payloads.
+         * NOTE: bit ratio PER PAYLOAD depends on the key because the
+         * XOR mask flips specific bits, changing the popcount.
+         * The effect is CUMULATIVE across many payloads.
          *
-         * Usamos desviación cuadrática del 50% para mayor sensibilidad.
+         * We use squared deviation from 50% for greater sensitivity.
          * ---------------------------------------------------------------*/
         {
             int total_bits = 0;
@@ -445,12 +446,12 @@ static double score_candidate(
         }
 
         /* ---------------------------------------------------------------
-         * D. CONSISTENCIA DE PARES DE BYTES
+         * D. BYTE PAIR CONSISTENCY
          *
-         * Para datos estructurados, ciertos pares de bytes tienden a
-         * tener relaciones específicas. Calculamos la varianza de los
-         * valores XOR de pares (i, i+offset) para offsets específicos.
-         * Alta varianza en XOR = datos random. Baja varianza = estructura.
+         * For structured data, certain byte pairs tend to have specific
+         * relationships. We compute the variance of XOR values for
+         * pairs (i, i+offset) at specific offsets.
+         * High XOR variance = random data. Low variance = structure.
          * ---------------------------------------------------------------*/
         if (bytes_to_test >= 10) {
             /* Check a few strategic offsets */
@@ -489,12 +490,12 @@ static double score_candidate(
         }
 
         /* ---------------------------------------------------------------
-         * E. PENALIZACIÓN POR BASURA PATENTE
+         * E. OBVIOUS GARBAGE PENALTY
          *
-         * Si el descifrado produce runs muy largos de bytes iguales
-         * o demasiados 0x00/0xFF, es probablemente basura.
-         * Esto actúa como safety net para descartar claves claramente
-         * malas, no como discriminador primario.
+         * If the decryption produces very long runs of identical bytes
+         * or too many 0x00/0xFF, it is probably garbage.
+         * This acts as a safety net to discard clearly bad keys,
+         * not as a primary discriminator.
          * ---------------------------------------------------------------*/
         {
             int max_run = 1, run = 1;
@@ -526,7 +527,7 @@ static unsigned __stdcall worker_proc(void *arg)
     uint64_t local_count = 0;
     double local_best_score = -DBL_MAX;
 
-    // Afinidad de hilo: cada worker se fija a un core lógico distinto si es posible
+    // Thread affinity: pin each worker to a different logical core if possible
     if (ctx->worker_index < 64) {
         SetThreadIdealProcessor(GetCurrentThread(), (DWORD)ctx->worker_index);
     }

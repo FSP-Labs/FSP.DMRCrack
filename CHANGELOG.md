@@ -8,7 +8,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **i18n: status panel, graph, and dialog strings**: Moved all hardcoded Spanish GUI strings
+  to the `Lang` struct (`lang.h` / `lang_en.c`). New fields: `fmt_keys_tested`, `fmt_speed`,
+  `fmt_time`, `fmt_backend`, `fmt_best_candidate`, `fmt_best_score`, `fmt_status`,
+  `fmt_cuda_error`, `fmt_payloads_loaded`, `state_running/paused/stopped`,
+  `graph_keys_title`, `graph_score_title`, `dlg_bin_filter`, `dlg_audio_filter`,
+  `btn_copy_key`, `msg_key_found`, `msg_key_copied`.
+- **Resizable window**: Window can now be resized freely (minimum 940x720). All controls and
+  graphs reposition dynamically via `WM_SIZE` handler.
+- **DPI awareness**: Per-monitor DPI awareness (V2) enabled for crisp rendering on high-DPI displays.
+- **Copy key button**: "Copy" button next to Start/Pause/Stop copies the best candidate key
+  to the clipboard.
+- **Key-found notification**: Taskbar flashes and a system beep sounds when the brute-force
+  search completes with a result.
+- **Payload count indicator**: Shows how many payloads are loaded after demodulation or file load.
+- **Graph grid lines**: Horizontal grid lines at 25%/50%/75% with Y-axis tick labels on both
+  the keys/s and score graphs.
+- **Rounded buttons**: Owner-drawn buttons now use `RoundRect` with 8px corner radius.
+- **G/s speed display**: Speed display now auto-formats to G/s for very high throughput.
+
 ### Changed
+- **Full English translation**: All Spanish comments translated to English in `bruteforce.c`,
+  `bruteforce.cu`, `bruteforce.h`, `test_score_windows.c`, and
+  `tools/extract_encrypted_from_dsdfme.bat`.
 - **Auto-update system replaced with WinSparkle**: Removed the custom WinHTTP + GitHub API
   updater (`updater.c`, 278 lines) which had no integrity verification. Replaced with WinSparkle
   0.9.2 (MIT license), which provides its own UI, EdDSA (Ed25519) signature verification, and
