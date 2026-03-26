@@ -57,6 +57,8 @@
 #define ID_BTN_EXPORT   1014
 #define ID_BTN_COPY_KEY 1015
 #define ID_PAYLOAD_LABEL 1016
+#define ID_BTN_HELP     1017
+#define ID_BTN_LANG     1018
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -103,6 +105,9 @@ typedef struct {
     HWND demod_label;
     HWND btn_copy_key;
     HWND payload_label;
+    HWND btn_help;
+    HWND hwnd_help;
+    HWND btn_lang;
 
     RECT graph_rect;
     RECT score_graph_rect;
@@ -223,10 +228,12 @@ static void layout_controls(int cw, int ch)
     /* CAPTURE section */
     y = 40;
     if (g_app.lbl_audio) MoveWindow(g_app.lbl_audio, 20, y + 2, 70, 20, TRUE);
-    if (g_app.edit_wav) MoveWindow(g_app.edit_wav, 95, y, ctrl_w - 290, 24, TRUE);
-    if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, cw - 235, y, 36, 24, TRUE);
-    if (g_app.btn_demod) MoveWindow(g_app.btn_demod, cw - 190, y, 100, 24, TRUE);
-    if (g_app.btn_export) MoveWindow(g_app.btn_export, cw - 80, y, 60, 24, TRUE);
+    if (g_app.edit_wav) MoveWindow(g_app.edit_wav, 95, y, ctrl_w - 386, 24, TRUE);
+    if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, cw - 323, y, 36, 24, TRUE);
+    if (g_app.btn_demod) MoveWindow(g_app.btn_demod, cw - 279, y, 100, 24, TRUE);
+    if (g_app.btn_export) MoveWindow(g_app.btn_export, cw - 171, y, 60, 24, TRUE);
+    if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 103, y, 55, 24, TRUE);
+    if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 40, y, 36, 24, TRUE);
     y += 28;
     if (g_app.demod_label) MoveWindow(g_app.demod_label, 95, y, ctrl_w - 80, 16, TRUE);
 
@@ -320,6 +327,7 @@ static void update_status_text(void)
     if (stage_v == 1) cuda_stage = "AUTOTUNE";
     else if (stage_v == 2) cuda_stage = "SCANNING";
     else if (stage_v == 3) cuda_stage = "DONE";
+    else if (stage_v == 4) cuda_stage = "DICT";
 
     fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed, sizeof(elapsed));
     fmt_hhmmss(g_app.snapshot.eta_seconds, eta, sizeof(eta));
@@ -660,6 +668,7 @@ static int resolve_tool_path(const char *tool_rel, char *out, size_t out_len)
 {
     char cwd[MAX_PATH], exe_path[MAX_PATH];
     char *slash;
+    /* 1. Try CWD\tools\... */
     if (GetCurrentDirectoryA(MAX_PATH, cwd) > 0) {
         snprintf(out, out_len, "%s\\%s", cwd, tool_rel);
         if (file_exists(out)) return 1;
@@ -668,8 +677,17 @@ static int resolve_tool_path(const char *tool_rel, char *out, size_t out_len)
     slash = strrchr(exe_path, '\\');
     if (!slash) return 0;
     *slash = '\0';
+    /* 2. Try EXE_DIR\tools\... (e.g. bin\tools\) */
     snprintf(out, out_len, "%s\\%s", exe_path, tool_rel);
-    return file_exists(out);
+    if (file_exists(out)) return 1;
+    /* 3. Try EXE_DIR\..\tools\... (exe in bin\, tools in project root) */
+    slash = strrchr(exe_path, '\\');
+    if (slash) {
+        *slash = '\0';
+        snprintf(out, out_len, "%s\\%s", exe_path, tool_rel);
+        if (file_exists(out)) return 1;
+    }
+    return 0;
 }
 
 static int run_process_and_wait(const char *cmdline, DWORD *exit_code)
@@ -1207,6 +1225,160 @@ static void draw_button(DRAWITEMSTRUCT *dis)
     }
 }
 
+/* --- Language persistence (dmrcrack.ini next to the exe) --- */
+static void get_ini_path(char *out, size_t sz)
+{
+    GetModuleFileNameA(NULL, out, (DWORD)sz);
+    char *last = strrchr(out, '\\');
+    if (last) { last[1] = '\0'; strncat_s(out, sz, "dmrcrack.ini", sz - strlen(out) - 1); }
+}
+
+static void lang_save(void)
+{
+    char ini[MAX_PATH];
+    get_ini_path(ini, sizeof(ini));
+    WritePrivateProfileStringA("Settings", "Language",
+        (g_lang_ptr == &g_lang_es) ? "es" : "en", ini);
+}
+
+static void lang_load(void)
+{
+    char ini[MAX_PATH], val[8];
+    get_ini_path(ini, sizeof(ini));
+    GetPrivateProfileStringA("Settings", "Language", "en", val, sizeof(val), ini);
+    g_lang_ptr = (val[0] == 'e' && val[1] == 's') ? &g_lang_es : &g_lang_en;
+}
+
+/* --- Apply current language to all controls --- */
+static void apply_language(void)
+{
+    /* Labels */
+    SetWindowTextA(g_app.lbl_audio,   g_lang.label_audio);
+    SetWindowTextA(g_app.lbl_file,    g_lang.label_file);
+    SetWindowTextA(g_app.lbl_start,   g_lang.label_start_key);
+    SetWindowTextA(g_app.lbl_end,     g_lang.label_end_key);
+    SetWindowTextA(g_app.lbl_threads, g_lang.label_threads);
+    SetWindowTextA(g_app.lbl_samples, g_lang.label_samples);
+    /* Buttons */
+    SetWindowTextA(g_app.btn_demod,    g_lang.btn_demodulate);
+    SetWindowTextA(g_app.btn_export,   g_lang.btn_export);
+    SetWindowTextA(g_app.btn_help,     g_lang.btn_help);
+    SetWindowTextA(g_app.btn_start,    g_lang.btn_start);
+    SetWindowTextA(g_app.btn_stop,     g_lang.btn_stop);
+    SetWindowTextA(g_app.btn_copy_key, g_lang.btn_copy_key);
+    SetWindowTextA(g_app.btn_lang,
+        (g_lang_ptr == &g_lang_es) ? "EN" : "ES");
+    /* Pause/Resume depends on current state */
+    {
+        int paused = InterlockedCompareExchange(&g_app.engine.paused, 0, 0);
+        SetWindowTextA(g_app.btn_pause, paused ? g_lang.btn_resume : g_lang.btn_pause);
+    }
+    /* Section headers and status are redrawn on next tick */
+    InvalidateRect(g_app.hwnd, NULL, TRUE);
+    update_status_text();
+    /* Close help window so it doesn't show stale language text */
+    if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
+        DestroyWindow(g_app.hwnd_help);
+        g_app.hwnd_help = NULL;
+    }
+}
+
+/* --- Help dialog --- */
+#define HELP_CLASS_NAME "FSPDMRHelpWnd"
+
+static LRESULT CALLBACK help_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    switch (msg) {
+    case WM_CREATE:
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        HFONT hfont = CreateFontA(
+            -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+        if (!hfont)
+            hfont = (HFONT)GetStockObject(SYSTEM_FIXED_FONT);
+
+        HWND hedit = CreateWindowExA(0, "EDIT", g_lang.help_content,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+            ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+            0, 0, rc.right, rc.bottom,
+            hwnd, (HMENU)1, GetModuleHandleA(NULL), NULL);
+        SendMessageA(hedit, WM_SETFONT, (WPARAM)hfont, FALSE);
+        /* EM_SETMARGINS for a bit of padding */
+        SendMessageA(hedit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                     MAKELONG(8, 8));
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, (LONG_PTR)hedit);
+        /* Store font in window extra bytes via a second slot isn't available,
+           so tag it on the edit control */
+        SetPropA(hedit, "HelpFont", (HANDLE)hfont);
+        return 0;
+    }
+    case WM_SIZE:
+    {
+        HWND hedit = (HWND)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        if (hedit) MoveWindow(hedit, 0, 0, LOWORD(lparam), HIWORD(lparam), TRUE);
+        return 0;
+    }
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = (HDC)wparam;
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkColor(hdc, CLR_BG);
+        return (LRESULT)g_app.br_bg;
+    }
+    case WM_ERASEBKGND:
+    {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        FillRect((HDC)wparam, &rc, g_app.br_bg);
+        return 1;
+    }
+    case WM_CLOSE:
+    {
+        /* Clean up the font stored on the edit */
+        HWND hedit = (HWND)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        if (hedit) {
+            HFONT hf = (HFONT)GetPropA(hedit, "HelpFont");
+            if (hf) { DeleteObject(hf); RemovePropA(hedit, "HelpFont"); }
+        }
+        g_app.hwnd_help = NULL;
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    }
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+static void show_help_dialog(HWND parent)
+{
+    if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
+        SetForegroundWindow(g_app.hwnd_help);
+        return;
+    }
+
+    RECT pr;
+    GetWindowRect(parent, &pr);
+    int wx = pr.left + 60;
+    int wy = pr.top + 40;
+
+    g_app.hwnd_help = CreateWindowExA(
+        0, HELP_CLASS_NAME, g_lang.help_title,
+        WS_OVERLAPPEDWINDOW,
+        wx, wy, 720, 640,
+        parent, NULL, GetModuleHandleA(NULL), NULL);
+
+    if (!g_app.hwnd_help) return;
+
+    /* Apply dark title bar */
+    { BOOL dark = TRUE;
+      DwmSetWindowAttribute(g_app.hwnd_help, 20, &dark, sizeof(dark)); }
+
+    ShowWindow(g_app.hwnd_help, SW_SHOW);
+    UpdateWindow(g_app.hwnd_help);
+}
+
 /* --- Window procedure --- */
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -1214,6 +1386,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     case WM_CREATE:
     {
         int y;
+        lang_load();
         create_theme_brushes();
         g_app.ui_font = create_ui_font(0, 0);
         g_app.ui_font_bold = create_ui_font(1, 0);
@@ -1242,7 +1415,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             685, y, 100, 24, hwnd, (HMENU)ID_BTN_DEMOD, NULL, NULL);
         g_app.btn_export = CreateWindowA("BUTTON", g_lang.btn_export,
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW,
-            795, y, 60, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
+            730, y, 60, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
+        g_app.btn_help = CreateWindowA("BUTTON", g_lang.btn_help,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            800, y, 55, 24, hwnd, (HMENU)ID_BTN_HELP, NULL, NULL);
+        g_app.btn_lang = CreateWindowA("BUTTON",
+            (g_lang_ptr == &g_lang_es) ? "EN" : "ES",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            900, y, 36, 24, hwnd, (HMENU)ID_BTN_LANG, NULL, NULL);
 
         y += 28;
         g_app.demod_label = CreateWindowA("STATIC", "",
@@ -1396,6 +1576,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case ID_BTN_PAUSE:      on_pause_resume(); return 0;
         case ID_BTN_STOP:       on_stop(); return 0;
         case ID_BTN_COPY_KEY:   copy_key_to_clipboard(hwnd); return 0;
+        case ID_BTN_HELP:       show_help_dialog(hwnd); return 0;
+        case ID_BTN_LANG:
+            g_lang_ptr = (g_lang_ptr == &g_lang_es) ? &g_lang_en : &g_lang_es;
+            lang_save();
+            apply_language();
+            return 0;
         }
         break;
 
@@ -1426,6 +1612,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI_REFRESH);
+        if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
+            DestroyWindow(g_app.hwnd_help);
+            g_app.hwnd_help = NULL;
+        }
         if (g_app.ui_font)         { DeleteObject(g_app.ui_font); g_app.ui_font = NULL; }
         if (g_app.ui_font_bold)    { DeleteObject(g_app.ui_font_bold); g_app.ui_font_bold = NULL; }
         if (g_app.ui_font_section) { DeleteObject(g_app.ui_font_section); g_app.ui_font_section = NULL; }
@@ -1467,9 +1657,18 @@ int run_gui(HINSTANCE instance, int cmd_show)
         return 1;
     }
 
+    /* Register help window class */
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = help_wnd_proc;
+    wc.hInstance = instance;
+    wc.lpszClassName = HELP_CLASS_NAME;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    RegisterClassA(&wc);
+
     g_app.hwnd = CreateWindowExA(
         0, APP_CLASS_NAME, APP_TITLE,
-        WS_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         CW_USEDEFAULT, CW_USEDEFAULT, 940, 720,
         NULL, NULL, instance, NULL);
 

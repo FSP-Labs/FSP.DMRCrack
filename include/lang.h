@@ -113,9 +113,20 @@ typedef struct {
     const char *msg_key_found;         /* "Key found! %s (score: %.1f)"      */
     const char *msg_key_copied;        /* "Key copied to clipboard"           */
 
+    /* ---- Help dialog ---- */
+    const char *btn_help;              /* "Help" (button label)               */
+    const char *help_title;            /* Help window title                   */
+    const char *help_content;          /* Full help text (scrollable)         */
+
 } Lang;
 
-/* Implemented in lang_en.c (or another lang_XX.c). */
-extern const Lang g_lang;
+/* All available language tables. */
+extern const Lang g_lang_en;
+extern const Lang g_lang_es;
+
+/* Active language pointer — switch at runtime to change language.
+ * Use the g_lang macro so all existing g_lang.xxx references work unchanged. */
+extern const Lang *g_lang_ptr;
+#define g_lang (*g_lang_ptr)
 
 #endif /* LANG_H */

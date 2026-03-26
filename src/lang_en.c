@@ -22,7 +22,7 @@
  */
 #include "../include/lang.h"
 
-const Lang g_lang = {
+const Lang g_lang_en = {
     /* ---- Section headers ---- */
     .section_capture    = "CAPTURE",
     .section_bruteforce = "BRUTE FORCE",
@@ -114,5 +114,56 @@ const Lang g_lang = {
     .btn_copy_key   = "Copy",
     .msg_key_found  = "Key found! %s (score: %.1f)",
     .msg_key_copied = "Key copied to clipboard",
+
+    /* ---- Help dialog ---- */
+    .btn_help  = "Help",
+    .help_title = "DMRCrack — Quick-Start Guide",
+    .help_content =
+"STEP 1 — CAPTURE AUDIO WITH SDR#\r\n"
+"=================================\r\n"
+"\r\n"
+"  1. Open SDR# and connect to your SDR device.\r\n"
+"  2. Tune to the DMR channel frequency.\r\n"
+"  3. Set demodulation mode to NFM.\r\n"
+"  4. Set filter bandwidth to 12500 Hz.\r\n"
+"  5. UNCHECK 'Filter Audio' (or 'De-emphasis').\r\n"
+"     DSD-FME needs raw discriminator output without\r\n"
+"     de-emphasis. If this is not disabled, decoding fails.\r\n"
+"  6. Set audio sample rate to 48000 Hz.\r\n"
+"  7. Open the Audio Recorder plugin.\r\n"
+"     Select recording mode 'Audio' (NOT 'Baseband').\r\n"
+"     Baseband records raw IQ which DSD-FME cannot read.\r\n"
+"  8. Record at least 30-60 seconds of encrypted voice.\r\n"
+"     More is better: 60+ payloads recommended.\r\n"
+"  9. Stop recording and note the .wav file path.\r\n"
+"\r\n"
+"  Other SDR programs: use NFM with de-emphasis OFF.\r\n"
+"    SDR++: De-emphasis = NONE.  GQRX: 'No de-emphasis'.\r\n"
+"\r\n"
+"\r\n"
+"STEP 2 — DEMODULATE\r\n"
+"====================\r\n"
+"\r\n"
+"  1. Click 'Browse WAV...' and select the .wav file.\r\n"
+"  2. Click 'Demodulate'.\r\n"
+"  3. Wait until 'N payloads loaded' appears.\r\n"
+"  4. (Optional) Click 'Export' to save the .bin file.\r\n"
+"\r\n"
+"\r\n"
+"STEP 3 — BRUTE-FORCE\r\n"
+"=====================\r\n"
+"\r\n"
+"  1. Set Start = 0000000000, End = FFFFFFFFFF.\r\n"
+"  2. Click 'Start'.\r\n"
+"  3. When the Best Score spikes (Z > 7), the key is found.\r\n"
+"  4. Click 'Copy' to copy the key to the clipboard.\r\n"
+"\r\n"
+"\r\n"
+"NOTES\r\n"
+"=====\r\n"
+"\r\n"
+"  - NVIDIA GPU recommended. CPU fallback is much slower.\r\n"
+"  - Minimum 6 payloads needed, 60+ recommended.\r\n"
+"  - WAV must be mono, 48000 Hz, 16-bit PCM.\r\n",
 
 };
