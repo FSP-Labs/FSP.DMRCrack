@@ -143,9 +143,34 @@ __device__ __forceinline__ void rc4_ksa9_dev(RC4_CTX_DEV *ctx, const unsigned ch
     }
 }
 
+/* Specialized KSA for 5-byte key: eliminates the modulo branch in rc4_init_dev_len.
+ * 51 full rounds of 5 iterations = 255 bytes, then 1 remainder = 256 total. */
+__device__ __forceinline__ void rc4_ksa5_dev(RC4_CTX_DEV *ctx, const unsigned char key5[5])
+{
+    #pragma unroll
+    for (int i = 0; i < 256; i++) ctx->S[i] = (unsigned char)i;
+    int j = 0;
+    ctx->i = 0;
+    ctx->j = 0;
+
+    #pragma unroll 8
+    for (int round = 0; round < 51; ++round) {
+        int base = round * 5;
+        #pragma unroll
+        for (int k = 0; k < 5; ++k) {
+            int idx = base + k;
+            j = (j + ctx->S[idx] + key5[k]) & 0xFF;
+            unsigned char t = ctx->S[idx]; ctx->S[idx] = ctx->S[j]; ctx->S[j] = t;
+        }
+    }
+    /* Remaining byte: index 255 (= 51*5), cycles back to key5[0] */
+    j = (j + ctx->S[255] + key5[0]) & 0xFF;
+    { unsigned char t = ctx->S[255]; ctx->S[255] = ctx->S[j]; ctx->S[j] = t; }
+}
+
 __device__ __forceinline__ void rc4_init_dev(RC4_CTX_DEV *ctx, const unsigned char *key)
 {
-    rc4_init_dev_len(ctx, key, 5);
+    rc4_ksa5_dev(ctx, key);
 }
 
 __device__ __forceinline__ void rc4_crypt_dev(RC4_CTX_DEV *ctx, const unsigned char *in, unsigned char *out, int len)
@@ -184,6 +209,9 @@ __device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
     ctx->j = j;
 }
 
+/* Process 7 bytes of RC4 keystream but only output the first 3.
+ * Split into two separate loops to eliminate the inner branch and avoid
+ * 4 unnecessary S-box reads for the trailing bytes that are discarded. */
 __device__ __forceinline__ void rc4_crypt_first3_skip4_dev(
     RC4_CTX_DEV *ctx,
     const unsigned char in7[7],
@@ -192,18 +220,25 @@ __device__ __forceinline__ void rc4_crypt_first3_skip4_dev(
     unsigned char i = ctx->i;
     unsigned char j = ctx->j;
 
+    /* First 3 bytes: decrypt and write output */
     #pragma unroll
-    for (int k = 0; k < 7; ++k) {
+    for (int k = 0; k < 3; ++k) {
         i = (i + 1) & 0xFF;
         j = (j + ctx->S[i]) & 0xFF;
         unsigned char t = ctx->S[i];
         ctx->S[i] = ctx->S[j];
         ctx->S[j] = t;
+        out3[k] = in7[k] ^ ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];
+    }
 
-        unsigned char K = ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];
-        if (k < 3) {
-            out3[k] = in7[k] ^ K;
-        }
+    /* Last 4 bytes: advance state only — no keystream read needed */
+    #pragma unroll
+    for (int k = 3; k < 7; ++k) {
+        i = (i + 1) & 0xFF;
+        j = (j + ctx->S[i]) & 0xFF;
+        unsigned char t = ctx->S[i];
+        ctx->S[i] = ctx->S[j];
+        ctx->S[j] = t;
     }
 
     ctx->i = i;
@@ -578,6 +613,20 @@ void bruteforce_kernel_strict(
         float total_score = 0.0f;
         int processed_bursts = 0;
 
+        /* Bit-frequency accumulators packed as uint16 pairs in uint32 registers.
+         * bcnt_p[k] = (count[2k+1] << 16) | count[2k], max count = MAX_CONST_LINES = 256 < 65535.
+         * 12 uint32 registers vs 24 int previously — saves 12 registers toward the
+         * __launch_bounds__(256,2) target of ≤128 regs/thread. */
+        unsigned int bcnt_p[12];
+        #pragma unroll
+        for (int k = 0; k < 12; k++) bcnt_p[k] = 0u;
+
+/* Helpers: b in [0,23], two uint16 counters packed per uint32.
+ * BCNT_ADD: adds bit (0 or 1) to counter b — branchless.
+ * BCNT_GET: extracts counter b as float. */
+#define BCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
+#define BCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
+
         /* Unified loop: single pass through all superframes, no redundant prefilter */
         for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
             uint32_t line_mi = global_mi;
@@ -611,6 +660,14 @@ void bruteforce_kernel_strict(
                 total_score += (float)(48 - h01 - h12);
                 processed_bursts++;
 
+                /* Accumulate bit-frequency from sf=0 (p0 = first 3 decrypted bytes = C0+C1) */
+                #pragma unroll
+                for (int b = 0; b < 8; b++) BCNT_ADD(b,    (p0[0] >> (7-b)) & 1);
+                #pragma unroll
+                for (int b = 0; b < 8; b++) BCNT_ADD(8+b,  (p0[1] >> (7-b)) & 1);
+                #pragma unroll
+                for (int b = 0; b < 8; b++) BCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
+
                 /* Per-burst absolute pruning: reject wrong keys as early as possible */
                 if (enable_prune && processed_bursts >= 3 &&
                     total_score < d_abs_floor[processed_bursts]) {
@@ -626,11 +683,42 @@ void bruteforce_kernel_strict(
                     break;
                 }
             }
+
+            /* Chi²-floor pruning at superframe boundary.
+             * E[chi²|wrong] = 6n, 3σ floor = 6n − 3·sqrt(48n).
+             * Correct key: chi²/n ≈ 212 — never triggers this floor. */
+            if (enable_prune && processed_bursts >= 12) {
+                float half_n = (float)processed_bursts * 0.5f;
+                float chi2_mid = 0.0f;
+                #pragma unroll
+                for (int b = 0; b < 24; b++) {
+                    float dev = BCNT_GET(b) - half_n;
+                    chi2_mid += dev * dev;
+                }
+                float chi2_floor = 6.0f * (float)processed_bursts
+                                 - 3.0f * __fsqrt_rn(48.0f * (float)processed_bursts);
+                if (chi2_mid < chi2_floor) goto next_key;
+            }
         }
 
         if (processed_bursts == payload_count) {
+            /* Add bit-frequency chi-squared component.
+             * Wrong key: E[chi2/n] ≈ 6. Correct key: chi2/n ≈ 212 (Z≈335 with 126 payloads). */
+            if (processed_bursts >= 6) {
+                float half_n = (float)processed_bursts * 0.5f;
+                float chi2 = 0.0f;
+                #pragma unroll
+                for (int b = 0; b < 24; b++) {
+                    float dev = BCNT_GET(b) - half_n;
+                    chi2 += dev * dev;
+                }
+                total_score += chi2 / (float)processed_bursts;
+            }
             update_best_score_dev(total_score, current_key, dev_best_score, dev_best_key);
         }
+
+#undef BCNT_INC
+#undef BCNT_GET
 
         next_key:
         local_keys++;
@@ -680,32 +768,33 @@ void bruteforce_kernel(
             float total_score = 0.0f;
             int processed_bursts = 0;
             int pruned = 0;
+            /* Bit-frequency accumulators (Mejora.md §8.1) */
+            int bcnt[24];
+            #pragma unroll
+            for (int b = 0; b < 24; b++) bcnt[b] = 0;
+            int n_freq = 0;
+
             // Process in groups of 6 bursts (superframe)
             for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
-                // Validate all bursts in the superframe share the same MI
                 uint32_t line_mi = global_mi;
                 if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u)) {
                     line_mi = d_const_mi[sf_base];
                 }
-                // Build KMI9 key = key5 || MI[4]
                 unsigned char kmi9[9];
                 compose_kmi9_dev(key, line_mi, kmi9);
                 RC4_CTX_DEV rc4;
-                rc4_init_dev_len(&rc4, kmi9, 9);
+                rc4_ksa9_dev(&rc4, kmi9);
                 rc4_discard_dev(&rc4, 256);
-                // Process the 6 bursts of the superframe
+
                 for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                     int p = sf_base + burst_pos;
                     if (p >= payload_count) break;
                     const unsigned char *cipher_packs = d_const_cipher_packs + (p * 21);
-                    // RC4 stream is already at the correct position
-                    // Decrypt only bytes needed for scoring (3 per sub-frame),
-                    // still advancing 7 bytes of keystream per sub-frame.
                     unsigned char p0[3], p1[3], p2[3];
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 0,  p0);
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 7,  p1);
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 14, p2);
-                    // Score: inter-frame Hamming on first 24 bits (C0+C1)
+
                     int h01 = __popc((unsigned int)(p0[0] ^ p1[0]))
                             + __popc((unsigned int)(p0[1] ^ p1[1]))
                             + __popc((unsigned int)(p0[2] ^ p1[2]));
@@ -715,8 +804,15 @@ void bruteforce_kernel(
                     total_score += (float)(48 - h01 - h12);
                     processed_bursts++;
 
-                    // Early-prune: even with maximum possible remaining (48/burst),
-                    // cannot exceed current global best.
+                    /* Accumulate bit-frequency from sf=0 */
+                    #pragma unroll
+                    for (int b = 0; b < 8; b++) bcnt[b]    += (p0[0] >> (7-b)) & 1;
+                    #pragma unroll
+                    for (int b = 0; b < 8; b++) bcnt[8+b]  += (p0[1] >> (7-b)) & 1;
+                    #pragma unroll
+                    for (int b = 0; b < 8; b++) bcnt[16+b] += (p0[2] >> (7-b)) & 1;
+                    n_freq++;
+
                     if (enable_prune && ((processed_bursts & 0x1) == 0)) {
                         float best_now = __ldg((const float*)dev_best_score);
                         float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
@@ -727,6 +823,31 @@ void bruteforce_kernel(
                     }
                 }
                 if (pruned) break;
+
+                /* Chi²-floor at superframe boundary (same logic as strict kernel) */
+                if (enable_prune && n_freq >= 12) {
+                    float half_n = (float)n_freq * 0.5f;
+                    float chi2_mid = 0.0f;
+                    #pragma unroll
+                    for (int b = 0; b < 24; b++) {
+                        float dev = (float)bcnt[b] - half_n;
+                        chi2_mid += dev * dev;
+                    }
+                    float chi2_floor = 6.0f * (float)n_freq
+                                     - 3.0f * __fsqrt_rn(48.0f * (float)n_freq);
+                    if (chi2_mid < chi2_floor) { pruned = 1; break; }
+                }
+            }
+
+            if (!pruned && n_freq >= 6) {
+                float half_n = (float)n_freq * 0.5f;
+                float chi2 = 0.0f;
+                #pragma unroll
+                for (int b = 0; b < 24; b++) {
+                    float dev = (float)bcnt[b] - half_n;
+                    chi2 += dev * dev;
+                }
+                total_score += chi2 / (float)n_freq;
             }
             score = pruned ? -3.402823e38f : total_score;
         }
@@ -975,6 +1096,42 @@ void bruteforce_kernel(
                         local_score -= (float)(max_run - 5) * 50.0f;
                     }
                 }
+
+                /* F) Nibble entropy (valid AMBE ~3.0-3.8 bits/nibble; random ~4.0) */
+                {
+                    int nhist[16];
+                    #pragma unroll
+                    for (int ni = 0; ni < 16; ni++) nhist[ni] = 0;
+                    for (int bx = 0; bx < bytes_to_test; ++bx) {
+                        nhist[out[bx] & 0x0F]++;
+                        nhist[(out[bx] >> 4) & 0x0F]++;
+                    }
+                    {
+                        float entropy = 0.0f;
+                        float inv_total = 1.0f / (float)(bytes_to_test * 2);
+                        #pragma unroll
+                        for (int ni = 0; ni < 16; ni++) {
+                            if (nhist[ni] > 0) {
+                                float p = (float)nhist[ni] * inv_total;
+                                entropy -= p * __log2f(p);
+                            }
+                        }
+                        /* Reward entropy below max (4.0): bonus = (4.0 - entropy) * 30 */
+                        float bonus = 4.0f - entropy;
+                        if (bonus > 0.0f) local_score += bonus * 30.0f;
+                    }
+                }
+
+                /* G) Silence frame bonus (many 0x00/0xFF bytes → valid AMBE silence) */
+                {
+                    int silence_count = 0;
+                    for (int bx = 0; bx < bytes_to_test; ++bx) {
+                        if (out[bx] == 0x00 || out[bx] == 0xFF) silence_count++;
+                    }
+                    if (silence_count > bytes_to_test / 2) {
+                        local_score += (float)silence_count * 5.0f;
+                    }
+                }
             }
 
                 mode_score += local_score;
@@ -1078,6 +1235,9 @@ static void save_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode
     fclose(fp);
 }
 
+/* Forward declaration — defined after scoring helpers, called from cuda_launcher_thread */
+static void run_dictionary_phase(BruteforceEngine *engine);
+
 /* Consistent CUDA error checking macro used throughout cuda_launcher_thread.
  * On failure: records message in engine->cuda_error and jumps to cleanup. */
 #define CUDA_CHECK(call, msg) do { \
@@ -1122,6 +1282,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     InterlockedExchange(&engine->cuda_stage, 0);
     InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+
+    /* Dictionary phase: test common/default keys before GPU scan */
+    run_dictionary_phase(engine);
+    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) goto cleanup;
 
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
     if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
@@ -1242,11 +1406,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         float host_abs_floor[MAX_CONST_LINES + 1];
         host_abs_floor[0] = -FLT_MAX;
         for (int k = 1; k <= payload_limit; ++k) {
-            /* Wrong key: mean=24*k, sigma=3.46*sqrt(k)
-             * Correct key: mean~38.7*k
-             * Floor at midpoint(31*k) - 2*sigma: rejects 99.8% of wrong keys after 6 bursts */
+            /* Wrong key:   mean=24*k,  sigma≈3.46*sqrt(k)
+             * Correct key: mean≈44*k  (h01≈2, h12≈2 → score≈44 per burst)
+             * Floor at 33*k - 2*sigma: rejects ~99.9997% of wrong keys at k=6.
+             * Margin to correct-key mean: +11 per burst → safe from false negatives. */
             float sigma_k = 3.46f * sqrtf((float)k);
-            host_abs_floor[k] = 31.0f * (float)k - 2.0f * sigma_k;
+            host_abs_floor[k] = 33.0f * (float)k - 2.0f * sigma_k;
         }
         for (int k = payload_limit + 1; k <= MAX_CONST_LINES; ++k) {
             host_abs_floor[k] = -FLT_MAX;
@@ -1633,6 +1798,90 @@ cleanup:
 
 #undef CUDA_CHECK
 
+// ==== CPU FALLBACK WORKER (used when no CUDA GPU is available) ====
+
+typedef struct {
+    BruteforceEngine *engine;
+    uint64_t start_key;
+    uint64_t end_key;
+    int worker_index;
+} CpuWorkerCtx;
+
+static void key_to_5bytes_cpu(uint64_t key, unsigned char out[5])
+{
+    out[0] = (unsigned char)((key >> 32) & 0xFFu);
+    out[1] = (unsigned char)((key >> 24) & 0xFFu);
+    out[2] = (unsigned char)((key >> 16) & 0xFFu);
+    out[3] = (unsigned char)((key >> 8) & 0xFFu);
+    out[4] = (unsigned char)(key & 0xFFu);
+}
+
+/* Forward declaration — defined later, after scoring helpers */
+static double score_candidate_host(
+    const PayloadSet *payloads, int sample_lines,
+    int sample_bytes, const unsigned char key[5]);
+
+static unsigned __stdcall cpu_worker_proc(void *arg)
+{
+    CpuWorkerCtx *ctx = (CpuWorkerCtx *)arg;
+    BruteforceEngine *engine = ctx->engine;
+    uint64_t k;
+    uint64_t local_count = 0;
+    double local_best_score = -DBL_MAX;
+
+    if (ctx->worker_index < 64) {
+        SetThreadIdealProcessor(GetCurrentThread(), (DWORD)ctx->worker_index);
+    }
+
+    for (k = ctx->start_key; k <= ctx->end_key; ++k) {
+        unsigned char key_bytes[5];
+        double score;
+
+        if ((local_count & 0xFFFu) == 0) {
+            if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+            if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
+                WaitForSingleObject(engine->pause_event, INFINITE);
+                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+            }
+        }
+
+        key_to_5bytes_cpu(k, key_bytes);
+        score = score_candidate_host(engine->payloads, engine->cfg.sample_lines,
+                                     engine->cfg.sample_bytes, key_bytes);
+
+        if (score > local_best_score) {
+            local_best_score = score;
+            EnterCriticalSection(&engine->lock);
+            if (score > engine->best_score) {
+                engine->best_score = score;
+                engine->best_key = k;
+            }
+            LeaveCriticalSection(&engine->lock);
+        }
+
+        local_count++;
+        if ((local_count & 0x3FFu) == 0) {
+            InterlockedAdd64(&engine->keys_tested, 1024);
+        }
+
+        if (k == ctx->end_key) break;
+    }
+
+    if ((local_count & 0x3FFu) != 0) {
+        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & 0x3FFu));
+    }
+
+    if (InterlockedIncrement(&engine->finished_threads) == engine->cfg.thread_count) {
+        if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
+            InterlockedExchange(&engine->search_completed, 1);
+        }
+        InterlockedExchange(&engine->running, 0);
+        SetEvent(engine->pause_event);
+    }
+
+    return 0;
+}
+
 // ==== ORIGINAL HOST API EXPORTS (bruteforce.h) ====
 
 void bruteforce_engine_init(BruteforceEngine *engine)
@@ -1698,12 +1947,92 @@ int bruteforce_start(
     int deviceCount = 0;
     cudaError_t cu_err = cudaGetDeviceCount(&deviceCount);
     if (cu_err != cudaSuccess || deviceCount == 0) {
+        /* No CUDA GPU: fall back to CPU multi-threaded search */
         engine->cuda_active = 0;
         engine->cuda_device_name[0] = '\0';
         snprintf(engine->cuda_error, sizeof(engine->cuda_error),
-                 "CUDA not available: %s", cudaGetErrorString(cu_err));
-        set_error(err, err_len, "NVIDIA CUDA Error o no hay GPUs compatibles.");
-        return 0;
+                 "CUDA not available (%s) -- running on CPU",
+                 cudaGetErrorString(cu_err));
+
+        {
+            int t;
+            uintptr_t th;
+            uint64_t total, chunk, rem, start;
+            int n_threads = cfg->thread_count;
+            if (n_threads <= 0 || n_threads > 64) n_threads = 1;
+
+            /* Initialize engine config and payloads (normally done later in GPU path) */
+            engine->cfg = *cfg;
+            engine->payloads = payloads;
+            if (engine->cfg.sample_bytes <= 0) engine->cfg.sample_bytes = 33;
+            if (engine->cfg.sample_lines <= 0 || (size_t)engine->cfg.sample_lines > payloads->count)
+                engine->cfg.sample_lines = (int)payloads->count;
+
+            /* Create pause event */
+            if (engine->pause_event != NULL) { CloseHandle(engine->pause_event); }
+            engine->pause_event = CreateEventA(NULL, TRUE, TRUE, NULL);
+            if (engine->pause_event == NULL) {
+                set_error(err, err_len, "Could not create pause event");
+                return 0;
+            }
+
+            engine->thread_handles = (HANDLE *)calloc((size_t)n_threads, sizeof(HANDLE));
+            engine->workers = calloc((size_t)n_threads, sizeof(CpuWorkerCtx));
+            if (engine->thread_handles == NULL || engine->workers == NULL) {
+                free(engine->thread_handles); engine->thread_handles = NULL;
+                free(engine->workers);        engine->workers = NULL;
+                set_error(err, err_len, "Out of memory allocating CPU worker threads");
+                return 0;
+            }
+            CpuWorkerCtx *workers = (CpuWorkerCtx *)engine->workers;
+
+            total = (cfg->end_key - cfg->start_key) + 1ull;
+            if ((uint64_t)n_threads > total) n_threads = (int)total;
+            engine->cfg.thread_count = n_threads;
+            chunk = total / (uint64_t)n_threads;
+            rem   = total % (uint64_t)n_threads;
+            start = cfg->start_key;
+
+            InterlockedExchange64(&engine->keys_tested, 0);
+            InterlockedExchange(&engine->stop_requested, 0);
+            InterlockedExchange(&engine->paused, 0);
+            InterlockedExchange(&engine->finished_threads, 0);
+            InterlockedExchange(&engine->search_completed, 0);
+            engine->best_key = cfg->start_key;
+            engine->best_score = -DBL_MAX;
+            QueryPerformanceCounter(&engine->qpc_start);
+            InterlockedExchange(&engine->running, 1);
+
+            /* Dictionary phase: test common/default keys before CPU scan */
+            run_dictionary_phase(engine);
+
+            for (t = 0; t < n_threads; ++t) {
+                uint64_t this_count = chunk + ((uint64_t)t < rem ? 1ull : 0ull);
+                workers[t].engine       = engine;
+                workers[t].start_key    = start;
+                workers[t].end_key      = start + this_count - 1ull;
+                workers[t].worker_index = t;
+                start += this_count;
+
+                th = _beginthreadex(NULL, 0, cpu_worker_proc, &workers[t], 0, NULL);
+                if (th == 0) {
+                    int j;
+                    InterlockedExchange(&engine->running, 0);
+                    InterlockedExchange(&engine->stop_requested, 1);
+                    SetEvent(engine->pause_event);
+                    for (j = 0; j < t; ++j) {
+                        WaitForSingleObject(engine->thread_handles[j], INFINITE);
+                        CloseHandle(engine->thread_handles[j]);
+                    }
+                    free(engine->thread_handles); engine->thread_handles = NULL;
+                    free(engine->workers);        engine->workers = NULL;
+                    set_error(err, err_len, "Error creating CPU brute-force threads");
+                    return 0;
+                }
+                engine->thread_handles[t] = (HANDLE)th;
+            }
+        }
+        return 1;
     }
 
     {
@@ -1810,8 +2139,21 @@ void bruteforce_stop(BruteforceEngine *engine)
     InterlockedExchange(&engine->paused, 0);
     SetEvent(engine->pause_event);
 
-    WaitForSingleObject(engine->thread_handles[0], INFINITE);
-    CloseHandle(engine->thread_handles[0]);
+    if (engine->workers != NULL) {
+        /* CPU fallback mode: wait on all worker threads */
+        int t;
+        for (t = 0; t < engine->cfg.thread_count; ++t) {
+            WaitForSingleObject(engine->thread_handles[t], INFINITE);
+            CloseHandle(engine->thread_handles[t]);
+        }
+        free(engine->workers);
+        engine->workers = NULL;
+    } else {
+        /* GPU mode: single CUDA launcher thread */
+        WaitForSingleObject(engine->thread_handles[0], INFINITE);
+        CloseHandle(engine->thread_handles[0]);
+    }
+
     free(engine->thread_handles);
     engine->thread_handles = NULL;
 
@@ -2086,12 +2428,17 @@ static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t
 /*
  * Host-side correct scoring pipeline (mirrors score_burst_correct_dev).
  * Used by bruteforce_test_score() and CPU fallback.
+ *
+ * out_sf0_bits24: if non-NULL, receives the 24 decrypted AMBE bits (C0+C1)
+ * from sub-frame 0. Used by score_candidate_host for bit-frequency chi² scoring
+ * (Mejora.md §8.1 / §9.2 — Bit-frequency primary metric, Z≈335 with 126 payloads).
  */
 static double score_burst_correct_host(
     const unsigned char *payload33,
     const unsigned char key5[5],
     uint32_t mi,
-    int burst_pos)
+    int burst_pos,
+    unsigned char out_sf0_bits24[24])   /* nullable */
 {
     unsigned char kmi9[9];
     kmi9[0] = key5[0]; kmi9[1] = key5[1]; kmi9[2] = key5[2];
@@ -2163,6 +2510,9 @@ static double score_burst_correct_host(
         h12 += dec24[1][i] ^ dec24[2][i];
     }
 
+    if (out_sf0_bits24 != NULL)
+        memcpy(out_sf0_bits24, dec24[0], 24);
+
     return (double)(48 - h01 - h12);
 }
 
@@ -2197,16 +2547,41 @@ static double score_candidate_host(
         }
     }
 
-    /* Correct pipeline for mode_policy >= 2 */
+    /* Correct pipeline for mode_policy >= 2.
+     * Dual metric (Mejora.md §8.1):
+     *   1. Inter-frame Hamming on C0+C1 (24 bits), Z≈38 with 126 payloads.
+     *   2. Bit-frequency chi-squared across all frames, Z≈335 with 126 payloads.
+     * Both are computed in a single pass through the payloads. */
     if (mode_policy >= 2) {
+        long bit_counts[24];
+        int n_freq = 0, b;
+        memset(bit_counts, 0, sizeof(bit_counts));
+
         for (size_t p = 0; p < line_count; ++p) {
             const PayloadLine *line = &payloads->items[p];
             uint32_t mi = line->has_mi ? line->mi : payloads->global_mi;
             int burst_pos = (int)(p % 6);
             if (line->len >= 33) {
-                score += score_burst_correct_host(line->data, key, mi, burst_pos);
+                unsigned char sf0_bits[24];
+                score += score_burst_correct_host(line->data, key, mi, burst_pos, sf0_bits);
+                for (b = 0; b < 24; b++) bit_counts[b] += sf0_bits[b];
+                n_freq++;
             }
         }
+
+        /* Bit-frequency chi-squared: sum_i (count_i - N/2)^2 / N.
+         * Wrong key:   E[result] ≈ 6  (uniform distribution, 24 * N/4 / N).
+         * Correct key: result >> 6     (non-uniform speech bit distribution). */
+        if (n_freq >= 6) {
+            double half_n = (double)n_freq * 0.5;
+            double chi2 = 0.0;
+            for (b = 0; b < 24; b++) {
+                double dev = (double)bit_counts[b] - half_n;
+                chi2 += dev * dev;
+            }
+            score += chi2 / (double)n_freq;
+        }
+
         return score;
     }
 
@@ -2298,11 +2673,13 @@ static double score_candidate_host(
                 }
 
                 if (line->has_mi) line_mi = line->mi;
-                else if (!infer_line_mi_host(payloads, (int)line_idx, &line_mi)) line_mi = payloads->global_mi;
+                else if (!infer_line_mi_host(payloads, (int)line_idx, &line_mi)) {
+                    /* Use LFSR-tracked MI when available (use_mi_lfsr mode), else fall back to global */
+                    line_mi = (use_mi_lfsr && running_mi != 0u) ? running_mi : payloads->global_mi;
+                }
 
                 if (use_mi_lfsr) {
-                    if (line->has_mi) running_mi = line_mi;
-                    else if (line_mi != 0u) running_mi = line_mi;
+                    running_mi = line_mi;
                 }
 
                 if (mi_offset != 0 && line_mi != 0u) {
@@ -2465,4 +2842,160 @@ double bruteforce_test_score(
     const unsigned char key[5])
 {
     return score_candidate_host(payloads, sample_lines, sample_bytes, key);
+}
+
+/*
+ * =========================================================================
+ * DICTIONARY ATTACK PHASE (Level 1 & 2 from improvement roadmap)
+ *
+ * Tests a curated set of common/default 40-bit ARC4 keys before the main
+ * GPU/CPU brute-force scan. Uses the same score_candidate_host() pipeline.
+ * Sets cuda_stage=4 ("DICT") in the GUI while running.
+ *
+ * Key selection rationale:
+ *   Level 1: all-same-nibble (factory resets), trivial incrementing patterns
+ *   Level 2: common installer defaults, alternating patterns, magic numbers
+ *
+ * Each key is a uint64_t ≤ 0xFFFFFFFFFF (40 bits = 5 bytes = 10 hex digits).
+ * =========================================================================
+ */
+static const uint64_t s_dict_keys[] = {
+    /* --- Level 1: All-same-nibble (factory reset defaults) --- */
+    0x0000000000ULL,  /* 0000000000 */
+    0x1111111111ULL,  /* 1111111111 */
+    0x2222222222ULL,  /* 2222222222 */
+    0x3333333333ULL,  /* 3333333333 */
+    0x4444444444ULL,  /* 4444444444 */
+    0x5555555555ULL,  /* 5555555555 */
+    0x6666666666ULL,  /* 6666666666 */
+    0x7777777777ULL,  /* 7777777777 */
+    0x8888888888ULL,  /* 8888888888 */
+    0x9999999999ULL,  /* 9999999999 */
+    0xAAAAAAAAAAULL,  /* AAAAAAAAAA */
+    0xBBBBBBBBBBULL,  /* BBBBBBBBBB */
+    0xCCCCCCCCCCULL,  /* CCCCCCCCCC */
+    0xDDDDDDDDDDULL,  /* DDDDDDDDDD */
+    0xEEEEEEEEEEULL,  /* EEEEEEEEEE */
+    0xFFFFFFFFFFULL,  /* FFFFFFFFFF */
+
+    /* --- Level 1: Sequential and near-trivial --- */
+    0x0123456789ULL,  /* 0123456789 */
+    0x9876543210ULL,  /* 9876543210 */
+    0x1234567890ULL,  /* 1234567890 */
+    0x0987654321ULL,  /* 0987654321 */
+    0xFEDCBA9876ULL,  /* FEDCBA9876 */
+    0x0000000001ULL,  /* 0000000001 */
+    0xFFFFFFFFFEULL,  /* FFFFFFFFE  */
+    0x0000000010ULL,  /* 0000000010 */
+    0x0000000100ULL,  /* 0000000100 */
+    0x0000001000ULL,  /* 0000001000 */
+    0x0000010000ULL,  /* 0000010000 */
+    0x0001000000ULL,  /* 0001000000 */
+
+    /* --- Level 2: Common installer patterns --- */
+    0x0102030405ULL,  /* 0102030405 */
+    0x0504030201ULL,  /* 0504030201 */
+    0x1122334455ULL,  /* 1122334455 */
+    0x5544332211ULL,  /* 5544332211 */
+    0xAABBCCDDEEULL,  /* AABBCCDDEE */
+    0xEEDDCCBBAAULL,  /* EEDDCCBBAA */
+    0x1234ABCDEFULL,  /* 1234ABCDEF */
+    0xABCDEF1234ULL,  /* ABCDEF1234 */
+    0xABCDE12345ULL,  /* ABCDE12345 */
+    0x6789ABCDEFULL,  /* 6789ABCDEF */
+    0xABCDEF0123ULL,  /* ABCDEF0123 */
+
+    /* --- Level 2: Alternating / XOR patterns --- */
+    0xA5A5A5A5A5ULL,  /* A5A5A5A5A5 */
+    0x5A5A5A5A5AULL,  /* 5A5A5A5A5A */
+    0x0F0F0F0F0FULL,  /* 0F0F0F0F0F */
+    0xF0F0F0F0F0ULL,  /* F0F0F0F0F0 */
+    0xABABABABABULL,  /* ABABABABAB */
+    0xBABABABABAULL,  /* BABABABABA */
+    0x0A0A0A0A0AULL,  /* 0A0A0A0A0A */
+    0xA0A0A0A0A0ULL,  /* A0A0A0A0A0 */
+
+    /* --- Level 2: Common magic numbers (Motorola/radio defaults) --- */
+    0xDEADBEEF00ULL,  /* DEADBEEF00 */
+    0xCAFEBABE00ULL,  /* CAFEBABE00 */
+    0xDEADC0DE00ULL,  /* DEADC0DE00 */
+    0xBAADF00D00ULL,  /* BAADF00D00 */
+    0x0000FFFFFFULL,  /* 0000FFFFFF */
+    0xFFFFFF0000ULL,  /* FFFFFF0000 */
+    0xFF00FF00FFULL,  /* FF00FF00FF */
+    0x00FF00FF00ULL,  /* 00FF00FF00 */
+
+    /* --- Level 3: Radio freq as 10-digit hex (decimal kHz padded with zeros) --- */
+    0x0000145500ULL,  /* 145.500 MHz VHF */
+    0x0000146000ULL,  /* 146.000 MHz VHF */
+    0x0000146500ULL,  /* 146.500 MHz VHF */
+    0x0000147000ULL,  /* 147.000 MHz VHF */
+    0x0000155000ULL,  /* 155.000 MHz VHF */
+    0x0000160000ULL,  /* 160.000 MHz VHF */
+    0x0000438000ULL,  /* 438.000 MHz UHF */
+    0x0000440000ULL,  /* 440.000 MHz UHF */
+    0x0000446000ULL,  /* 446.000 MHz PMR446 */
+    0x0000450000ULL,  /* 450.000 MHz UHF */
+    0x0000462000ULL,  /* 462.000 MHz GMRS */
+    0x0000462125ULL,  /* 462.125 MHz GMRS */
+    0x0000462550ULL,  /* 462.550 MHz GMRS */
+    0x0000467000ULL,  /* 467.000 MHz GMRS repeater output */
+    0x0000470000ULL,  /* 470.000 MHz UHF */
+
+    /* --- Level 3: Year/date patterns (YYYYMMDD decimal as hex digits) --- */
+    0x0000002024ULL,  /* year 2024 */
+    0x0000002025ULL,  /* year 2025 */
+    0x0000002023ULL,  /* year 2023 */
+    0x0020240101ULL,  /* 20240101 */
+    0x0020241231ULL,  /* 20241231 */
+    0x0020250101ULL,  /* 20250101 */
+    0x0020231231ULL,  /* 20231231 */
+
+    /* --- Level 3: Keyboard/numpad patterns --- */
+    0x1357924680ULL,  /* skip-one ascending */
+    0x0864297531ULL,  /* skip-one descending */
+    0x0011223344ULL,  /* paired ascending low */
+    0x5566778899ULL,  /* paired ascending high */
+    0x0099887766ULL,  /* paired descending */
+    0x1234512345ULL,  /* 5-digit repeat */
+    0xABCDEABCDEULL,  /* 5-hex repeat */
+};
+
+#define S_DICT_KEY_COUNT ((int)(sizeof(s_dict_keys)/sizeof(s_dict_keys[0])))
+
+/*
+ * run_dictionary_phase - Run before GPU/CPU brute-force to test common keys.
+ *
+ * Sets cuda_stage=4 while running (GUI displays "DICT").
+ * Updates engine->best_key / engine->best_score for any key scoring better
+ * than the current best. Respects stop_requested.
+ */
+static void run_dictionary_phase(BruteforceEngine *engine)
+{
+    int i;
+    int sample_lines = engine->cfg.sample_lines;
+    int sample_bytes = engine->cfg.sample_bytes;
+
+    InterlockedExchange(&engine->cuda_stage, 4);
+    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+
+    for (i = 0; i < S_DICT_KEY_COUNT; ++i) {
+        unsigned char key5[5];
+        double score;
+
+        if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+
+        key_to_5bytes_cpu(s_dict_keys[i], key5);
+        score = score_candidate_host(engine->payloads, sample_lines, sample_bytes, key5);
+
+        EnterCriticalSection(&engine->lock);
+        if (score > engine->best_score) {
+            engine->best_score = score;
+            engine->best_key   = s_dict_keys[i];
+        }
+        LeaveCriticalSection(&engine->lock);
+    }
+
+    InterlockedExchange(&engine->cuda_stage, 0);
+    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
 }
