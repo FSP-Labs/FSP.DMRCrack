@@ -402,27 +402,29 @@ static void layout_controls(int cw, int ch)
         y = strip_y + 18;
     }
 
-    /* Graphs and progress: fill remaining vertical space */
-    gap = 10;
-    graph_h = (ch - y - 35 - gap * 2) / 2;
-    if (graph_h < 80) graph_h = 80;
+    /* Graphs: side by side below tiles + strip */
+    {
+        int graph_y = y + 10;
+        graph_h = ch - graph_y - 35 - 6;
+        if (graph_h < 80) graph_h = 80;
+        int graph_mid = cw / 2 - 5;
 
-    g_app.graph_rect.left = 20;
-    g_app.graph_rect.top = y + gap;
-    g_app.graph_rect.right = cw - 20;
-    g_app.graph_rect.bottom = y + gap + graph_h;
+        g_app.graph_rect.left   = 20;
+        g_app.graph_rect.top    = graph_y;
+        g_app.graph_rect.right  = graph_mid;
+        g_app.graph_rect.bottom = graph_y + graph_h;
 
-    y += graph_h + gap;
-    g_app.score_graph_rect.left = 20;
-    g_app.score_graph_rect.top = y + gap;
-    g_app.score_graph_rect.right = cw - 20;
-    g_app.score_graph_rect.bottom = y + gap + graph_h;
+        g_app.score_graph_rect.left   = graph_mid + 10;
+        g_app.score_graph_rect.top    = graph_y;
+        g_app.score_graph_rect.right  = cw - 20;
+        g_app.score_graph_rect.bottom = graph_y + graph_h;
 
-    y += graph_h + gap;
-    g_app.progress_rect.left = 20;
-    g_app.progress_rect.top = y;
-    g_app.progress_rect.right = cw - 20;
-    g_app.progress_rect.bottom = y + 25;
+        /* Progress bar at bottom */
+        g_app.progress_rect.left   = 20;
+        g_app.progress_rect.top    = graph_y + graph_h + 8;
+        g_app.progress_rect.right  = cw - 20;
+        g_app.progress_rect.bottom = g_app.progress_rect.top + 22;
+    }
 }
 
 /* --- Utility --- */
@@ -910,6 +912,35 @@ static void draw_graph(HDC hdc, const RECT *rect)
         DeleteObject(grid_pen);
     }
 
+    /* Area fill under the line */
+    if (g_app.hist_count > 1) {
+        int n = g_app.hist_count;
+        POINT *pts = (POINT *)malloc((n + 2) * sizeof(POINT));
+        if (pts) {
+            int axis_y = rect->bottom - 25;
+            int w = rect->right - rect->left - 45;
+            int gh = rect->bottom - rect->top - 40;
+            pts[0].x = rect->left + 30;
+            pts[0].y = axis_y;
+            for (int pi = 0; pi < n; pi++) {
+                double v = g_app.kps_history[(g_app.hist_pos + pi) % 120];
+                pts[pi+1].x = rect->left + 30 + (pi * w) / (n - 1);
+                pts[pi+1].y = axis_y - (int)((v / max_val) * gh);
+            }
+            pts[n+1].x = pts[n].x;
+            pts[n+1].y = axis_y;
+            HBRUSH fill_br = CreateSolidBrush(RGB(40, 80, 130));
+            HBRUSH old_br = (HBRUSH)SelectObject(hdc, fill_br);
+            HPEN null_pen = (HPEN)GetStockObject(NULL_PEN);
+            HPEN old_pen = (HPEN)SelectObject(hdc, null_pen);
+            Polygon(hdc, pts, n + 2);
+            SelectObject(hdc, old_br);
+            SelectObject(hdc, old_pen);
+            DeleteObject(fill_br);
+            free(pts);
+        }
+    }
+
     if (g_app.hist_count > 1) {
         SelectObject(hdc, line_pen);
         for (i = 0; i < g_app.hist_count; ++i) {
@@ -937,6 +968,18 @@ static void draw_graph(HDC hdc, const RECT *rect)
         else snprintf(val, sizeof(val), "%.0f /s", last);
         SetTextColor(hdc, CLR_BRIGHT);
         TextOutA(hdc, rect->right - 100, rect->top + 6, val, (int)strlen(val));
+    }
+
+    /* Border */
+    {
+        HPEN bpen = CreatePen(PS_SOLID, 1, RGB(55, 55, 58));
+        HPEN old_p = (HPEN)SelectObject(hdc, bpen);
+        HBRUSH null_b = (HBRUSH)GetStockObject(NULL_BRUSH);
+        HBRUSH old_b = (HBRUSH)SelectObject(hdc, null_b);
+        Rectangle(hdc, rect->left, rect->top, rect->right, rect->bottom);
+        SelectObject(hdc, old_p);
+        SelectObject(hdc, old_b);
+        DeleteObject(bpen);
     }
 }
 
@@ -1019,6 +1062,18 @@ static void draw_score_graph(HDC hdc, const RECT *rect)
         snprintf(val, sizeof(val), "%.1f", last);
         SetTextColor(hdc, CLR_BRIGHT);
         TextOutA(hdc, rect->right - 80, rect->top + 6, val, (int)strlen(val));
+    }
+
+    /* Border */
+    {
+        HPEN bpen = CreatePen(PS_SOLID, 1, RGB(55, 55, 58));
+        HPEN old_p = (HPEN)SelectObject(hdc, bpen);
+        HBRUSH null_b = (HBRUSH)GetStockObject(NULL_BRUSH);
+        HBRUSH old_b = (HBRUSH)SelectObject(hdc, null_b);
+        Rectangle(hdc, rect->left, rect->top, rect->right, rect->bottom);
+        SelectObject(hdc, old_p);
+        SelectObject(hdc, old_b);
+        DeleteObject(bpen);
     }
 }
 
