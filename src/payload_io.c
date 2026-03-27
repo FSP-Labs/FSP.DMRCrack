@@ -570,3 +570,38 @@ int payload_save_file(const char *path, const PayloadSet *payloads, char *err, s
     fclose(f);
     return 1;
 }
+
+void validate_payload_set(const PayloadSet *ps,
+                          char *summary, size_t summary_len,
+                          char *warn,    size_t warn_len)
+{
+    size_t kmi9 = 0, i;
+    unsigned char first_kid = 0;
+    int has_kid = 0;
+
+    if (!ps || ps->count == 0) {
+        snprintf(summary, summary_len, "0 payloads");
+        snprintf(warn, warn_len, "No payloads loaded");
+        return;
+    }
+
+    for (i = 0; i < ps->count; i++) {
+        const PayloadLine *it = &ps->items[i];
+        if (it->has_mi && (it->algid == 0x21 || it->algid == 0x01))
+            kmi9++;
+        if (!has_kid && it->has_mi) {
+            first_kid = it->keyid;
+            has_kid = 1;
+        }
+    }
+
+    if (has_kid)
+        snprintf(summary, summary_len, "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
+                 ps->count, kmi9, ps->count, (unsigned)first_kid);
+    else
+        snprintf(summary, summary_len, "%zu payloads  (no MI metadata)", ps->count);
+
+    warn[0] = '\0';
+    if (ps->count < 30)
+        snprintf(warn, warn_len, "! Only %zu payloads -- low confidence", ps->count);
+}

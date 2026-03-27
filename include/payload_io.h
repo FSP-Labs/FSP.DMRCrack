@@ -68,6 +68,10 @@ int payload_save_file(const char *path, const PayloadSet *payloads, char *err, s
 int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
                        const char *log_path, char *err, size_t err_len);
 
+void validate_payload_set(const PayloadSet *ps,
+                          char *summary, size_t summary_len,
+                          char *warn,    size_t warn_len);
+
 #ifdef __cplusplus
 }
 #endif

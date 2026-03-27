@@ -328,32 +328,48 @@ static void layout_controls(int cw, int ch)
         if (g_app.demod_label) MoveWindow(g_app.demod_label, cap_x, y, cap_w, 16, TRUE);
     }
 
-    /* BRUTE FORCE section */
-    y = 125;
-    if (g_app.lbl_file) MoveWindow(g_app.lbl_file, 20, y + 2, 70, 20, TRUE);
-    if (g_app.edit_file) MoveWindow(g_app.edit_file, 95, y, ctrl_w - 290, 24, TRUE);
-    if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, cw - 235, y, 36, 24, TRUE);
-    if (g_app.payload_label) MoveWindow(g_app.payload_label, cw - 190, y + 2, 170, 20, TRUE);
+    /* BRUTE FORCE section — right panel */
+    {
+        int bf_x = cw / 2 + 10, bf_right = cw - 20;
+        int bf_w = bf_right - bf_x;
+        int yb = HEADER_H + 14;
+        yb += 22;  /* section header space */
 
-    row2_y = y + 34;
-    if (g_app.lbl_start) MoveWindow(g_app.lbl_start, 20, row2_y + 2, 70, 20, TRUE);
-    if (g_app.edit_start) MoveWindow(g_app.edit_start, 95, row2_y, 130, 24, TRUE);
-    if (g_app.lbl_end) MoveWindow(g_app.lbl_end, 230, row2_y + 2, 40, 20, TRUE);
-    if (g_app.edit_end) MoveWindow(g_app.edit_end, 275, row2_y, 130, 24, TRUE);
-    if (g_app.lbl_threads) MoveWindow(g_app.lbl_threads, 420, row2_y + 2, 50, 20, TRUE);
-    if (g_app.edit_threads) MoveWindow(g_app.edit_threads, 475, row2_y, 50, 24, TRUE);
-    if (g_app.lbl_samples) MoveWindow(g_app.lbl_samples, 540, row2_y + 2, 55, 20, TRUE);
-    if (g_app.edit_samples) MoveWindow(g_app.edit_samples, 600, row2_y, 50, 24, TRUE);
+        /* .bin file row */
+        if (g_app.lbl_file)        MoveWindow(g_app.lbl_file,        bf_x,        yb+2, 40, 18, TRUE);
+        if (g_app.edit_file)       MoveWindow(g_app.edit_file,       bf_x+45,     yb,   bf_w-82, 24, TRUE);
+        if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, bf_right-32, yb,   30, 24, TRUE);
+        yb += 28;
+        /* Payload label (validation summary) */
+        if (g_app.payload_label) MoveWindow(g_app.payload_label, bf_x, yb, bf_w, 16, TRUE);
+        yb += 22;
 
-    row2_y += 34;
-    if (g_app.btn_start) MoveWindow(g_app.btn_start, 95, row2_y, 110, 30, TRUE);
-    if (g_app.btn_pause) MoveWindow(g_app.btn_pause, 215, row2_y, 110, 30, TRUE);
-    if (g_app.btn_stop) MoveWindow(g_app.btn_stop, 335, row2_y, 110, 30, TRUE);
-    if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, 460, row2_y, 70, 30, TRUE);
+        /* Key range row */
+        if (g_app.lbl_start) MoveWindow(g_app.lbl_start, bf_x,       yb+2, 35, 18, TRUE);
+        if (g_app.edit_start)MoveWindow(g_app.edit_start, bf_x+40,    yb,  110, 24, TRUE);
+        if (g_app.lbl_end)   MoveWindow(g_app.lbl_end,    bf_x+158,   yb+2, 20, 18, TRUE);
+        if (g_app.edit_end)  MoveWindow(g_app.edit_end,   bf_x+182,   yb,  110, 24, TRUE);
+        yb += 30;
+
+        /* Threads + Samples row */
+        if (g_app.lbl_threads) MoveWindow(g_app.lbl_threads, bf_x,      yb+2, 50, 18, TRUE);
+        if (g_app.edit_threads)MoveWindow(g_app.edit_threads, bf_x+55,   yb,   40, 24, TRUE);
+        if (g_app.lbl_samples) MoveWindow(g_app.lbl_samples,  bf_x+102,  yb+2, 55, 18, TRUE);
+        if (g_app.edit_samples)MoveWindow(g_app.edit_samples,  bf_x+162,  yb,   60, 24, TRUE);
+        yb += 34;
+
+        /* Action buttons row */
+        if (g_app.btn_start)    MoveWindow(g_app.btn_start,    bf_x,      yb,  90, 30, TRUE);
+        if (g_app.btn_pause)    MoveWindow(g_app.btn_pause,    bf_x+98,   yb,  90, 30, TRUE);
+        if (g_app.btn_stop)     MoveWindow(g_app.btn_stop,     bf_x+196,  yb,  90, 30, TRUE);
+        if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, bf_x+294,  yb,  65, 30, TRUE);
+
+        row2_y = yb;
+    }
 
     /* Graphs and progress: fill remaining vertical space */
     gap = 10;
-    y = row2_y + 115;
+    y = row2_y + 44;
     graph_h = (ch - y - 35 - gap * 2) / 2;
     if (graph_h < 80) graph_h = 80;
 
@@ -786,8 +802,29 @@ static void choose_file(HWND owner)
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn))
+    if (GetOpenFileNameA(&ofn)) {
         SetWindowTextA(g_app.edit_file, file);
+        /* Auto-load and validate */
+        {
+            char err[256] = {0};
+            payload_set_free(&g_app.payloads);
+            payload_set_init(&g_app.payloads);
+            if (load_payload_file(file, 0, &g_app.payloads, err, sizeof(err))) {
+                char summary[160], warn_txt[160], plbl[320];
+                validate_payload_set(&g_app.payloads, summary, sizeof(summary),
+                                     warn_txt, sizeof(warn_txt));
+                if (warn_txt[0])
+                    snprintf(plbl, sizeof(plbl), "%s  %s", summary, warn_txt);
+                else
+                    snprintf(plbl, sizeof(plbl), "%s", summary);
+                SetWindowTextA(g_app.payload_label, plbl);
+                strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), file);
+                EnableWindow(g_app.btn_export, TRUE);
+            } else {
+                SetWindowTextA(g_app.payload_label, err);
+            }
+        }
+    }
 }
 
 static void choose_wav_file(HWND owner)
@@ -1137,10 +1174,15 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     strcpy_s(g_app.loaded_wav, sizeof(g_app.loaded_wav), wav_path);
     strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), out_bin);
     {
-        char msg[320], plbl[64];
+        char msg[320], summary[160], warn_txt[160], plbl[320];
         snprintf(msg, sizeof(msg), "OK: %zu payloads -> %s", g_app.payloads.count, out_bin);
         SetWindowTextA(g_app.demod_label, msg);
-        snprintf(plbl, sizeof(plbl), g_lang.fmt_payloads_loaded, g_app.payloads.count);
+        validate_payload_set(&g_app.payloads, summary, sizeof(summary),
+                             warn_txt, sizeof(warn_txt));
+        if (warn_txt[0])
+            snprintf(plbl, sizeof(plbl), "%s  %s", summary, warn_txt);
+        else
+            snprintf(plbl, sizeof(plbl), "%s", summary);
         SetWindowTextA(g_app.payload_label, plbl);
     }
     SetWindowTextA(g_app.edit_file, out_bin);
@@ -1308,12 +1350,20 @@ static int start_bruteforce(HWND hwnd)
     }
 
     {
-        char plbl[64];
-        snprintf(plbl, sizeof(plbl), g_lang.fmt_payloads_loaded, g_app.payloads.count);
+        char summary[160], warn_txt[160], plbl[320];
+        validate_payload_set(&g_app.payloads, summary, sizeof(summary),
+                             warn_txt, sizeof(warn_txt));
+        if (warn_txt[0])
+            snprintf(plbl, sizeof(plbl), "%s  %s", summary, warn_txt);
+        else
+            snprintf(plbl, sizeof(plbl), "%s", summary);
         SetWindowTextA(g_app.payload_label, plbl);
     }
-    if (g_app.payloads.count < 64)
-        MessageBoxA(hwnd, g_lang.warn_few_payloads, APP_TITLE, MB_ICONWARNING);
+    if (g_app.payloads.count < 30) {
+        char warn[160];
+        snprintf(warn, sizeof(warn), g_lang.warn_low_payloads_n, g_app.payloads.count);
+        SetWindowTextA(g_app.payload_label, warn);
+    }
 
     cfg.start_key = start_key;
     cfg.end_key = end_key;
