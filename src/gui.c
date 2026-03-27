@@ -367,22 +367,56 @@ static void layout_controls(int cw, int ch)
         row2_y = yb;
     }
 
+    /* Metric tiles row: below both panels */
+    {
+        int tile_y = row2_y + 12;
+        int tile_h = 80;
+        int tile_gap = 8;
+        int tile_total = cw - 40;
+        int tile_w1 = tile_total / 5;
+        int tile_w3 = tile_total / 5;
+        int tile_w2 = tile_total - tile_w1 - tile_w3 - tile_gap * 2;
+
+        g_app.tile_throughput_rect.left   = 20;
+        g_app.tile_throughput_rect.top    = tile_y;
+        g_app.tile_throughput_rect.right  = 20 + tile_w1;
+        g_app.tile_throughput_rect.bottom = tile_y + tile_h;
+
+        g_app.tile_progress_rect.left   = 20 + tile_w1 + tile_gap;
+        g_app.tile_progress_rect.top    = tile_y;
+        g_app.tile_progress_rect.right  = 20 + tile_w1 + tile_gap + tile_w2;
+        g_app.tile_progress_rect.bottom = tile_y + tile_h;
+
+        g_app.tile_candidate_rect.left   = 20 + tile_w1 + tile_gap + tile_w2 + tile_gap;
+        g_app.tile_candidate_rect.top    = tile_y;
+        g_app.tile_candidate_rect.right  = cw - 20;
+        g_app.tile_candidate_rect.bottom = tile_y + tile_h;
+
+        /* Status strip below tiles */
+        int strip_y = tile_y + tile_h + 6;
+        g_app.status_strip_rect.left   = 20;
+        g_app.status_strip_rect.top    = strip_y;
+        g_app.status_strip_rect.right  = cw - 20;
+        g_app.status_strip_rect.bottom = strip_y + 18;
+
+        y = strip_y + 18;
+    }
+
     /* Graphs and progress: fill remaining vertical space */
     gap = 10;
-    y = row2_y + 44;
     graph_h = (ch - y - 35 - gap * 2) / 2;
     if (graph_h < 80) graph_h = 80;
 
     g_app.graph_rect.left = 20;
-    g_app.graph_rect.top = y;
+    g_app.graph_rect.top = y + gap;
     g_app.graph_rect.right = cw - 20;
-    g_app.graph_rect.bottom = y + graph_h;
+    g_app.graph_rect.bottom = y + gap + graph_h;
 
     y += graph_h + gap;
     g_app.score_graph_rect.left = 20;
-    g_app.score_graph_rect.top = y;
+    g_app.score_graph_rect.top = y + gap;
     g_app.score_graph_rect.right = cw - 20;
-    g_app.score_graph_rect.bottom = y + graph_h;
+    g_app.score_graph_rect.bottom = y + gap + graph_h;
 
     y += graph_h + gap;
     g_app.progress_rect.left = 20;
@@ -598,6 +632,235 @@ static void draw_section_header(HDC hdc, int x, int y, int w, const char *label)
         SelectObject(hdc, old_pen);
         DeleteObject(pen);
     }
+}
+
+/* --- Drawing: metric tiles --- */
+static void draw_tile(HDC hdc, const RECT *r,
+                      const char *title, const char *primary,
+                      const char *line2,  const char *line3)
+{
+    HBRUSH bg = CreateSolidBrush(CLR_TILE);
+    FillRect(hdc, r, bg);
+    DeleteObject(bg);
+
+    { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
+      HPEN old = (HPEN)SelectObject(hdc, pen);
+      MoveToEx(hdc, r->left, r->top + 1, NULL);
+      LineTo(hdc, r->right, r->top + 1);
+      SelectObject(hdc, old);
+      DeleteObject(pen); }
+
+    SetBkMode(hdc, TRANSPARENT);
+    int x = r->left + 10, w = r->right - r->left - 20;
+
+    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+      SetTextColor(hdc, CLR_METRIC_LABEL);
+      RECT tr = { x, r->top + 6, x + w, r->top + 18 };
+      DrawTextA(hdc, title, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      SelectObject(hdc, old); }
+
+    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_metric);
+      SetTextColor(hdc, CLR_METRIC);
+      RECT tr = { x, r->top + 20, x + w, r->top + 46 };
+      DrawTextA(hdc, primary, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      SelectObject(hdc, old); }
+
+    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+      SetTextColor(hdc, CLR_DIM);
+      if (line2 && line2[0]) {
+          RECT tr = { x, r->top + 50, x + w, r->top + 63 };
+          DrawTextA(hdc, line2, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      }
+      if (line3 && line3[0]) {
+          RECT tr = { x, r->top + 64, x + w, r->top + 77 };
+          DrawTextA(hdc, line3, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      }
+      SelectObject(hdc, old); }
+}
+
+static void draw_progress_tile(HDC hdc, const RECT *r,
+                                const char *title, double pct,
+                                const char *line2,  const char *line3)
+{
+    HBRUSH bg = CreateSolidBrush(CLR_TILE);
+    FillRect(hdc, r, bg);
+    DeleteObject(bg);
+
+    { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
+      HPEN old = (HPEN)SelectObject(hdc, pen);
+      MoveToEx(hdc, r->left, r->top + 1, NULL);
+      LineTo(hdc, r->right, r->top + 1);
+      SelectObject(hdc, old);
+      DeleteObject(pen); }
+
+    SetBkMode(hdc, TRANSPARENT);
+    int x = r->left + 10, w = r->right - r->left - 20;
+
+    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+      SetTextColor(hdc, CLR_METRIC_LABEL);
+      RECT tr = { x, r->top + 6, x + w, r->top + 18 };
+      DrawTextA(hdc, title, -1, &tr, DT_LEFT | DT_SINGLELINE);
+      SelectObject(hdc, old); }
+
+    { RECT bar = { x, r->top + 22, x + w, r->top + 34 };
+      HBRUSH bar_bg = CreateSolidBrush(CLR_PROGRESS_BG);
+      FillRect(hdc, &bar, bar_bg);
+      DeleteObject(bar_bg);
+      if (pct > 0.0) {
+          if (pct > 1.0) pct = 1.0;
+          RECT fill = bar;
+          fill.right = bar.left + (int)((bar.right - bar.left) * pct);
+          HBRUSH fill_br = CreateSolidBrush(CLR_ACCENT);
+          FillRect(hdc, &fill, fill_br);
+          DeleteObject(fill_br);
+      } }
+
+    { char pct_str[32];
+      snprintf(pct_str, sizeof(pct_str), "%.1f%%", pct * 100.0);
+      HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_metric);
+      SetTextColor(hdc, CLR_METRIC);
+      RECT tr = { x, r->top + 38, x + w, r->top + 60 };
+      DrawTextA(hdc, pct_str, -1, &tr, DT_LEFT | DT_SINGLELINE);
+      SelectObject(hdc, old); }
+
+    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+      SetTextColor(hdc, CLR_DIM);
+      if (line2 && line2[0]) {
+          RECT tr = { x, r->top + 56, x + w, r->top + 69 };
+          DrawTextA(hdc, line2, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      }
+      if (line3 && line3[0]) {
+          RECT tr = { x, r->top + 70, x + w, r->top + 80 };
+          DrawTextA(hdc, line3, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+      }
+      SelectObject(hdc, old); }
+}
+
+static void draw_all_tiles(HDC hdc)
+{
+    char primary[64], line2[80], line3[80];
+    double pct = 0.0;
+
+    /* THROUGHPUT tile */
+    {
+        double total_kps = g_app.snapshot.keys_per_second;
+        double gpu_frac  = (g_app.snapshot.keys_tested > 0)
+            ? (double)g_app.snapshot.gpu_keys_tested / (double)g_app.snapshot.keys_tested
+            : (g_app.engine.cuda_active ? 1.0 : 0.0);
+        double gpu_kps = total_kps * gpu_frac;
+        double cpu_kps = total_kps * (1.0 - gpu_frac);
+
+        if      (total_kps >= 1e9) snprintf(primary, sizeof(primary), "%.2f G/s", total_kps/1e9);
+        else if (total_kps >= 1e6) snprintf(primary, sizeof(primary), "%.1f M/s", total_kps/1e6);
+        else if (total_kps >= 1e3) snprintf(primary, sizeof(primary), "%.0f K/s", total_kps/1e3);
+        else                       snprintf(primary, sizeof(primary), "%.0f /s",  total_kps);
+
+        if (g_app.engine.cuda_active) {
+            char g[32], c[32];
+            if (gpu_kps >= 1e6) snprintf(g, sizeof(g), "%.1f M/s", gpu_kps/1e6);
+            else snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
+            if (cpu_kps >= 1e3) snprintf(c, sizeof(c), "%.0f K/s", cpu_kps/1e3);
+            else snprintf(c, sizeof(c), "%.0f /s", cpu_kps);
+            snprintf(line2, sizeof(line2), "GPU  %s", g);
+            snprintf(line3, sizeof(line3), "CPU  %s", c);
+        } else {
+            snprintf(line2, sizeof(line2), "CPU only");
+            line3[0] = '\0';
+        }
+        draw_tile(hdc, &g_app.tile_throughput_rect,
+                  g_lang.tile_throughput, primary, line2, line3);
+    }
+
+    /* PROGRESS tile */
+    {
+        if (g_app.snapshot.total_keys > 0)
+            pct = (double)g_app.snapshot.keys_tested / (double)g_app.snapshot.total_keys;
+        if (pct > 1.0) pct = 1.0;
+
+        char keys_str[64], eta_str[64], elapsed_str[64];
+        double tk = (double)g_app.snapshot.total_keys;
+        double kk = (double)g_app.snapshot.keys_tested;
+        if (tk >= 1e12)
+            snprintf(keys_str, sizeof(keys_str), "%.1fT / %.2fT keys", kk/1e12, tk/1e12);
+        else if (tk >= 1e9)
+            snprintf(keys_str, sizeof(keys_str), "%.1fG / %.2fG keys", kk/1e9, tk/1e9);
+        else
+            snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM keys", kk/1e6, tk/1e6);
+
+        fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
+        fmt_hhmmss(g_app.snapshot.eta_seconds, eta_str, sizeof(eta_str));
+        snprintf(line2, sizeof(line2), "%s", keys_str);
+        snprintf(line3, sizeof(line3), "ETA %s   Elapsed %s", eta_str, elapsed_str);
+
+        draw_progress_tile(hdc, &g_app.tile_progress_rect,
+                           g_lang.tile_progress, pct, line2, line3);
+    }
+
+    /* CANDIDATE tile */
+    {
+        if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
+            strcpy_s(primary, sizeof(primary), "----------");
+            line2[0] = '\0';
+        } else {
+            unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
+            snprintf(primary, sizeof(primary), "%04llX %04llX %02llX",
+                     (k >> 24) & 0xFFFF, (k >> 8) & 0xFFFF, k & 0xFF);
+            snprintf(line2, sizeof(line2), "Score  %.2f", g_app.snapshot.best_score);
+        }
+        line3[0] = '\0';
+        draw_tile(hdc, &g_app.tile_candidate_rect,
+                  g_lang.tile_candidate, primary, line2, line3);
+    }
+}
+
+static void draw_status_strip(HDC hdc)
+{
+    const RECT *r = &g_app.status_strip_rect;
+    HBRUSH bg = CreateSolidBrush(CLR_BG);
+    FillRect(hdc, r, bg);
+    DeleteObject(bg);
+    SetBkMode(hdc, TRANSPARENT);
+    HFONT old_f = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+
+    int running = g_app.snapshot.running;
+    int paused  = g_app.snapshot.paused;
+    COLORREF dot_clr = running ? (paused ? CLR_PAUSED : CLR_RUNNING) : CLR_STOPPED;
+    const char *state_str = running
+        ? (paused ? g_lang.state_paused : g_lang.state_running)
+        : g_lang.state_stopped;
+
+    { HBRUSH dot_br = CreateSolidBrush(dot_clr);
+      int dy = r->top + (r->bottom - r->top - 8) / 2;
+      RECT dot = { r->left, dy, r->left + 8, dy + 8 };
+      FillRect(hdc, &dot, dot_br);
+      DeleteObject(dot_br); }
+
+    { char strip[512];
+      LONG stage_v = InterlockedCompareExchange(&g_app.engine.cuda_stage, 0, 0);
+      LONG tpb     = InterlockedCompareExchange(&g_app.engine.cuda_tpb, 0, 0);
+      LONG bpsm    = InterlockedCompareExchange(&g_app.engine.cuda_bpsm, 0, 0);
+      LONG chunk   = InterlockedCompareExchange(&g_app.engine.cuda_chunk_mult, 0, 0);
+      const char *stage_s = (stage_v==1) ? "AUTOTUNE" :
+                            (stage_v==2) ? "SCANNING" :
+                            (stage_v==3) ? "DONE"     : "INIT";
+      const char *backend = g_app.engine.cuda_active
+          ? g_lang.status_backend_cuda : g_lang.status_backend_cpu;
+
+      if (g_app.fallback_banner_ticks > 0)
+          snprintf(strip, sizeof(strip), "%s  \xb7  %s  \xb7  %s",
+                   state_str, g_lang.msg_cuda_fallback, backend);
+      else if (g_app.engine.cuda_active && tpb > 0)
+          snprintf(strip, sizeof(strip),
+                   "%s  \xb7  %s  \xb7  Stage: %s  \xb7  TPB=%ld  BPSM=%ld  CHUNK=%ld",
+                   state_str, backend, stage_s, tpb, bpsm, chunk);
+      else
+          snprintf(strip, sizeof(strip), "%s  \xb7  %s", state_str, backend);
+
+      SetTextColor(hdc, CLR_DIM);
+      RECT tr = { r->left + 14, r->top, r->right, r->bottom };
+      DrawTextA(hdc, strip, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS); }
+
+    SelectObject(hdc, old_f);
 }
 
 /* --- Drawing: graphs --- */
@@ -1272,7 +1535,10 @@ static void refresh_snapshot_and_ui(void)
     bruteforce_get_snapshot(&g_app.engine, &g_app.snapshot);
     append_kps_sample(g_app.snapshot.keys_per_second);
     append_score_sample(g_app.snapshot.best_score);
-    update_status_text();
+    InvalidateRect(g_app.hwnd, &g_app.tile_throughput_rect, FALSE);
+    InvalidateRect(g_app.hwnd, &g_app.tile_progress_rect, FALSE);
+    InvalidateRect(g_app.hwnd, &g_app.tile_candidate_rect, FALSE);
+    InvalidateRect(g_app.hwnd, &g_app.status_strip_rect, FALSE);
     if (g_app.snapshot.running)
         SetWindowTextA(g_app.btn_pause, g_app.snapshot.paused ? g_lang.btn_resume : g_lang.btn_pause);
     else
@@ -1557,7 +1823,6 @@ static void apply_language(void)
     update_capture_mode_visibility();
     /* Section headers and status are redrawn on next tick */
     InvalidateRect(g_app.hwnd, NULL, TRUE);
-    update_status_text();
     /* Close help window so it doesn't show stale language text */
     if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
         DestroyWindow(g_app.hwnd_help);
@@ -1970,6 +2235,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         RECT cli;
         GetClientRect(hwnd, &cli);
         draw_header(hdc, cli.right);
+
+        /* Metric tiles + status strip */
+        draw_all_tiles(hdc);
+        draw_status_strip(hdc);
 
         /* Graphs */
         draw_graph(hdc, &g_app.graph_rect);
