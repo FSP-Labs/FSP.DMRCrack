@@ -59,6 +59,15 @@
 #define ID_PAYLOAD_LABEL 1016
 #define ID_BTN_HELP     1017
 #define ID_BTN_LANG     1018
+#define ID_RADIO_WAV        1019
+#define ID_RADIO_RTL        1020
+#define ID_EDIT_FREQ        1021
+#define ID_EDIT_GAIN        1022
+#define ID_EDIT_PPM         1023
+#define ID_EDIT_DEVICE      1024
+#define ID_COMBO_SLOT       1025
+#define ID_CHK_INVERTED     1026
+#define ID_BTN_STOP_CAPTURE 1027
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -270,18 +279,54 @@ static void layout_controls(int cw, int ch)
 
     ctrl_w = cw - 40;
 
-    /* CAPTURE section */
-    y = HEADER_H + 8;
-    if (g_app.lbl_audio) MoveWindow(g_app.lbl_audio, 20, y + 2, 70, 20, TRUE);
-    if (g_app.edit_wav) MoveWindow(g_app.edit_wav, 95, y, ctrl_w - 386, 24, TRUE);
-    if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, cw - 323, y, 36, 24, TRUE);
-    if (g_app.btn_demod) MoveWindow(g_app.btn_demod, cw - 279, y, 100, 24, TRUE);
-    if (g_app.btn_export) MoveWindow(g_app.btn_export, cw - 171, y, 60, 24, TRUE);
     /* Header buttons — positioned at top right inside header bar */
     if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 96,  (HEADER_H - 22) / 2, 50, 22, TRUE);
     if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 38,  (HEADER_H - 22) / 2, 32, 22, TRUE);
-    y += 28;
-    if (g_app.demod_label) MoveWindow(g_app.demod_label, 95, y, ctrl_w - 80, 16, TRUE);
+
+    /* CAPTURE section — left panel */
+    {
+        int cap_x = 20, cap_right = cw / 2 - 10;
+        int cap_w = cap_right - cap_x;
+        y = HEADER_H + 14;
+        y += 22;  /* space for section header */
+
+        /* Radio buttons */
+        if (g_app.radio_wav) MoveWindow(g_app.radio_wav, cap_x, y, 55, 20, TRUE);
+        if (g_app.radio_rtl) MoveWindow(g_app.radio_rtl, cap_x + 62, y, 75, 20, TRUE);
+        y += 26;
+
+        /* WAV controls */
+        if (g_app.lbl_audio)     MoveWindow(g_app.lbl_audio,     cap_x,           y+2, 55, 18, TRUE);
+        if (g_app.edit_wav)      MoveWindow(g_app.edit_wav,      cap_x+60,        y,   cap_w-98, 24, TRUE);
+        if (g_app.btn_browse_wav)MoveWindow(g_app.btn_browse_wav, cap_right-34,   y,   30, 24, TRUE);
+
+        /* RTL controls (same y, shown/hidden) */
+        if (g_app.lbl_freq)   MoveWindow(g_app.lbl_freq,   cap_x,      y+2, 60, 18, TRUE);
+        if (g_app.edit_freq)  MoveWindow(g_app.edit_freq,  cap_x+65,   y,   70, 24, TRUE);
+        if (g_app.lbl_gain)   MoveWindow(g_app.lbl_gain,   cap_x+142,  y+2, 40, 18, TRUE);
+        if (g_app.edit_gain)  MoveWindow(g_app.edit_gain,  cap_x+185,  y,   40, 24, TRUE);
+        if (g_app.lbl_ppm)    MoveWindow(g_app.lbl_ppm,    cap_x+232,  y+2, 30, 18, TRUE);
+        if (g_app.edit_ppm)   MoveWindow(g_app.edit_ppm,   cap_x+264,  y,   40, 24, TRUE);
+        if (g_app.lbl_device) MoveWindow(g_app.lbl_device, cap_x+310,  y+2, 50, 18, TRUE);
+        if (g_app.edit_device)MoveWindow(g_app.edit_device,cap_x+360,  y,   35, 24, TRUE);
+        y += 30;
+
+        /* Slot + Inverted row */
+        if (g_app.lbl_slot)         MoveWindow(g_app.lbl_slot,         cap_x,      y+2,  30, 18, TRUE);
+        if (g_app.combo_slot)       MoveWindow(g_app.combo_slot,       cap_x+35,   y,    80, 120, TRUE);
+        if (g_app.lbl_inverted_label)MoveWindow(g_app.lbl_inverted_label,cap_x+122, y+2, 50, 18, TRUE);
+        if (g_app.chk_inverted)     MoveWindow(g_app.chk_inverted,     cap_x+175,  y,    20, 20, TRUE);
+        y += 28;
+
+        /* Buttons row */
+        if (g_app.btn_demod)        MoveWindow(g_app.btn_demod,        cap_x,       y, 100, 28, TRUE);
+        if (g_app.btn_stop_capture) MoveWindow(g_app.btn_stop_capture, cap_x+108,   y,  60, 28, TRUE);
+        if (g_app.btn_export)       MoveWindow(g_app.btn_export,       cap_x+176,   y,  60, 28, TRUE);
+        y += 32;
+
+        /* Demod status label */
+        if (g_app.demod_label) MoveWindow(g_app.demod_label, cap_x, y, cap_w, 16, TRUE);
+    }
 
     /* BRUTE FORCE section */
     y = 125;
@@ -969,11 +1014,45 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         }
     }
 
+    /* Slot flag from combo */
+    char slot_flag[8] = "-V 3";
+    {
+        int slot_sel = (int)SendMessageA(g_app.combo_slot, CB_GETCURSEL, 0, 0);
+        if (slot_sel == 1) strcpy_s(slot_flag, sizeof(slot_flag), "-V 1");
+        else if (slot_sel == 2) strcpy_s(slot_flag, sizeof(slot_flag), "-V 2");
+        else strcpy_s(slot_flag, sizeof(slot_flag), "-V 3");
+    }
+
+    /* Inverted flag */
+    char inv_flag[8] = "";
+    if (SendMessageA(g_app.chk_inverted, BM_GETCHECK, 0, 0) == BST_CHECKED)
+        strcpy_s(inv_flag, sizeof(inv_flag), " -xr");
+
+    /* RTL-SDR mode: build RTL input string */
+    char rtl_input[128] = "";
+    int use_rtl = 0;
+    if (g_app.capture_mode == 1) {
+        char freq_txt[32], gain_txt[16], ppm_txt[16], dev_txt[8];
+        GetWindowTextA(g_app.edit_freq,   freq_txt, sizeof(freq_txt));
+        GetWindowTextA(g_app.edit_gain,   gain_txt, sizeof(gain_txt));
+        GetWindowTextA(g_app.edit_ppm,    ppm_txt,  sizeof(ppm_txt));
+        GetWindowTextA(g_app.edit_device, dev_txt,  sizeof(dev_txt));
+        double freq_mhz = atof(freq_txt);
+        long long freq_hz = (long long)(freq_mhz * 1e6);
+        snprintf(rtl_input, sizeof(rtl_input), "rtl:%s:%lld:%s:%s",
+                 dev_txt, freq_hz, gain_txt, ppm_txt);
+        use_rtl = 1;
+    }
+
     /* Step 1/2: run dsd-fme.exe directly (no shell), stderr → log file.
      * -Q takes a relative filename; dsd-fme runs with CWD = wav_dir. */
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
-    snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z",
-             dsd_path, wav_path, qname);
+    if (use_rtl)
+        snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i %s -Q \"%s\" -Z %s%s",
+                 dsd_path, rtl_input, qname, slot_flag, inv_flag);
+    else
+        snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z %s%s",
+                 dsd_path, wav_path, qname, slot_flag, inv_flag);
     if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
         /* 0xC0000135 = STATUS_DLL_NOT_FOUND -- Cygwin runtime missing */
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
@@ -1353,6 +1432,36 @@ static void lang_load(void)
 }
 
 /* --- Apply current language to all controls --- */
+static void layout_controls_current(void)
+{
+    RECT rc;
+    GetClientRect(g_app.hwnd, &rc);
+    layout_controls(rc.right, rc.bottom);
+    InvalidateRect(g_app.hwnd, NULL, TRUE);
+}
+
+static void update_capture_mode_visibility(void)
+{
+    int is_rtl = (g_app.capture_mode == 1);
+    /* WAV-only controls */
+    ShowWindow(g_app.lbl_audio,       is_rtl ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_app.edit_wav,        is_rtl ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_app.btn_browse_wav,  is_rtl ? SW_HIDE : SW_SHOW);
+    /* RTL-only controls */
+    ShowWindow(g_app.lbl_freq,        is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.edit_freq,       is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.lbl_gain,        is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.edit_gain,       is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.lbl_ppm,         is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.edit_ppm,        is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.lbl_device,      is_rtl ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_app.edit_device,     is_rtl ? SW_SHOW : SW_HIDE);
+    /* Stop-capture button only for RTL */
+    ShowWindow(g_app.btn_stop_capture, is_rtl ? SW_SHOW : SW_HIDE);
+    /* btn_demod label changes */
+    SetWindowTextA(g_app.btn_demod, is_rtl ? g_lang.btn_capture : g_lang.btn_demodulate);
+}
+
 static void apply_language(void)
 {
     /* Labels */
@@ -1376,6 +1485,26 @@ static void apply_language(void)
         int paused = InterlockedCompareExchange(&g_app.engine.paused, 0, 0);
         SetWindowTextA(g_app.btn_pause, paused ? g_lang.btn_resume : g_lang.btn_pause);
     }
+    /* RTL-SDR labels */
+    SetWindowTextA(g_app.radio_wav,        g_lang.radio_wav);
+    SetWindowTextA(g_app.radio_rtl,        g_lang.radio_rtl);
+    if (g_app.lbl_freq)   SetWindowTextA(g_app.lbl_freq,   g_lang.label_freq);
+    if (g_app.lbl_gain)   SetWindowTextA(g_app.lbl_gain,   g_lang.label_gain);
+    if (g_app.lbl_ppm)    SetWindowTextA(g_app.lbl_ppm,    g_lang.label_ppm);
+    if (g_app.lbl_device) SetWindowTextA(g_app.lbl_device, g_lang.label_device);
+    if (g_app.lbl_slot)   SetWindowTextA(g_app.lbl_slot,   g_lang.label_slot);
+    if (g_app.lbl_inverted_label) SetWindowTextA(g_app.lbl_inverted_label, g_lang.label_inverted);
+    if (g_app.btn_stop_capture) SetWindowTextA(g_app.btn_stop_capture, g_lang.btn_stop_capture);
+    /* Slot combo: clear and re-add items in current language */
+    if (g_app.combo_slot) {
+        SendMessageA(g_app.combo_slot, CB_RESETCONTENT, 0, 0);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_both);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_1);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_2);
+        SendMessageA(g_app.combo_slot, CB_SETCURSEL, 0, 0);
+    }
+    if (g_app.chk_inverted) SetWindowTextA(g_app.chk_inverted, g_lang.label_inverted);
+    update_capture_mode_visibility();
     /* Section headers and status are redrawn on next tick */
     InvalidateRect(g_app.hwnd, NULL, TRUE);
     update_status_text();
@@ -1564,6 +1693,54 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             95, y, 690, 16, hwnd, NULL, NULL, NULL);
 
+        /* WAV/RTL radio buttons */
+        g_app.radio_wav = CreateWindowA("BUTTON", g_lang.radio_wav,
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
+            0, 0, 60, 20, hwnd, (HMENU)ID_RADIO_WAV, NULL, NULL);
+        g_app.radio_rtl = CreateWindowA("BUTTON", g_lang.radio_rtl,
+            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+            0, 0, 70, 20, hwnd, (HMENU)ID_RADIO_RTL, NULL, NULL);
+        SendMessageA(g_app.radio_wav, BM_SETCHECK, BST_CHECKED, 0);
+
+        /* RTL-SDR controls (initially hidden) */
+        g_app.lbl_freq   = CreateWindowA("STATIC", g_lang.label_freq, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
+        g_app.edit_freq  = CreateWindowA("EDIT",   "851.375",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0,0,1,1, hwnd, (HMENU)ID_EDIT_FREQ, NULL, NULL);
+        g_app.lbl_gain   = CreateWindowA("STATIC", g_lang.label_gain, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
+        g_app.edit_gain  = CreateWindowA("EDIT",   "0",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_GAIN, NULL, NULL);
+        g_app.lbl_ppm    = CreateWindowA("STATIC", g_lang.label_ppm, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
+        g_app.edit_ppm   = CreateWindowA("EDIT",   "0",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_PPM, NULL, NULL);
+        g_app.lbl_device = CreateWindowA("STATIC", g_lang.label_device, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
+        g_app.edit_device= CreateWindowA("EDIT",   "0",
+            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_DEVICE, NULL, NULL);
+
+        /* Slot combo (shared WAV/RTL) */
+        g_app.combo_slot = CreateWindowA("COMBOBOX", "",
+            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            0,0,1,60, hwnd, (HMENU)ID_COMBO_SLOT, NULL, NULL);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_both);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_1);
+        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_2);
+        SendMessageA(g_app.combo_slot, CB_SETCURSEL, 0, 0);
+
+        /* Inverted checkbox (shared) */
+        g_app.chk_inverted = CreateWindowA("BUTTON", g_lang.label_inverted,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+            0,0,1,1, hwnd, (HMENU)ID_CHK_INVERTED, NULL, NULL);
+
+        /* Slot / Inverted static labels */
+        g_app.lbl_slot = CreateWindowA("STATIC", g_lang.label_slot,
+            WS_CHILD | WS_VISIBLE, 0,0,1,1, hwnd, NULL, NULL, NULL);
+        g_app.lbl_inverted_label = CreateWindowA("STATIC", g_lang.label_inverted,
+            WS_CHILD | WS_VISIBLE, 0,0,1,1, hwnd, NULL, NULL, NULL);
+
+        /* Stop-capture button (RTL only, initially hidden) */
+        g_app.btn_stop_capture = CreateWindowA("BUTTON", g_lang.btn_stop_capture,
+            WS_CHILD | BS_OWNERDRAW,
+            0,0,1,1, hwnd, (HMENU)ID_BTN_STOP_CAPTURE, NULL, NULL);
+
         /* === BRUTE FORCE section === */
         y = 125;
         g_app.lbl_file = CreateWindowA("STATIC", g_lang.label_file, WS_CHILD | WS_VISIBLE | SS_RIGHT,
@@ -1697,6 +1874,19 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case ID_RADIO_WAV:
+            g_app.capture_mode = 0;
+            update_capture_mode_visibility();
+            layout_controls_current();
+            return 0;
+        case ID_RADIO_RTL:
+            g_app.capture_mode = 1;
+            update_capture_mode_visibility();
+            layout_controls_current();
+            return 0;
+        case ID_BTN_STOP_CAPTURE:
+            InterlockedExchange(&g_app.demod_running, 0);
+            return 0;
         case ID_BTN_BROWSE:     choose_file(hwnd); return 0;
         case ID_BTN_BROWSE_WAV: choose_wav_file(hwnd); return 0;
         case ID_BTN_DEMOD:      start_demod(hwnd); return 0;
