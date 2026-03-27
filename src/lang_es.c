@@ -34,6 +34,34 @@ const Lang g_lang_es = {
     .label_threads    = "Hilos:",
     .label_samples    = "Muestras:",
 
+    /* ---- Etiquetas RTL ---- */
+    .label_freq          = "Frec (MHz)",
+    .label_gain          = "Ganancia",
+    .label_ppm           = "PPM",
+    .label_device        = "Dispositivo",
+    .label_slot          = "Slot",
+    .label_inverted      = "Invertida",
+    .slot_both           = "Ambos",
+    .slot_1              = "Slot 1",
+    .slot_2              = "Slot 2",
+    /* Modo captura */
+    .radio_wav           = "WAV",
+    .radio_rtl           = "RTL-SDR",
+    .btn_capture         = "Capturar",
+    .btn_stop_capture    = "Detener",
+    /* Titulos de tiles */
+    .tile_throughput     = "VELOCIDAD",
+    .tile_progress       = "PROGRESO",
+    .tile_candidate      = "MEJOR CANDIDATO",
+    /* Barra de estado */
+    .status_backend_cuda = "GPU CUDA",
+    .status_backend_cpu  = "CPU",
+    .msg_cuda_fallback   = "Error CUDA \xe2\x80\x94 continuando en CPU",
+    /* Validacion de payloads */
+    .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
+    .val_align_warn      = "! Advertencia de alineamiento",
+    .warn_low_payloads_n = "! Solo %zu payloads -- baja confianza, riesgo de falso positivo",
+
     /* ---- Botones ---- */
     .btn_demodulate = "Demodular",
     .btn_export     = "Exportar",

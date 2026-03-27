@@ -35,6 +35,34 @@ const Lang g_lang_en = {
     .label_threads    = "Threads:",
     .label_samples    = "Samples:",
 
+    /* ---- RTL labels ---- */
+    .label_freq          = "Freq (MHz)",
+    .label_gain          = "Gain",
+    .label_ppm           = "PPM",
+    .label_device        = "Device",
+    .label_slot          = "Slot",
+    .label_inverted      = "Inverted",
+    .slot_both           = "Both",
+    .slot_1              = "Slot 1",
+    .slot_2              = "Slot 2",
+    /* Capture mode */
+    .radio_wav           = "WAV",
+    .radio_rtl           = "RTL-SDR",
+    .btn_capture         = "Capture",
+    .btn_stop_capture    = "Stop",
+    /* Tile titles */
+    .tile_throughput     = "THROUGHPUT",
+    .tile_progress       = "PROGRESS",
+    .tile_candidate      = "BEST CANDIDATE",
+    /* Status strip */
+    .status_backend_cuda = "CUDA GPU",
+    .status_backend_cpu  = "CPU",
+    .msg_cuda_fallback   = "CUDA error \xe2\x80\x94 continued on CPU",
+    /* Payload validation */
+    .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
+    .val_align_warn      = "! Burst alignment warning",
+    .warn_low_payloads_n = "! Only %zu payloads -- low confidence, risk of false positive",
+
     /* ---- Buttons ---- */
     .btn_demodulate = "Demodulate",
     .btn_export     = "Export",

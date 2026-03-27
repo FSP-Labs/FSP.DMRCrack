@@ -37,6 +37,38 @@ typedef struct {
     const char *label_threads;
     const char *label_samples;
 
+    /* ---- RTL-SDR capture labels ---- */
+    const char *label_freq;          /* "Freq (MHz)" */
+    const char *label_gain;          /* "Gain" */
+    const char *label_ppm;           /* "PPM" */
+    const char *label_device;        /* "Device" */
+    const char *label_slot;          /* "Slot" */
+    const char *label_inverted;      /* "Inverted" */
+    const char *slot_both;           /* "Both" */
+    const char *slot_1;              /* "Slot 1" */
+    const char *slot_2;              /* "Slot 2" */
+
+    /* ---- Capture mode buttons ---- */
+    const char *radio_wav;           /* "WAV" */
+    const char *radio_rtl;           /* "RTL-SDR" */
+    const char *btn_capture;         /* "Capture" */
+    const char *btn_stop_capture;    /* "Stop" */
+
+    /* ---- Metric tile titles ---- */
+    const char *tile_throughput;     /* "THROUGHPUT" */
+    const char *tile_progress;       /* "PROGRESS" */
+    const char *tile_candidate;      /* "BEST CANDIDATE" */
+
+    /* ---- Status strip ---- */
+    const char *status_backend_cuda; /* "CUDA GPU" */
+    const char *status_backend_cpu;  /* "CPU" */
+    const char *msg_cuda_fallback;   /* "CUDA error — continued on CPU" */
+
+    /* ---- Payload validation ---- */
+    const char *val_payloads_ok;     /* "%zu payloads · KMI9: %zu/%zu · KID=%02X" */
+    const char *val_align_warn;      /* "! Burst alignment off" */
+    const char *warn_low_payloads_n; /* "! Only %zu payloads — low confidence, risk of false positive" */
+
     /* ---- Buttons ---- */
     const char *btn_demodulate;
     const char *btn_export;
