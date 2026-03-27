@@ -1,5 +1,22 @@
 # DMRCrack — Plan de Mejora de Velocidad: CPU+GPU Híbrido
 
+## ✅ COMPLETADO: GUI Operator Dashboard (2026-03-27)
+
+Las 10 tareas del plan `docs/plans/2026-03-26-gui-redesign.md` han sido implementadas:
+
+- **Task 1**: `gpu_keys_tested` counter en engine + snapshot
+- **Task 2**: Header bar + paleta de colores del Operator Dashboard
+- **Task 3**: AppState refactoring + nuevos controles RTL-SDR (radio, freq, gain, ppm, slot, inverted)
+- **Task 4**: `validate_payload_set()` en `payload_io.c`
+- **Task 5**: Modo RTL-SDR en `demod_thread_proc` (flags `-V`, `-xr`)
+- **Task 6**: `layout_controls` para paneles CAPTURE / BRUTE FORCE side-by-side
+- **Task 7**: Metric tiles (THROUGHPUT/PROGRESS/CANDIDATE) + status strip pintados en WM_PAINT
+- **Task 8**: Gráficos side-by-side con area fill y borde
+- **Task 9**: CUDA auto-fallback a CPU, low-payload inline warning
+- **Task 10**: Section headers en WM_PAINT, static labels para Slot/Inverted
+
+---
+
 > **Para Claude:** Usar `superpowers:executing-plans` para implementar tarea a tarea.
 
 **Objetivo:** Maximizar throughput de búsqueda de clave RC4-40 en hardware disponible
@@ -435,7 +452,7 @@ git commit -m "perf: enable per-burst floor rejection from k=1 (was k=3)"
 
 ---
 
-## TAREA 3: Hilos CPU paralelos al GPU
+## TAREA 3: Hilos CPU paralelos al GPU (CPU workers) añadir AVX2
 
 ### Fundamento
 
@@ -505,7 +522,7 @@ git commit -m "perf: launch CPU worker threads in parallel with GPU brute force"
 
 ---
 
-## TAREA 4: Herramienta de detección de frames de silencio
+## TAREA 4: Herramienta de detección de frames de silencio omitir por ahora — no aporta speedup inmediato
 
 ### ¿Para qué sirve?
 

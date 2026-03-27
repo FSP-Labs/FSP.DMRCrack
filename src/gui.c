@@ -2325,7 +2325,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
         RECT cli;
         GetClientRect(hwnd, &cli);
-        draw_header(hdc, cli.right);
+        int cw = cli.right;
+        draw_header(hdc, cw);
+
+        /* Section headers */
+        draw_section_header(hdc, 20,        HEADER_H + 8, cw/2 - 30, g_lang.section_capture);
+        draw_section_header(hdc, cw/2 + 10, HEADER_H + 8, cw/2 - 30, g_lang.section_bruteforce);
 
         /* Metric tiles + status strip */
         draw_all_tiles(hdc);
