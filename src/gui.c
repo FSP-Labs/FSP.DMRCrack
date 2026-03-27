@@ -271,14 +271,15 @@ static void layout_controls(int cw, int ch)
     ctrl_w = cw - 40;
 
     /* CAPTURE section */
-    y = 40;
+    y = HEADER_H + 8;
     if (g_app.lbl_audio) MoveWindow(g_app.lbl_audio, 20, y + 2, 70, 20, TRUE);
     if (g_app.edit_wav) MoveWindow(g_app.edit_wav, 95, y, ctrl_w - 386, 24, TRUE);
     if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, cw - 323, y, 36, 24, TRUE);
     if (g_app.btn_demod) MoveWindow(g_app.btn_demod, cw - 279, y, 100, 24, TRUE);
     if (g_app.btn_export) MoveWindow(g_app.btn_export, cw - 171, y, 60, 24, TRUE);
-    if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 103, y, 55, 24, TRUE);
-    if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 40, y, 36, 24, TRUE);
+    /* Header buttons — positioned at top right inside header bar */
+    if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 96,  (HEADER_H - 22) / 2, 50, 22, TRUE);
+    if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 38,  (HEADER_H - 22) / 2, 32, 22, TRUE);
     y += 28;
     if (g_app.demod_label) MoveWindow(g_app.demod_label, 95, y, ctrl_w - 80, 16, TRUE);
 
@@ -455,6 +456,67 @@ static void update_status_text(void)
         }
 
     (void)text; /* status_text removed; replaced by painted tiles in Task 7 */
+}
+
+/* --- Drawing: header bar --- */
+static void draw_header(HDC hdc, int cw)
+{
+    RECT r = { 0, 0, cw, HEADER_H };
+    HBRUSH hdr_br = CreateSolidBrush(CLR_HEADER);
+    FillRect(hdc, &r, hdr_br);
+    DeleteObject(hdr_br);
+
+    /* Bottom border line */
+    {
+        HPEN pen = CreatePen(PS_SOLID, 1, CLR_ACCENT);
+        HPEN old = (HPEN)SelectObject(hdc, pen);
+        MoveToEx(hdc, 0, HEADER_H - 1, NULL);
+        LineTo(hdc, cw, HEADER_H - 1);
+        SelectObject(hdc, old);
+        DeleteObject(pen);
+    }
+
+    SetBkMode(hdc, TRANSPARENT);
+
+    /* App name */
+    {
+        HFONT old = (HFONT)SelectObject(hdc, g_app.font_header);
+        SetTextColor(hdc, CLR_BRIGHT);
+        RECT tr = { 12, 0, 300, HEADER_H };
+        DrawTextA(hdc, "FSP.DMRCrack", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, old);
+    }
+
+    /* GPU info (center) */
+    if (g_app.engine.cuda_active && g_app.engine.cuda_device_name[0]) {
+        char gpu_info[256];
+        LONG cc_maj = InterlockedCompareExchange(&g_app.engine.cuda_compute_major, 0, 0);
+        LONG cc_min = InterlockedCompareExchange(&g_app.engine.cuda_compute_minor, 0, 0);
+        LONG sm_cnt = InterlockedCompareExchange(&g_app.engine.cuda_sm_count, 0, 0);
+        LONG stage  = InterlockedCompareExchange(&g_app.engine.cuda_stage, 0, 0);
+        COLORREF dot_clr = (stage == 2) ? CLR_RUNNING :
+                           (stage == 3) ? CLR_STOPPED : CLR_PAUSED;
+        if (cc_maj > 0 && sm_cnt > 0)
+            snprintf(gpu_info, sizeof(gpu_info), "%s  \xb7  sm_%ld%ld  \xb7  %ld SMs",
+                     g_app.engine.cuda_device_name, cc_maj, cc_min, sm_cnt);
+        else
+            snprintf(gpu_info, sizeof(gpu_info), "%s", g_app.engine.cuda_device_name);
+
+        HFONT old = (HFONT)SelectObject(hdc, g_app.font_header_sub);
+        RECT tr = { 200, 0, cw - 100, HEADER_H };
+
+        /* Colored dot */
+        {
+            HBRUSH dot_br = CreateSolidBrush(dot_clr);
+            RECT dot_r = { 200, (HEADER_H - 8) / 2, 208, (HEADER_H - 8) / 2 + 8 };
+            FillRect(hdc, &dot_r, dot_br);
+            DeleteObject(dot_br);
+        }
+        tr.left = 214;
+        SetTextColor(hdc, CLR_DIM);
+        DrawTextA(hdc, gpu_info, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, old);
+    }
 }
 
 /* --- Drawing: section header --- */
@@ -1665,9 +1727,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         HDC hdc = BeginPaint(hwnd, &ps);
         SetBkMode(hdc, TRANSPARENT);
 
-        /* Section headers */
-        draw_section_header(hdc, 20, 15, 860, g_lang.section_capture);
-        draw_section_header(hdc, 20, 100, 860, g_lang.section_bruteforce);
+        RECT cli;
+        GetClientRect(hwnd, &cli);
+        draw_header(hdc, cli.right);
 
         /* Graphs */
         draw_graph(hdc, &g_app.graph_rect);
