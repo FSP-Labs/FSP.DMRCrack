@@ -1701,6 +1701,9 @@ static int start_bruteforce(HWND hwnd)
         return 0;
     }
 
+    g_app.last_cfg = cfg;
+    g_app.fallback_triggered = 0;
+    g_app.fallback_banner_ticks = 0;
     g_app.notified_completion = 0;
     g_app.hist_count = g_app.hist_pos = 0;
     g_app.score_hist_count = g_app.score_hist_pos = 0;
@@ -2275,7 +2278,40 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         break;
 
     case WM_TIMER:
-        if (wparam == IDT_UI_REFRESH) refresh_snapshot_and_ui();
+        if (wparam == IDT_UI_REFRESH) {
+            refresh_snapshot_and_ui();
+
+            /* CUDA fallback: if CUDA error while still running, switch to CPU */
+            if (!g_app.fallback_triggered
+                && g_app.engine.cuda_active
+                && g_app.engine.cuda_error[0]
+                && g_app.snapshot.running
+                && !g_app.snapshot.paused)
+            {
+                g_app.fallback_triggered = 1;
+                g_app.fallback_banner_ticks = 32; /* 8 seconds @ 4 ticks/sec */
+
+                uint64_t keys_done = g_app.snapshot.keys_tested;
+                bruteforce_stop(&g_app.engine);
+
+                BruteforceConfig fallback_cfg = g_app.last_cfg;
+                if (keys_done < fallback_cfg.end_key - fallback_cfg.start_key)
+                    fallback_cfg.start_key += keys_done;
+                fallback_cfg.thread_count = 4;
+                g_app.engine.cuda_error[0] = '\0';
+
+                char ferr[256] = {0};
+                bruteforce_start(&g_app.engine, &fallback_cfg, &g_app.payloads, ferr, sizeof(ferr));
+                g_app.hist_count = g_app.hist_pos = 0;
+                g_app.score_hist_count = g_app.score_hist_pos = 0;
+            }
+
+            /* Countdown banner */
+            if (g_app.fallback_banner_ticks > 0) {
+                g_app.fallback_banner_ticks--;
+                InvalidateRect(g_app.hwnd, &g_app.status_strip_rect, FALSE);
+            }
+        }
         return 0;
 
     case WM_APP_DEMOD_DONE:
