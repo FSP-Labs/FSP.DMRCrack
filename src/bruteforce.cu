@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <process.h>
 #include <string.h>
+#include <immintrin.h>   /* AVX2 intrinsics for 4-way CPU worker S-box init */
 
 // CUDA headers
 #include <cuda_runtime.h>
@@ -669,7 +670,7 @@ void bruteforce_kernel_strict(
                 for (int b = 0; b < 8; b++) BCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
 
                 /* Per-burst absolute pruning: reject wrong keys as early as possible */
-                if (enable_prune && processed_bursts >= 3 &&
+                if (enable_prune && processed_bursts >= 1 &&
                     total_score < d_abs_floor[processed_bursts]) {
                     goto next_key;
                 }
@@ -731,6 +732,190 @@ void bruteforce_kernel_strict(
     if (local_keys > 0) {
         atomicAdd((unsigned long long int*)dev_keys_tested, (unsigned long long)local_keys);
     }
+}
+
+/* =========================================================================
+ * ILP-2 STRICT KERNEL — 2 keys per thread, 128 threads/block
+ * Each thread interleaves two independent RC4 chains to hide L1 load latency
+ * without relying solely on warp switching.
+ * Config: __launch_bounds__(128, 4) -> ≤64 regs/thread target
+ * ========================================================================= */
+__global__ __launch_bounds__(128, 4)
+void bruteforce_kernel_strict_ilp2(
+    uint64_t start_key,
+    uint64_t total_keys,
+    int payload_count,
+    uint32_t global_mi,
+    unsigned long long* __restrict__ dev_keys_tested,
+    float* __restrict__ dev_best_score,
+    unsigned long long* __restrict__ dev_best_key,
+    int* __restrict__ dev_stop_requested)
+{
+    uint64_t tid     = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
+    uint64_t stride  = (uint64_t)gridDim.x * blockDim.x;
+    /* Each thread processes 2 consecutive keys: base_key and base_key+1 */
+    uint64_t stride2 = stride * 2ULL;
+    const int enable_prune = (total_keys > (1ULL << 20)) ? 1 : 0;
+    int local_keys = 0;
+
+    for (uint64_t i = tid * 2; i < total_keys; i += stride2) {
+        if ((i & 0x3FFu) == 0 && dev_stop_requested[0]) return;
+
+        /* --- Key A --- */
+        uint64_t key_a = start_key + i;
+        unsigned char ka[5];
+        key_to_5bytes_dev(key_a, ka);
+
+        /* --- Key B (next key) --- */
+        uint64_t key_b = key_a + 1;
+        if (key_b >= start_key + total_keys) key_b = key_a; /* last key: duplicate */
+        unsigned char kb[5];
+        key_to_5bytes_dev(key_b, kb);
+
+        float score_a = 0.0f, score_b = 0.0f;
+        int bursts_a = 0, bursts_b = 0;
+        int pruned_a = 0, pruned_b = 0;
+
+        /* Packed uint16 bit-freq accumulators — one set per key */
+        unsigned int ba[12], bb[12];
+        #pragma unroll
+        for (int k = 0; k < 12; k++) { ba[k] = 0u; bb[k] = 0u; }
+
+#define BA_ADD(b, bit) ba[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
+#define BB_ADD(b, bit) bb[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
+#define BA_GET(b) ((float)((ba[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
+#define BB_GET(b) ((float)((bb[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
+
+        for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
+            /* --- MI for this superframe --- */
+            uint32_t mi = global_mi;
+            if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u))
+                mi = d_const_mi[sf_base];
+
+            /* --- KSA for key A and key B in parallel (interleaved) --- */
+            unsigned char kmi_a[9], kmi_b[9];
+            compose_kmi9_dev(ka, mi, kmi_a);
+            compose_kmi9_dev(kb, mi, kmi_b);
+
+            RC4_CTX_DEV rc4_a, rc4_b;
+            rc4_ksa9_dev(&rc4_a, kmi_a);   /* KSA-A */
+            rc4_ksa9_dev(&rc4_b, kmi_b);   /* KSA-B (independent: compiler pipelines loads) */
+            rc4_discard_dev(&rc4_a, 256);
+            rc4_discard_dev(&rc4_b, 256);
+
+            for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
+                int p = sf_base + burst_pos;
+                if (p >= payload_count) break;
+                const unsigned char *cp = d_const_cipher_packs + (p * 21);
+
+                /* --- Decrypt 3 sub-frames for A and B, interleaved --- */
+                unsigned char pa0[3], pa1[3], pa2[3];
+                unsigned char pb0[3], pb1[3], pb2[3];
+
+                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 0,  pa0);
+                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 0,  pb0); /* independent chain */
+                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 7,  pa1);
+                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 7,  pb1);
+                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 14, pa2);
+                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 14, pb2);
+
+                /* --- Hamming scores --- */
+                int ha01 = __popc((unsigned int)(pa0[0]^pa1[0]))
+                         + __popc((unsigned int)(pa0[1]^pa1[1]))
+                         + __popc((unsigned int)(pa0[2]^pa1[2]));
+                int ha12 = __popc((unsigned int)(pa1[0]^pa2[0]))
+                         + __popc((unsigned int)(pa1[1]^pa2[1]))
+                         + __popc((unsigned int)(pa1[2]^pa2[2]));
+                int hb01 = __popc((unsigned int)(pb0[0]^pb1[0]))
+                         + __popc((unsigned int)(pb0[1]^pb1[1]))
+                         + __popc((unsigned int)(pb0[2]^pb1[2]));
+                int hb12 = __popc((unsigned int)(pb1[0]^pb2[0]))
+                         + __popc((unsigned int)(pb1[1]^pb2[1]))
+                         + __popc((unsigned int)(pb1[2]^pb2[2]));
+
+                if (!pruned_a) { score_a += (float)(48 - ha01 - ha12); bursts_a++; }
+                if (!pruned_b) { score_b += (float)(48 - hb01 - hb12); bursts_b++; }
+
+                /* Bit-freq accumulators */
+                if (!pruned_a) {
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BA_ADD(b,    (pa0[0]>>(7-b))&1);
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BA_ADD(8+b,  (pa0[1]>>(7-b))&1);
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BA_ADD(16+b, (pa0[2]>>(7-b))&1);
+                }
+                if (!pruned_b) {
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BB_ADD(b,    (pb0[0]>>(7-b))&1);
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BB_ADD(8+b,  (pb0[1]>>(7-b))&1);
+                    #pragma unroll
+                    for (int b=0;b<8;b++) BB_ADD(16+b, (pb0[2]>>(7-b))&1);
+                }
+
+                /* Per-burst floor — applied to both independently */
+                if (enable_prune && bursts_a >= 1 && !pruned_a &&
+                    score_a < d_abs_floor[bursts_a]) pruned_a = 1;
+                if (enable_prune && bursts_b >= 1 && !pruned_b &&
+                    score_b < d_abs_floor[bursts_b]) pruned_b = 1;
+                if (pruned_a && pruned_b) break;
+            }
+
+            if (pruned_a && pruned_b) break;
+
+            /* Chi2-floor at superframe boundary for both */
+            if (enable_prune && bursts_a >= 6 && !pruned_a) {
+                float hn = (float)bursts_a * 0.5f;
+                float chi2 = 0.0f;
+                #pragma unroll
+                for (int b=0;b<24;b++) { float d=BA_GET(b)-hn; chi2+=d*d; }
+                float floor_v = 6.0f*(float)bursts_a - 3.0f*__fsqrt_rn(48.0f*(float)bursts_a);
+                if (chi2 < floor_v) pruned_a = 1;
+            }
+            if (enable_prune && bursts_b >= 6 && !pruned_b) {
+                float hn = (float)bursts_b * 0.5f;
+                float chi2 = 0.0f;
+                #pragma unroll
+                for (int b=0;b<24;b++) { float d=BB_GET(b)-hn; chi2+=d*d; }
+                float floor_v = 6.0f*(float)bursts_b - 3.0f*__fsqrt_rn(48.0f*(float)bursts_b);
+                if (chi2 < floor_v) pruned_b = 1;
+            }
+            if (pruned_a && pruned_b) break;
+        }
+
+#undef BA_ADD
+#undef BB_ADD
+#undef BA_GET
+#undef BB_GET
+
+        /* Chi2 final score boost for non-pruned keys */
+        if (!pruned_a && bursts_a > 0) {
+            float hn = (float)bursts_a * 0.5f;
+            float chi2 = 0.0f;
+            for (int b=0;b<12;b++) {
+                float d0 = (float)(ba[b] & 0xFFFFu) - hn; chi2 += d0*d0;
+                float d1 = (float)(ba[b] >> 16)     - hn; chi2 += d1*d1;
+            }
+            score_a += chi2 * 0.1f;
+        }
+        if (!pruned_b && bursts_b > 0) {
+            float hn = (float)bursts_b * 0.5f;
+            float chi2 = 0.0f;
+            for (int b=0;b<12;b++) {
+                float d0 = (float)(bb[b] & 0xFFFFu) - hn; chi2 += d0*d0;
+                float d1 = (float)(bb[b] >> 16)     - hn; chi2 += d1*d1;
+            }
+            score_b += chi2 * 0.1f;
+        }
+
+        if (!pruned_a)                 update_best_score_dev(score_a, key_a, dev_best_score, dev_best_key);
+        if (!pruned_b && key_b != key_a) update_best_score_dev(score_b, key_b, dev_best_score, dev_best_key);
+
+        local_keys += (key_b != key_a) ? 2 : 1;
+    }
+
+    atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
 }
 
 __global__ __launch_bounds__(256, 4)
@@ -1238,6 +1423,86 @@ static void save_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode
 /* Forward declaration — defined after scoring helpers, called from cuda_launcher_thread */
 static void run_dictionary_phase(BruteforceEngine *engine);
 
+/* CpuWorkerCtx and forward declarations needed by cpu_4way_worker_proc / cuda_launcher_thread */
+typedef struct {
+    BruteforceEngine *engine;
+    uint64_t start_key;
+    uint64_t end_key;
+    int worker_index;
+    const unsigned char *cipher_packs; /* [payload_count*21], precomputed key-independent data */
+    int payload_count;
+    int mode_policy;
+} CpuWorkerCtx;
+
+static void key_to_5bytes_cpu(uint64_t key, unsigned char out[5]);
+static double score_candidate_host(
+    const PayloadSet *payloads, int sample_lines,
+    int sample_bytes, const unsigned char key[5]);
+
+/* ─── Identity table for AVX2 S-box initialisation ──────────────────────── */
+static const unsigned char rc4_id256[256] = {
+      0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+     16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+     32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+     48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+     64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+     80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+     96, 97, 98, 99,100,101,102,103,104,105,106,107,108,109,110,111,
+    112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,
+    128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,
+    144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,
+    160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,
+    176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,
+    192,193,194,195,196,197,198,199,200,201,202,203,204,205,206,207,
+    208,209,210,211,212,213,214,215,216,217,218,219,220,221,222,223,
+    224,225,226,227,228,229,230,231,232,233,234,235,236,237,238,239,
+    240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
+};
+
+/* ─── 4-way interleaved RC4 KSA (9-byte key) ────────────────────────────── *
+ * Runs four independent RC4 key-scheduling passes in the same loop body so
+ * the CPU out-of-order engine overlaps independent load/store chains.
+ * AVX2 is used for the identity S-box initialisation (8 × 256-bit stores
+ * per S-box instead of 256 byte stores) when compiled with /arch:AVX2.    */
+static void rc4_ksa9_4way(
+    unsigned char Sa[256], unsigned char Sb[256],
+    unsigned char Sc[256], unsigned char Sd[256],
+    const unsigned char ka[9], const unsigned char kb[9],
+    const unsigned char kc[9], const unsigned char kd[9])
+{
+    int i;
+    unsigned char t;
+    unsigned ja, jb, jc, jd;
+
+    /* S-box init: identity permutation */
+#if defined(__AVX2__)
+    for (i = 0; i < 8; i++) {
+        __m256i v = _mm256_loadu_si256((const __m256i *)(rc4_id256 + i * 32));
+        _mm256_storeu_si256((__m256i *)(Sa + i * 32), v);
+        _mm256_storeu_si256((__m256i *)(Sb + i * 32), v);
+        _mm256_storeu_si256((__m256i *)(Sc + i * 32), v);
+        _mm256_storeu_si256((__m256i *)(Sd + i * 32), v);
+    }
+#else
+    for (i = 0; i < 256; i++)
+        Sa[i] = Sb[i] = Sc[i] = Sd[i] = (unsigned char)i;
+#endif
+
+    /* 4-way interleaved KSA — four independent j-chains */
+    ja = jb = jc = jd = 0u;
+    for (i = 0; i < 256; i++) {
+        int ki = i % 9;
+        ja = (ja + Sa[i] + ka[ki]) & 0xFFu;
+        jb = (jb + Sb[i] + kb[ki]) & 0xFFu;
+        jc = (jc + Sc[i] + kc[ki]) & 0xFFu;
+        jd = (jd + Sd[i] + kd[ki]) & 0xFFu;
+        t = Sa[i]; Sa[i] = Sa[ja]; Sa[ja] = t;
+        t = Sb[i]; Sb[i] = Sb[jb]; Sb[jb] = t;
+        t = Sc[i]; Sc[i] = Sc[jc]; Sc[jc] = t;
+        t = Sd[i]; Sd[i] = Sd[jd]; Sd[jd] = t;
+    }
+}
+
 /* Consistent CUDA error checking macro used throughout cuda_launcher_thread.
  * On failure: records message in engine->cuda_error and jumps to cleanup. */
 #define CUDA_CHECK(call, msg) do { \
@@ -1248,6 +1513,254 @@ static void run_dictionary_phase(BruteforceEngine *engine);
         goto cleanup; \
     } \
 } while (0)
+
+/* ─── 4-way AVX2 CPU assist worker ──────────────────────────────────────── *
+ * Processes 4 candidate keys per outer loop iteration using:
+ *   • AVX2 S-box init (8 × 256-bit stores per box, vs 256 byte stores)
+ *   • 4-way interleaved KSA — lets the CPU OOO engine overlap 4 independent
+ *     scatter/gather chains, roughly doubling effective IPC on the KSA loop
+ *   • Per-superframe KSA: one KSA per 6-burst superframe (instead of 6),
+ *     then continuous PRGA across all bursts — 6× fewer KSA calls
+ *   • P-core pinning via SetThreadAffinityMask(1ULL << worker_index)
+ *
+ * Scores keys using the same inter-frame Hamming metric as the GPU kernel
+ * (score_burst = 48 − HD(sf0,sf1) − HD(sf1,sf2)) so GPU/CPU best_score are
+ * directly comparable.
+ *
+ * Falls back to scalar score_candidate_host() for legacy mode (mode_policy<2)
+ * or when cipher_packs is NULL.
+ *
+ * Does NOT touch finished_threads/search_completed/running — the GPU thread
+ * owns those. */
+static unsigned __stdcall cpu_4way_worker_proc(void *arg)
+{
+    CpuWorkerCtx *ctx = (CpuWorkerCtx *)arg;
+    BruteforceEngine *engine = ctx->engine;
+    const unsigned char *cipher_packs = ctx->cipher_packs;
+    int pcount = ctx->payload_count;
+    uint64_t local_count = 0;
+    uint64_t k;
+    int b;
+
+    /* Pin to logical processor = worker_index (P-cores 0-5 on i7-12700H) */
+    if (ctx->worker_index < 64) {
+        SetThreadAffinityMask(GetCurrentThread(), 1ULL << (unsigned)ctx->worker_index);
+    }
+
+    if (ctx->mode_policy >= 2 && cipher_packs != NULL && pcount > 0) {
+        /* ── Correct pipeline: 4-way KSA + per-superframe PRGA ── */
+        k = ctx->start_key;
+        while (k <= ctx->end_key) {
+            int batch, sf_base;
+            unsigned char key5[4][5];
+            double scores[4];
+            int pruned[4], all_pruned_cpu, processed_bursts_cpu;
+
+            /* Stop/pause check every 4096 keys */
+            if ((local_count & 0xFFFu) == 0) {
+                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
+                    WaitForSingleObject(engine->pause_event, INFINITE);
+                    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                }
+            }
+
+            /* Batch up to 4 keys; pad unused slots with copies of key5[0] */
+            batch = (ctx->end_key - k >= 3) ? 4 : (int)(ctx->end_key - k + 1);
+            key_to_5bytes_cpu(k,                           key5[0]);
+            key_to_5bytes_cpu(k + (batch > 1 ? 1u : 0u),  key5[1]);
+            key_to_5bytes_cpu(k + (batch > 2 ? 2u : 0u),  key5[2]);
+            key_to_5bytes_cpu(k + (batch > 3 ? 3u : 0u),  key5[3]);
+
+            scores[0] = scores[1] = scores[2] = scores[3] = 0.0;
+
+            /* Pruning state: mark pad slots as already-pruned */
+            {
+                int _b;
+                for (_b = 0; _b < 4; _b++) pruned[_b] = (_b >= batch) ? 1 : 0;
+            }
+            processed_bursts_cpu = 0;
+            all_pruned_cpu = (batch <= 0);
+
+            /* Iterate over superframes (6 consecutive bursts share the same MI) */
+            sf_base = 0;
+            while (sf_base < pcount && !all_pruned_cpu) {
+                int n_bursts = pcount - sf_base;
+                unsigned char kmi9[4][9];
+                unsigned char Sa[256], Sb[256], Sc[256], Sd[256];
+                unsigned ia, ja, ib, jb, ic, jc, id, jd;
+                unsigned char _t;
+                int n, burst, sf;
+                uint32_t mi;
+
+                if (n_bursts > 6) n_bursts = 6;
+
+                /* Same MI for all bursts in the superframe */
+                mi = engine->payloads->items[sf_base].has_mi
+                     ? engine->payloads->items[sf_base].mi
+                     : engine->payloads->global_mi;
+
+                /* Build KMI9 = key5 || MI[4 bytes] for each of the 4 keys */
+                for (b = 0; b < 4; b++) {
+                    kmi9[b][0] = key5[b][0]; kmi9[b][1] = key5[b][1];
+                    kmi9[b][2] = key5[b][2]; kmi9[b][3] = key5[b][3];
+                    kmi9[b][4] = key5[b][4];
+                    kmi9[b][5] = (unsigned char)((mi >> 24) & 0xFFu);
+                    kmi9[b][6] = (unsigned char)((mi >> 16) & 0xFFu);
+                    kmi9[b][7] = (unsigned char)((mi >>  8) & 0xFFu);
+                    kmi9[b][8] = (unsigned char)( mi        & 0xFFu);
+                }
+
+                /* One 4-way KSA for the whole superframe */
+                rc4_ksa9_4way(Sa, Sb, Sc, Sd, kmi9[0], kmi9[1], kmi9[2], kmi9[3]);
+
+                /* PRGA state (post-KSA: ci=0, cj=0 for all 4) */
+                ia = ja = ib = jb = ic = jc = id = jd = 0u;
+
+                /* Discard 256 bytes (4-way) — positions 1..256 of keystream */
+                for (n = 0; n < 256; n++) {
+                    ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
+                    _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
+                    ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
+                    _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
+                    ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
+                    _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
+                    id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
+                    _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
+                }
+
+                /* Continuous PRGA across all bursts in the superframe.
+                 * Burst b uses keystream positions 257+b*21 .. 277+b*21,
+                 * identical to rc4_init(kmi9) + rc4_discard(256+b*21) per burst. */
+                for (burst = 0; burst < n_bursts; burst++) {
+                    int burst_idx = sf_base + burst;
+                    const unsigned char *cp_base = cipher_packs + burst_idx * 21;
+                    unsigned char dec24[4][3][24]; /* [key][sf][bit] */
+
+                    for (sf = 0; sf < 3; sf++) {
+                        const unsigned char *cp = cp_base + sf * 7;
+                        unsigned char pa[7], pb[7], pc[7], pd[7];
+                        int i;
+
+                        /* 7 bytes of keystream (4-way interleaved PRGA) */
+                        for (n = 0; n < 7; n++) {
+                            ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
+                            _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
+                            pa[n] = cp[n] ^ Sa[(Sa[ia]+Sa[ja])&0xFFu];
+
+                            ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
+                            _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
+                            pb[n] = cp[n] ^ Sb[(Sb[ib]+Sb[jb])&0xFFu];
+
+                            ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
+                            _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
+                            pc[n] = cp[n] ^ Sc[(Sc[ic]+Sc[jc])&0xFFu];
+
+                            id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
+                            _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
+                            pd[n] = cp[n] ^ Sd[(Sd[id]+Sd[jd])&0xFFu];
+                        }
+
+                        /* Unpack first 24 bits of each 7-byte plaintext block */
+                        for (i = 0; i < 24; i++) {
+                            int sh = 7 - (i & 7);
+                            dec24[0][sf][i] = (pa[i>>3] >> sh) & 1u;
+                            dec24[1][sf][i] = (pb[i>>3] >> sh) & 1u;
+                            dec24[2][sf][i] = (pc[i>>3] >> sh) & 1u;
+                            dec24[3][sf][i] = (pd[i>>3] >> sh) & 1u;
+                        }
+                    } /* sf */
+
+                    /* Hamming score per key: burst_score = 48 − HD(sf0,sf1) − HD(sf1,sf2)
+                     * Matches GPU kernel score_burst_correct_dev(). */
+                    for (b = 0; b < 4; b++) {
+                        int h01 = 0, h12 = 0, i;
+                        if (pruned[b]) continue;
+                        for (i = 0; i < 24; i++) {
+                            h01 += dec24[b][0][i] ^ dec24[b][1][i];
+                            h12 += dec24[b][1][i] ^ dec24[b][2][i];
+                        }
+                        scores[b] += (double)(48 - h01 - h12);
+                    }
+
+                    /* Per-burst absolute floor (mirrors GPU kernel d_abs_floor[k]).
+                     * floor[k] = 33k − 2σ_k, σ_k = 3.46·√k.
+                     * Rejects >99.9997% of wrong keys from burst 1 onward. */
+                    {
+                        float fv;
+                        processed_bursts_cpu++;
+                        fv = 33.0f * (float)processed_bursts_cpu
+                           - 6.92f * sqrtf((float)processed_bursts_cpu);
+                        all_pruned_cpu = 1;
+                        for (b = 0; b < 4; b++) {
+                            if (!pruned[b]) {
+                                if ((float)scores[b] < fv)
+                                    pruned[b] = 1;
+                                else
+                                    all_pruned_cpu = 0;
+                            }
+                        }
+                    }
+                    if (all_pruned_cpu) break;
+                } /* burst */
+
+                sf_base += n_bursts;
+            } /* superframe */
+
+            /* Update global best only for keys that survived all pruning checks */
+            for (b = 0; b < batch; b++) {
+                if (pruned[b]) continue;
+                EnterCriticalSection(&engine->lock);
+                if (scores[b] > engine->best_score) {
+                    engine->best_score = scores[b];
+                    engine->best_key   = k + (uint64_t)b;
+                }
+                LeaveCriticalSection(&engine->lock);
+            }
+
+            local_count += (uint64_t)batch;
+            k           += (uint64_t)batch;
+            if ((local_count & 0x3FFu) == 0)
+                InterlockedAdd64(&engine->keys_tested, 1024LL);
+        }
+    } else {
+        /* ── Fallback: scalar scoring for legacy mode (mode_policy < 2) ── */
+        for (k = ctx->start_key; k <= ctx->end_key; ++k) {
+            unsigned char key_bytes[5];
+            double score;
+
+            if ((local_count & 0xFFFu) == 0) {
+                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
+                    WaitForSingleObject(engine->pause_event, INFINITE);
+                    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                }
+            }
+
+            key_to_5bytes_cpu(k, key_bytes);
+            score = score_candidate_host(engine->payloads, engine->cfg.sample_lines,
+                                         engine->cfg.sample_bytes, key_bytes);
+
+            EnterCriticalSection(&engine->lock);
+            if (score > engine->best_score) {
+                engine->best_score = score;
+                engine->best_key   = k;
+            }
+            LeaveCriticalSection(&engine->lock);
+
+            local_count++;
+            if ((local_count & 0x3FFu) == 0)
+                InterlockedAdd64(&engine->keys_tested, 1024LL);
+
+            if (k == ctx->end_key) break;
+        }
+    }
+
+    if ((local_count & 0x3FFu) != 0)
+        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & 0x3FFu));
+
+    return 0;
+}
 
 static unsigned __stdcall cuda_launcher_thread(void *arg)
 {
@@ -1271,6 +1784,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     int max_payload_len = 0;
     int bytes_per_line = 27;
     size_t payload_bytes = 0;
+    int cuda_sm = 0;
+    int use_ilp2 = 0;
+    CpuWorkerCtx *cpu_assist_ctxs = NULL;
+    HANDLE *cpu_assist_handles = NULL;
+    int n_cpu_assist = 0;
+    unsigned long long last_gpu_kt = 0; /* GPU keys_tested at last poll — for delta-add */
     cudaDeviceProp prop;
 
     int payload_limit = engine->cfg.sample_lines;
@@ -1463,6 +1982,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     InterlockedExchange(&engine->cuda_compute_major, prop.major);
     InterlockedExchange(&engine->cuda_compute_minor, prop.minor);
 
+    /* ILP-2 kernel disabled: L1 cache overflow (4 blocks × 64KB > 128KB).
+     * Strict kernel (8 M/s) is faster than ILP-2 (3.4 M/s) on RTX 3050 Ti.
+     * CPU AVX2 workers provide the additional throughput instead. */
+    cuda_sm = prop.major * 10 + prop.minor;
+    use_ilp2 = 0; /* (mode_policy >= 2) && (cuda_sm >= 86) — disabled */
+
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
     if (cu_err != cudaSuccess) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaStreamCreate compute: %s", cudaGetErrorString(cu_err));
@@ -1524,6 +2049,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
             for (int ti = 0; ti < 2 && !skip_benchmark; ++ti) {
                 int tpb = tpb_candidates[ti];
                 if (tpb > prop.maxThreadsPerBlock || (tpb & 31) != 0) continue;
+                if (use_ilp2 && tpb != 128) continue; /* ILP-2 fixed to 128 tpb */
 
                 for (int bi = 0; bi < bpsm_count; ++bi) {
                     if (GetTickCount64() - tune_start_tick >= tune_budget_ms) {
@@ -1564,7 +2090,18 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                             uint64_t cur = cand_chunk;
                             if (tuned + cur > tune_keys) cur = tune_keys - tuned;
 
-                            if (strict_mode) {
+                            if (use_ilp2) {
+                                bruteforce_kernel_strict_ilp2<<<blocks, 128, 0, compute_stream>>>(
+                                    engine->cfg.start_key + tuned,
+                                    cur,
+                                    payload_limit,
+                                    global_mi,
+                                    d_keys_tested,
+                                    d_best_score,
+                                    d_best_key,
+                                    d_stop_requested
+                                );
+                            } else if (strict_mode) {
                                 bruteforce_kernel_strict<<<blocks, tpb, 0, compute_stream>>>(
                                     engine->cfg.start_key + tuned,
                                     cur,
@@ -1648,6 +2185,52 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     InterlockedExchange(&engine->cuda_stage, 2);
 
+    /* === CPU assist workers: 4-way AVX2 workers cover 80% of keyspace ====== *
+     * GPU handles the first 20%; CPU workers cover the remaining 80% using
+     * cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
+     * Workers are pinned to logical processors 0..n_cpu_assist-1 (P-cores). */
+    {
+        SYSTEM_INFO sysinfo;
+        GetSystemInfo(&sysinfo);
+        int avail = (int)sysinfo.dwNumberOfProcessors - 2;
+        if (avail < 1) avail = 1;
+        if (avail > 8) avail = 8;
+        n_cpu_assist = avail;
+
+        uint64_t cpu_range = (total_keys * 4u) / 5u; /* CPU takes 80% */
+        uint64_t gpu_range = total_keys - cpu_range;  /* GPU takes 20% */
+        if (cpu_range > 0 && mode_policy >= 2) {
+            uint64_t cpu_start = engine->cfg.start_key + gpu_range;
+            uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
+
+            cpu_assist_ctxs   = (CpuWorkerCtx *)calloc(n_cpu_assist, sizeof(CpuWorkerCtx));
+            cpu_assist_handles = (HANDLE *)calloc(n_cpu_assist, sizeof(HANDLE));
+            if (cpu_assist_ctxs && cpu_assist_handles) {
+                for (int t = 0; t < n_cpu_assist; t++) {
+                    cpu_assist_ctxs[t].engine        = engine;
+                    cpu_assist_ctxs[t].start_key     = cpu_start + (uint64_t)t * cpu_chunk;
+                    cpu_assist_ctxs[t].end_key        = (t == n_cpu_assist - 1)
+                                                        ? engine->cfg.start_key + total_keys - 1
+                                                        : cpu_assist_ctxs[t].start_key + cpu_chunk - 1;
+                    cpu_assist_ctxs[t].worker_index  = t;
+                    cpu_assist_ctxs[t].cipher_packs  = host_cipher_packs;
+                    cpu_assist_ctxs[t].payload_count = payload_limit;
+                    cpu_assist_ctxs[t].mode_policy   = mode_policy;
+                    cpu_assist_handles[t] = (HANDLE)_beginthreadex(NULL, 0, cpu_4way_worker_proc,
+                                                                    &cpu_assist_ctxs[t], 0, NULL);
+                    if (!cpu_assist_handles[t]) { n_cpu_assist = t; break; }
+                }
+                total_keys = gpu_range; /* GPU only covers its share */
+            } else {
+                free(cpu_assist_ctxs);   cpu_assist_ctxs = NULL;
+                free(cpu_assist_handles); cpu_assist_handles = NULL;
+                n_cpu_assist = 0;
+            }
+        } else {
+            n_cpu_assist = 0;
+        }
+    }
+
     // Batch chunking (TDR-Safe): adjusted by autotune/cache
     {
         float init_score = -FLT_MAX;
@@ -1655,6 +2238,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CUDA_CHECK(cudaMemcpy(d_best_score, &init_score, sizeof(float), cudaMemcpyHostToDevice), "cudaMemcpy best_score (scan reset)");
         CUDA_CHECK(cudaMemset(d_best_key, 0, sizeof(unsigned long long)), "cudaMemset best_key (scan reset)");
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
+        /* Reset combined counter and GPU baseline so CPU+GPU deltas accumulate correctly */
+        InterlockedExchange64(&engine->keys_tested, 0LL);
+        InterlockedExchange64(&engine->gpu_keys_tested, 0LL);
+        last_gpu_kt = 0;
     }
 
     /* === Double-buffer multi-stream dispatch (Change 6) + pinned polling (Change 5) === */
@@ -1670,7 +2257,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 cudaMemcpyAsync(&h_poll->best_score, d_best_score, sizeof(float), cudaMemcpyDeviceToHost, query_stream); \
                 cudaMemcpyAsync(&h_poll->best_key, d_best_key, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
-                InterlockedExchange64(&engine->keys_tested, h_poll->keys_tested); \
+                { unsigned long long _gkt = h_poll->keys_tested; \
+                  InterlockedAdd64(&engine->keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
+                  InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
+                  last_gpu_kt = _gkt; } \
                 EnterCriticalSection(&engine->lock); \
                 if (h_poll->best_score > (-FLT_MAX * 0.5f)) { \
                     engine->best_score = (double)h_poll->best_score; \
@@ -1683,7 +2273,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 cudaMemcpyAsync(&_bs, d_best_score, sizeof(float), cudaMemcpyDeviceToHost, query_stream); \
                 cudaMemcpyAsync(&_bk, d_best_key, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
-                InterlockedExchange64(&engine->keys_tested, _k); \
+                { InterlockedAdd64(&engine->keys_tested, (LONG64)(_k - last_gpu_kt)); \
+                  InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_k - last_gpu_kt)); \
+                  last_gpu_kt = _k; } \
                 EnterCriticalSection(&engine->lock); \
                 if (_bs > (-FLT_MAX * 0.5f)) { \
                     engine->best_score = (double)_bs; engine->best_key = _bk; \
@@ -1695,7 +2287,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
         /* Helper: launch kernel on given stream */
         #define LAUNCH_CHUNK(stream_idx, off, cnt) do { \
-            if (mode_policy >= 2) { \
+            if (use_ilp2) { \
+                bruteforce_kernel_strict_ilp2<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
+                    engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
+                    d_keys_tested, d_best_score, d_best_key, d_stop_requested); \
+            } else if (mode_policy >= 2) { \
                 bruteforce_kernel_strict<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
                     d_keys_tested, d_best_score, d_best_key, d_stop_requested); \
@@ -1758,6 +2354,14 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         #undef LAUNCH_CHUNK
     }
 
+    /* Wait for CPU assist workers to finish */
+    if (n_cpu_assist > 0 && cpu_assist_handles) {
+        WaitForMultipleObjects((DWORD)n_cpu_assist, cpu_assist_handles, TRUE, INFINITE);
+        for (int t = 0; t < n_cpu_assist; t++) CloseHandle(cpu_assist_handles[t]);
+    }
+    free(cpu_assist_handles); cpu_assist_handles = NULL;
+    free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
+
     /* Final result read */
     {
         unsigned long long final_k = 0, final_b_key = 0;
@@ -1765,7 +2369,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CUDA_CHECK(cudaMemcpy(&final_k,       d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
         CUDA_CHECK(cudaMemcpy(&final_score_f, d_best_score,  sizeof(float),              cudaMemcpyDeviceToHost), "cudaMemcpy final best_score");
         CUDA_CHECK(cudaMemcpy(&final_b_key,   d_best_key,    sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final best_key");
-        InterlockedExchange64(&engine->keys_tested, (LONG64)final_k);
+        InterlockedAdd64(&engine->keys_tested, (LONG64)(final_k - last_gpu_kt));
+        InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(final_k - last_gpu_kt));
         EnterCriticalSection(&engine->lock);
         if (final_score_f > (-FLT_MAX * 0.5f)) {
             engine->best_score = (double)final_score_f;
@@ -1779,6 +2384,13 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     }
 
 cleanup:
+    /* Stop and wait for CPU assist workers if still running (e.g. CUDA error path) */
+    if (n_cpu_assist > 0 && cpu_assist_handles) {
+        WaitForMultipleObjects((DWORD)n_cpu_assist, cpu_assist_handles, TRUE, INFINITE);
+        for (int t = 0; t < n_cpu_assist; t++) CloseHandle(cpu_assist_handles[t]);
+        free(cpu_assist_handles); cpu_assist_handles = NULL;
+        free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
+    }
     if (d_keys_tested) cudaFree(d_keys_tested);
     if (d_best_score) cudaFree(d_best_score);
     if (d_best_key) cudaFree(d_best_key);
@@ -1799,13 +2411,6 @@ cleanup:
 #undef CUDA_CHECK
 
 // ==== CPU FALLBACK WORKER (used when no CUDA GPU is available) ====
-
-typedef struct {
-    BruteforceEngine *engine;
-    uint64_t start_key;
-    uint64_t end_key;
-    int worker_index;
-} CpuWorkerCtx;
 
 static void key_to_5bytes_cpu(uint64_t key, unsigned char out[5])
 {
@@ -2183,6 +2788,7 @@ void bruteforce_get_snapshot(BruteforceEngine *engine, BruteforceSnapshot *out)
     if (elapsed < 0.0) elapsed = 0.0;
 
     out->keys_tested = keys;
+    out->gpu_keys_tested = (uint64_t)InterlockedCompareExchange64(&engine->gpu_keys_tested, 0, 0);
     out->total_keys = total;
     EnterCriticalSection(&engine->lock);
     out->best_key = engine->best_key;

@@ -33,6 +33,7 @@ typedef struct {
 
 typedef struct {
     uint64_t keys_tested;
+    uint64_t gpu_keys_tested;
     uint64_t total_keys;
     uint64_t best_key;
     double best_score;
@@ -59,6 +60,7 @@ typedef struct BruteforceEngine {
     volatile LONG finished_threads;
     volatile LONG search_completed;
     volatile LONG64 keys_tested;
+    volatile LONG64 gpu_keys_tested; /* Keys tested by CUDA GPU only */
 
     uint64_t best_key;
     double best_score;
