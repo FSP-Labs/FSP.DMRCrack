@@ -1982,11 +1982,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     InterlockedExchange(&engine->cuda_compute_major, prop.major);
     InterlockedExchange(&engine->cuda_compute_minor, prop.minor);
 
-    /* ILP-2 kernel disabled: L1 cache overflow (4 blocks × 64KB > 128KB).
-     * Strict kernel (8 M/s) is faster than ILP-2 (3.4 M/s) on RTX 3050 Ti.
-     * CPU AVX2 workers provide the additional throughput instead. */
+    /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved RC4 chains.
+     * Requires sm >= 89: on sm_86 (RTX 3050 Ti) the double S-box (512 B/thread)
+     * overflows the 128 KB L1 (4 blocks × 64 KB = 256 KB) making it slower
+     * (3.4 M/s vs 8 M/s strict). Ada Lovelace (sm_89) and newer benefit. */
     cuda_sm = prop.major * 10 + prop.minor;
-    use_ilp2 = 0; /* (mode_policy >= 2) && (cuda_sm >= 86) — disabled */
+    use_ilp2 = (mode_policy >= 2) && (cuda_sm >= 89);
 
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
     if (cu_err != cudaSuccess) {
@@ -2185,8 +2186,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     InterlockedExchange(&engine->cuda_stage, 2);
 
-    /* === CPU assist workers: 4-way AVX2 workers cover 80% of keyspace ====== *
-     * GPU handles the first 20%; CPU workers cover the remaining 80% using
+    /* === CPU assist workers: 4-way AVX2 workers cover 20% of keyspace ====== *
+     * GPU handles the first 80%; CPU workers cover the remaining 20% using
      * cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
      * Workers are pinned to logical processors 0..n_cpu_assist-1 (P-cores). */
     {
@@ -2197,8 +2198,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         if (avail > 8) avail = 8;
         n_cpu_assist = avail;
 
-        uint64_t cpu_range = (total_keys * 4u) / 5u; /* CPU takes 80% */
-        uint64_t gpu_range = total_keys - cpu_range;  /* GPU takes 20% */
+        uint64_t gpu_range = (total_keys * 4u) / 5u; /* GPU takes 80% */
+        uint64_t cpu_range = total_keys - gpu_range;  /* CPU takes 20% */
         if (cpu_range > 0 && mode_policy >= 2) {
             uint64_t cpu_start = engine->cfg.start_key + gpu_range;
             uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
