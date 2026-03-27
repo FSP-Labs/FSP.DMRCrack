@@ -64,26 +64,37 @@
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
 
 /* --- Dark theme colors --- */
-#define CLR_BG          RGB(30, 30, 30)
-#define CLR_PANEL       RGB(37, 37, 38)
-#define CLR_INPUT       RGB(51, 51, 51)
-#define CLR_INPUT_BORDER RGB(62, 62, 66)
-#define CLR_TEXT        RGB(204, 204, 204)
-#define CLR_BRIGHT      RGB(255, 255, 255)
-#define CLR_DIM         RGB(128, 128, 128)
-#define CLR_ACCENT      RGB(0, 120, 215)
-#define CLR_ACCENT_HOV  RGB(28, 145, 235)
-#define CLR_ACCENT_PRESS RGB(0, 84, 153)
-#define CLR_GREEN       RGB(78, 201, 176)
-#define CLR_ORANGE      RGB(206, 145, 120)
-#define CLR_RED         RGB(244, 71, 71)
-#define CLR_GRAPH_BG    RGB(37, 37, 38)
-#define CLR_GRAPH_AXIS  RGB(80, 80, 80)
-#define CLR_GRAPH_LINE1 RGB(86, 156, 214)
-#define CLR_GRAPH_LINE2 RGB(215, 186, 125)
-#define CLR_GRAPH_THRESH RGB(78, 201, 176)
-#define CLR_PROGRESS_BG RGB(45, 45, 48)
-#define CLR_SECTION     RGB(0, 120, 215)
+/* --- Dark theme colors (Operator Dashboard) --- */
+#define CLR_HEADER       RGB(20,  20,  21)
+#define CLR_BG           RGB(26,  26,  27)
+#define CLR_PANEL        RGB(37,  37,  38)
+#define CLR_TILE         RGB(45,  45,  48)
+#define CLR_INPUT        RGB(51,  51,  51)
+#define CLR_INPUT_BORDER RGB(62,  62,  66)
+#define CLR_TEXT         RGB(204, 204, 204)
+#define CLR_BRIGHT       RGB(255, 255, 255)
+#define CLR_DIM          RGB(100, 100, 100)
+#define CLR_ACCENT       RGB(0,   122, 204)
+#define CLR_ACCENT_HOV   RGB(28,  145, 235)
+#define CLR_ACCENT_PRESS RGB(0,   84,  153)
+#define CLR_METRIC       RGB(255, 255, 255)
+#define CLR_METRIC_LABEL RGB(156, 220, 254)
+#define CLR_RUNNING      RGB(78,  201, 176)
+#define CLR_PAUSED       RGB(206, 145, 120)
+#define CLR_STOPPED      RGB(106, 106, 106)
+#define CLR_WARN         RGB(244, 71,  71)
+#define CLR_GREEN        RGB(78,  201, 176)
+#define CLR_ORANGE       RGB(206, 145, 120)
+#define CLR_RED          RGB(244, 71,  71)
+#define CLR_GRAPH_BG     RGB(37,  37,  38)
+#define CLR_GRAPH_AXIS   RGB(80,  80,  80)
+#define CLR_GRAPH_LINE1  RGB(86,  156, 214)
+#define CLR_GRAPH_LINE2  RGB(215, 186, 125)
+#define CLR_GRAPH_THRESH RGB(78,  201, 176)
+#define CLR_PROGRESS_BG  RGB(45,  45,  48)
+#define CLR_SECTION      RGB(0,   122, 204)
+
+#define HEADER_H    38   /* header bar height in pixels */
 
 /* --- Application state --- */
 typedef struct {
@@ -96,8 +107,6 @@ typedef struct {
     HWND btn_start;
     HWND btn_pause;
     HWND btn_stop;
-    HWND status_text;
-
     HWND edit_wav;
     HWND btn_browse_wav;
     HWND btn_demod;
@@ -108,6 +117,42 @@ typedef struct {
     HWND btn_help;
     HWND hwnd_help;
     HWND btn_lang;
+
+    /* RTL-SDR capture controls */
+    HWND radio_wav;
+    HWND radio_rtl;
+    HWND lbl_freq;
+    HWND edit_freq;
+    HWND lbl_gain;
+    HWND edit_gain;
+    HWND lbl_ppm;
+    HWND edit_ppm;
+    HWND lbl_device;
+    HWND edit_device;
+    HWND combo_slot;
+    HWND chk_inverted;
+    HWND lbl_slot;
+    HWND lbl_inverted_label;
+    HWND btn_stop_capture;   /* "Stop" for RTL capture */
+    int  capture_mode;       /* 0=WAV, 1=RTL */
+
+    /* Metric tile rects (painted in WM_PAINT) */
+    RECT tile_throughput_rect;
+    RECT tile_progress_rect;
+    RECT tile_candidate_rect;
+    RECT header_rect;
+    RECT status_strip_rect;
+
+    /* CPU fallback state */
+    int  fallback_triggered;
+    int  fallback_banner_ticks;    /* countdown in UI ticks (250ms each) */
+    BruteforceConfig last_cfg;     /* saved to restart on fallback */
+
+    /* Extra fonts */
+    HFONT font_tile_metric;   /* Consolas 14pt bold */
+    HFONT font_tile_label;    /* Segoe UI 8pt regular */
+    HFONT font_header;        /* Segoe UI 10pt bold */
+    HFONT font_header_sub;    /* Segoe UI 8pt regular */
 
     RECT graph_rect;
     RECT score_graph_rect;
@@ -220,8 +265,8 @@ static void layout_controls(int cw, int ch)
 {
     int y, row2_y, ctrl_w, graph_h, gap;
 
-    if (cw < 940) cw = 940;
-    if (ch < 720) ch = 720;
+    if (cw < 960) cw = 960;
+    if (ch < 740) ch = 740;
 
     ctrl_w = cw - 40;
 
@@ -259,10 +304,6 @@ static void layout_controls(int cw, int ch)
     if (g_app.btn_pause) MoveWindow(g_app.btn_pause, 215, row2_y, 110, 30, TRUE);
     if (g_app.btn_stop) MoveWindow(g_app.btn_stop, 335, row2_y, 110, 30, TRUE);
     if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, 460, row2_y, 70, 30, TRUE);
-
-    /* Status text */
-    row2_y += 42;
-    if (g_app.status_text) MoveWindow(g_app.status_text, 25, row2_y, ctrl_w, 110, TRUE);
 
     /* Graphs and progress: fill remaining vertical space */
     gap = 10;
@@ -413,7 +454,7 @@ static void update_status_text(void)
             snprintf(text + strlen(text), sizeof(text) - strlen(text), "%s", cuda_err_line);
         }
 
-    SetWindowTextA(g_app.status_text, text);
+    (void)text; /* status_text removed; replaced by painted tiles in Task 7 */
 }
 
 /* --- Drawing: section header --- */
@@ -1392,6 +1433,38 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.ui_font_bold = create_ui_font(1, 0);
         g_app.ui_font_section = create_ui_font(1, -2);
 
+        /* Tile metric font: Consolas 14pt bold */
+        g_app.font_tile_metric = CreateFontA(
+            -18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+        if (!g_app.font_tile_metric)
+            g_app.font_tile_metric = (HFONT)GetStockObject(ANSI_FIXED_FONT);
+
+        /* Tile sub-label font: Segoe UI 8pt */
+        g_app.font_tile_label = CreateFontA(
+            -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, "Segoe UI");
+        if (!g_app.font_tile_label)
+            g_app.font_tile_label = g_app.ui_font;
+
+        /* Header bold font: Segoe UI 10pt bold */
+        g_app.font_header = CreateFontA(
+            -14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, "Segoe UI");
+        if (!g_app.font_header)
+            g_app.font_header = g_app.ui_font_bold;
+
+        /* Header sub-text font: Segoe UI 8pt regular */
+        g_app.font_header_sub = CreateFontA(
+            -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, VARIABLE_PITCH | FF_SWISS, "Segoe UI");
+        if (!g_app.font_header_sub)
+            g_app.font_header_sub = g_app.ui_font;
+
         /* Enable dark title bar */
         { BOOL dark = TRUE;
           DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); }
@@ -1486,12 +1559,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             460, y, 70, 30, hwnd, (HMENU)ID_BTN_COPY_KEY, NULL, NULL);
 
-        /* Status text */
-        y += 42;
-        g_app.status_text = CreateWindowExA(0, "STATIC", g_lang.btn_ready,
-            WS_CHILD | WS_VISIBLE | SS_LEFT,
-            25, y, 850, 110, hwnd, (HMENU)ID_STATUS_TEXT, NULL, NULL);
-
         /* Initial layout */
         { RECT rc; GetClientRect(hwnd, &rc);
           layout_controls(rc.right, rc.bottom); }
@@ -1526,8 +1593,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO *mmi = (MINMAXINFO *)lparam;
-        mmi->ptMinTrackSize.x = 940;
-        mmi->ptMinTrackSize.y = 720;
+        mmi->ptMinTrackSize.x = 960;
+        mmi->ptMinTrackSize.y = 740;
         return 0;
     }
 
@@ -1619,6 +1686,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         if (g_app.ui_font)         { DeleteObject(g_app.ui_font); g_app.ui_font = NULL; }
         if (g_app.ui_font_bold)    { DeleteObject(g_app.ui_font_bold); g_app.ui_font_bold = NULL; }
         if (g_app.ui_font_section) { DeleteObject(g_app.ui_font_section); g_app.ui_font_section = NULL; }
+        if (g_app.font_tile_metric) { DeleteObject(g_app.font_tile_metric); g_app.font_tile_metric = NULL; }
+        if (g_app.font_tile_label)  { DeleteObject(g_app.font_tile_label);  g_app.font_tile_label  = NULL; }
+        if (g_app.font_header)      { DeleteObject(g_app.font_header);      g_app.font_header      = NULL; }
+        if (g_app.font_header_sub)  { DeleteObject(g_app.font_header_sub);  g_app.font_header_sub  = NULL; }
         destroy_theme_brushes();
         bruteforce_stop(&g_app.engine);
         bruteforce_engine_destroy(&g_app.engine);
