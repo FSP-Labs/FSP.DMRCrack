@@ -2185,9 +2185,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     InterlockedExchange(&engine->cuda_stage, 2);
 
-    /* === CPU assist workers: 4-way AVX2 workers cover 20% of keyspace ====== *
-     * GPU handles the first 80%; CPU workers cover the remaining 20% using
-     * cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
+    /* === CPU assist workers: 4-way AVX2 workers cover remaining keyspace ===== *
+     * GPU handles gpu_split_pct% (cfg, default 80); CPU workers cover the rest
+     * using cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
      * Workers are pinned to logical processors 0..n_cpu_assist-1 (P-cores). */
     {
         SYSTEM_INFO sysinfo;
