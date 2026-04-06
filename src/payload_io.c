@@ -95,6 +95,8 @@ void payload_set_init(PayloadSet *set)
     set->global_algid = 0;
     set->global_keyid = 0;
     set->global_mi = 0;
+    set->n_silence = 0;
+    memset(set->silence_indices, 0, sizeof(set->silence_indices));
 }
 
 void payload_set_free(PayloadSet *set)
@@ -119,6 +121,8 @@ void payload_set_free(PayloadSet *set)
     set->global_algid = 0;
     set->global_keyid = 0;
     set->global_mi = 0;
+    set->n_silence = 0;
+    memset(set->silence_indices, 0, sizeof(set->silence_indices));
 }
 
 static int payload_set_push(PayloadSet *set, uint8_t *data, size_t len)
@@ -143,6 +147,7 @@ static int payload_set_push(PayloadSet *set, uint8_t *data, size_t len)
     set->items[set->count].algid = 0;
     set->items[set->count].keyid = 0;
     set->items[set->count].mi = 0;
+    set->items[set->count].silence_candidate = 0;
     set->count++;
     return 1;
 }
