@@ -87,6 +87,8 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
             "burst_count": 0,       # voice bursts emitted so far for this slot
         }
 
+    after_voice_hdr = {1: False, 2: False}
+
     total_lines = 0
     voice_lines = 0
 
@@ -104,6 +106,10 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
             burst_type = m.group(2).upper()
             payload_hex = m.group(3).strip().upper()
 
+            if burst_type == "98":      # voice header: next voice burst is silence candidate
+                if slot in (1, 2):
+                    after_voice_hdr[slot] = True
+                continue
             if burst_type != VOICE_TYPE:
                 continue
             if len(payload_hex) < 66:
@@ -141,6 +147,11 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
                     line_out += f";MI={mi:08X}"
 
                     ss["burst_count"] += 1
+
+            is_silence = after_voice_hdr.get(slot, False)
+            after_voice_hdr[slot] = False   # clear: only first burst after header
+            if is_silence:
+                line_out += ";SILENCE=1"
 
             fout.write(line_out + "\n")
             voice_lines += 1

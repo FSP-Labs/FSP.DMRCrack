@@ -151,7 +151,8 @@ static void parse_line_metadata(
     const char *line,
     int *has_mi, uint32_t *mi,
     int *has_alg, uint8_t *alg,
-    int *has_kid, uint8_t *kid)
+    int *has_kid, uint8_t *kid,
+    int *out_silence)
 {
     const char *p;
     uint32_t v;
@@ -160,6 +161,7 @@ static void parse_line_metadata(
     *has_mi = 0;
     *has_alg = 0;
     *has_kid = 0;
+    *out_silence = 0;
 
     p = find_tag_ci(line, "MI=");
     if (p != NULL && parse_hex_token_u32(p + 3, 8, &v, &digits)) {
@@ -183,6 +185,14 @@ static void parse_line_metadata(
             *has_kid = 1;
             *kid = (uint8_t)v;
         }
+    }
+
+    /* SILENCE tag */
+    p = find_tag_ci(line, "SILENCE=");
+    if (p != NULL) {
+        uint32_t sv = 0; int sd = 0;
+        if (parse_hex_token_u32(p + 8, 1, &sv, &sd))
+            *out_silence = (sv != 0) ? 1 : 0;
     }
 }
 
@@ -291,11 +301,11 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
     while (fgets(line, (int)sizeof(line), f) != NULL) {
         uint8_t *data = NULL;
         size_t data_len = 0;
-        int has_mi = 0, has_alg = 0, has_kid = 0;
+        int has_mi = 0, has_alg = 0, has_kid = 0, silence_cand = 0;
         uint32_t mi = 0;
         uint8_t alg = 0, kid = 0;
 
-        parse_line_metadata(line, &has_mi, &mi, &has_alg, &alg, &has_kid, &kid);
+        parse_line_metadata(line, &has_mi, &mi, &has_alg, &alg, &has_kid, &kid, &silence_cand);
         extract_payload_hex_part(line, hex_part, sizeof(hex_part));
 
         if (!parse_hex_line(hex_part, &data, &data_len, err, err_len)) {
@@ -336,6 +346,7 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
                 tmp.has_global_keyid = 1;
                 tmp.global_keyid = kid;
             }
+            pl->silence_candidate = (uint8_t)silence_cand;
         }
 
         if (max_lines > 0 && tmp.count >= max_lines) {
@@ -344,6 +355,13 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
     }
 
     fclose(f);
+
+    tmp.n_silence = 0;
+    for (size_t i = 0; i < tmp.count && tmp.n_silence < 64; i++) {
+        if (tmp.items[i].silence_candidate && tmp.items[i].has_mi) {
+            tmp.silence_indices[tmp.n_silence++] = (uint16_t)i;
+        }
+    }
 
     if (tmp.count == 0) {
         payload_set_free(&tmp);
@@ -466,6 +484,8 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
     int burst_count[2] = {0, 0};
     int voice_count = 0;
 
+    int after_voice_hdr[2] = {0, 0};
+
     load_pi_lists(log_path, pi);
 
     fin = fopen(dsp_path, "r");
@@ -494,7 +514,11 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
         /* DSP line: "<slot> <type_hex> <payload_hex>" */
         if (sscanf(line, "%d %x %16383s", &slot, &burst_type, hex) != 3) continue;
         if (slot < 1 || slot > 2) continue;
-        if (burst_type != 0x10) continue;   /* 0x10 = voice burst */
+        if (burst_type == 0x98) {          /* voice header: next 0x10 is silence candidate */
+            if (slot >= 1 && slot <= 2) after_voice_hdr[slot-1] = 1;
+            continue;
+        }
+        if (burst_type != 0x10) continue;  /* skip everything else */
 
         hexlen = strlen(hex);
         if (hexlen < 66) continue;
@@ -518,10 +542,22 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
             has_meta = 1;
         }
 
-        if (has_meta)
-            fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X\n", hex, alg, kid, mi);
-        else
-            fprintf(fout, "%s\n", hex);
+        {
+            int is_silence = (si >= 0 && si < 2) ? after_voice_hdr[si] : 0;
+            if (si >= 0 && si < 2) after_voice_hdr[si] = 0;  /* clear: only first burst */
+
+            if (has_meta) {
+                if (is_silence)
+                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X;SILENCE=1\n", hex, alg, kid, mi);
+                else
+                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X\n", hex, alg, kid, mi);
+            } else {
+                if (is_silence)
+                    fprintf(fout, "%s;SILENCE=1\n", hex);
+                else
+                    fprintf(fout, "%s\n", hex);
+            }
+        }
 
         burst_count[si]++;
         voice_count++;
@@ -564,6 +600,7 @@ int payload_save_file(const char *path, const PayloadSet *payloads, char *err, s
         if (line->has_algid) fprintf(f, ";ALG=%02X", line->algid);
         if (line->has_keyid) fprintf(f, ";KID=%02X", line->keyid);
         if (line->has_mi)    fprintf(f, ";MI=%08X", line->mi);
+        if (line->silence_candidate) fprintf(f, ";SILENCE=1");
         fprintf(f, "\n");
     }
 

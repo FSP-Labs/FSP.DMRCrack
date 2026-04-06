@@ -26,6 +26,7 @@ typedef struct {
     uint8_t has_mi;
     uint8_t has_algid;
     uint8_t has_keyid;
+    uint8_t silence_candidate; /* 1 = first voice burst of a new TX; voicing bit expected = 0 */
     uint8_t algid;
     uint8_t keyid;
     uint32_t mi;
@@ -41,6 +42,9 @@ typedef struct {
     uint8_t global_algid;
     uint8_t global_keyid;
     uint32_t global_mi;
+    /* KPA silence frame index cache (built by load_payload_file) */
+    uint16_t silence_indices[64];
+    uint8_t  n_silence;          /* count, capped at 64 */
 } PayloadSet;
 
 #ifdef __cplusplus
