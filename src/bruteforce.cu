@@ -1983,11 +1983,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     InterlockedExchange(&engine->cuda_compute_minor, prop.minor);
 
     /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved RC4 chains.
-     * Requires sm >= 89: on sm_86 (RTX 3050 Ti) the double S-box (512 B/thread)
-     * overflows the 128 KB L1 (4 blocks × 64 KB = 256 KB) making it slower
-     * (3.4 M/s vs 8 M/s strict). Ada Lovelace (sm_89) and newer benefit. */
+     * ILP-2: safe on all Turing+ (sm_75+); the double S-box concern was for
+     * legacy mode. KMI9 path (mode_policy>=2) uses one S-box per thread. */
     cuda_sm = prop.major * 10 + prop.minor;
-    use_ilp2 = (mode_policy >= 2) && (cuda_sm >= 89);
+    use_ilp2 = (mode_policy >= 2) && (cuda_sm >= 75);
 
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
     if (cu_err != cudaSuccess) {
@@ -2198,8 +2197,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         if (avail > 8) avail = 8;
         n_cpu_assist = avail;
 
-        uint64_t gpu_range = (total_keys * 4u) / 5u; /* GPU takes 80% */
-        uint64_t cpu_range = total_keys - gpu_range;  /* CPU takes 20% */
+        int gp = (engine->cfg.gpu_split_pct > 0) ? engine->cfg.gpu_split_pct : 80;
+        if (gp < 50) gp = 50;
+        if (gp > 95) gp = 95;
+        uint64_t gpu_range = (total_keys * (uint64_t)gp) / 100ULL;
+        uint64_t cpu_range = total_keys - gpu_range;
         if (cpu_range > 0 && mode_policy >= 2) {
             uint64_t cpu_start = engine->cfg.start_key + gpu_range;
             uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;

@@ -29,6 +29,7 @@ typedef struct {
     int thread_count;
     int sample_lines;
     int sample_bytes;
+    int gpu_split_pct;  /* GPU share of keyspace [50..95], default 80 */
 } BruteforceConfig;
 
 typedef struct {

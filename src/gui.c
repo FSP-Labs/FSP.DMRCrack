@@ -68,6 +68,7 @@
 #define ID_COMBO_SLOT       1025
 #define ID_CHK_INVERTED     1026
 #define ID_BTN_STOP_CAPTURE 1027
+#define ID_EDIT_GPU_PCT  1028
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -200,6 +201,9 @@ typedef struct {
     HWND lbl_threads;
     HWND lbl_samples;
     HWND btn_browse_file;
+    HWND edit_gpu_pct;
+    HWND lbl_gpu_pct;
+    int  gpu_split_pct;   /* 50..95, default 80 */
 } AppState;
 
 static AppState g_app;
@@ -349,6 +353,10 @@ static void layout_controls(int cw, int ch)
         if (g_app.edit_start)MoveWindow(g_app.edit_start, bf_x+40,    yb,  110, 24, TRUE);
         if (g_app.lbl_end)   MoveWindow(g_app.lbl_end,    bf_x+158,   yb+2, 20, 18, TRUE);
         if (g_app.edit_end)  MoveWindow(g_app.edit_end,   bf_x+182,   yb,  110, 24, TRUE);
+        yb += 30;
+        /* GPU % row - place after start/end key row */
+        if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  bf_x,        yb+2, 45, 18, TRUE);
+        if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, bf_x + 50,   yb,   50, 24, TRUE);
         yb += 30;
 
         /* Threads + Samples row */
@@ -1690,6 +1698,14 @@ static int start_bruteforce(HWND hwnd)
     cfg.end_key = end_key;
     cfg.thread_count = threads;
     cfg.sample_lines = samples;
+    {
+        char pct_buf[8] = {0};
+        read_edit_text(g_app.edit_gpu_pct, pct_buf, sizeof(pct_buf));
+        int pct = atoi(pct_buf);
+        if (pct < 50 || pct > 95) pct = 80;
+        g_app.gpu_split_pct = pct;
+        cfg.gpu_split_pct = pct;
+    }
     { size_t ml = 0;
       for (size_t i = 0; i < g_app.payloads.count; ++i)
           if (g_app.payloads.items[i].len > ml) ml = g_app.payloads.items[i].len;
@@ -2140,6 +2156,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.edit_end = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "FFFFFFFFFF",
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             275, y, 130, 24, hwnd, (HMENU)ID_EDIT_END, NULL, NULL);
+
+        /* GPU % control */
+        g_app.lbl_gpu_pct = CreateWindowA("STATIC", "GPU %:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+            0, 0, 45, 18, hwnd, NULL, NULL, NULL);
+        g_app.edit_gpu_pct = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "80",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+            0, 0, 50, 24, hwnd, (HMENU)ID_EDIT_GPU_PCT, NULL, NULL);
+        g_app.gpu_split_pct = 80;
 
         { SYSTEM_INFO si; char at[16];
           GetSystemInfo(&si);
