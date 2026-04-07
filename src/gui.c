@@ -19,6 +19,7 @@
  */
 #include "../include/gui.h"
 
+#include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <math.h>
@@ -32,6 +33,7 @@
 #include "../include/updater.h"
 #include "../include/version.h"
 
+#pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' " \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' " \
@@ -69,6 +71,7 @@
 #define ID_CHK_INVERTED     1026
 #define ID_BTN_STOP_CAPTURE 1027
 #define ID_EDIT_GPU_PCT  1028
+#define ID_SPIN_GPU      1029
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -203,6 +206,7 @@ typedef struct {
     HWND btn_browse_file;
     HWND edit_gpu_pct;
     HWND lbl_gpu_pct;
+    HWND spin_gpu_split;
     int  gpu_split_pct;   /* 50..95, default 80 */
 } AppState;
 
@@ -2161,8 +2165,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.lbl_gpu_pct = CreateWindowA("STATIC", "GPU %:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
             0, 0, 45, 18, hwnd, NULL, NULL, NULL);
         g_app.edit_gpu_pct = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "80",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
             0, 0, 50, 24, hwnd, (HMENU)ID_EDIT_GPU_PCT, NULL, NULL);
+        g_app.spin_gpu_split = CreateWindowExA(0, UPDOWN_CLASSA, NULL,
+            WS_CHILD | WS_VISIBLE | UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_ARROWKEYS,
+            0, 0, 0, 0, hwnd, (HMENU)ID_SPIN_GPU, NULL, NULL);
+        SendMessageA(g_app.spin_gpu_split, UDM_SETBUDDY,  (WPARAM)g_app.edit_gpu_pct, 0);
+        SendMessageA(g_app.spin_gpu_split, UDM_SETRANGE32, 50, 95);
+        SendMessageA(g_app.spin_gpu_split, UDM_SETPOS32,   0, 80);
         g_app.gpu_split_pct = 80;
 
         { SYSTEM_INFO si; char at[16];
@@ -2368,6 +2378,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         return 0;
     }
 
+    case WM_NOTIFY:
+    {
+        NMHDR *hdr = (NMHDR *)lparam;
+        if (hdr->idFrom == ID_SPIN_GPU && hdr->code == UDN_DELTAPOS) {
+            NMUPDOWN *pud = (NMUPDOWN *)lparam;
+            int newval = pud->iPos + pud->iDelta;
+            if (newval < 50) newval = 50;
+            if (newval > 95) newval = 95;
+            newval = (newval / 5) * 5;  /* snap to multiple of 5 */
+            g_app.gpu_split_pct = newval;
+        }
+        break;
+    }
+
     case WM_DESTROY:
         KillTimer(hwnd, IDT_UI_REFRESH);
         if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
@@ -2402,6 +2426,8 @@ int run_gui(HINSTANCE instance, int cmd_show)
 {
     WNDCLASSA wc;
     MSG msg;
+
+    InitCommonControls();
 
     ZeroMemory(&g_app, sizeof(g_app));
     payload_set_init(&g_app.payloads);
