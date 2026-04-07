@@ -208,6 +208,8 @@ typedef struct {
     HWND lbl_gpu_pct;
     HWND spin_gpu_split;
     int  gpu_split_pct;   /* 50..95, default 80 */
+
+    HWND lbl_kpa_badge;  /* "KPA: N silence frames" — visible when n_silence > 0 */
 } AppState;
 
 static AppState g_app;
@@ -350,6 +352,9 @@ static void layout_controls(int cw, int ch)
         yb += 28;
         /* Payload label (validation summary) */
         if (g_app.payload_label) MoveWindow(g_app.payload_label, bf_x, yb, bf_w, 16, TRUE);
+        yb += 20;
+        /* KPA silence badge (hidden when n_silence == 0) */
+        if (g_app.lbl_kpa_badge) MoveWindow(g_app.lbl_kpa_badge, bf_x, yb, bf_w - 4, 18, FALSE);
         yb += 22;
 
         /* Key range row */
@@ -1120,6 +1125,22 @@ static void draw_progress(HDC hdc, const RECT *rect)
     }
 }
 
+/* --- KPA silence badge --- */
+static void update_kpa_badge(void)
+{
+    if (!g_app.lbl_kpa_badge) return;
+    if (g_app.payloads.n_silence > 0) {
+        char kpa_text[64];
+        snprintf(kpa_text, sizeof(kpa_text), "KPA: %u silence frame%s",
+                 (unsigned)g_app.payloads.n_silence,
+                 g_app.payloads.n_silence == 1 ? "" : "s");
+        SetWindowTextA(g_app.lbl_kpa_badge, kpa_text);
+        ShowWindow(g_app.lbl_kpa_badge, SW_SHOW);
+    } else {
+        ShowWindow(g_app.lbl_kpa_badge, SW_HIDE);
+    }
+}
+
 /* --- File dialogs --- */
 static void choose_file(HWND owner)
 {
@@ -1148,10 +1169,12 @@ static void choose_file(HWND owner)
                 else
                     snprintf(plbl, sizeof(plbl), "%s", summary);
                 SetWindowTextA(g_app.payload_label, plbl);
+                update_kpa_badge();
                 strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), file);
                 EnableWindow(g_app.btn_export, TRUE);
             } else {
                 SetWindowTextA(g_app.payload_label, err);
+                update_kpa_badge();
             }
         }
     }
@@ -1514,6 +1537,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         else
             snprintf(plbl, sizeof(plbl), "%s", summary);
         SetWindowTextA(g_app.payload_label, plbl);
+        update_kpa_badge();
     }
     SetWindowTextA(g_app.edit_file, out_bin);
     EnableWindow(g_app.btn_export, TRUE);
@@ -1697,6 +1721,7 @@ static int start_bruteforce(HWND hwnd)
         snprintf(warn, sizeof(warn), g_lang.warn_low_payloads_n, g_app.payloads.count);
         SetWindowTextA(g_app.payload_label, warn);
     }
+    update_kpa_badge();
 
     cfg.start_key = start_key;
     cfg.end_key = end_key;
@@ -2148,6 +2173,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.payload_label = CreateWindowA("STATIC", "",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
             685, y + 2, 170, 20, hwnd, (HMENU)ID_PAYLOAD_LABEL, NULL, NULL);
+
+        g_app.lbl_kpa_badge = CreateWindowExA(0, "STATIC", "",
+            WS_CHILD | SS_LEFT,   /* NOT WS_VISIBLE — starts hidden */
+            0, 0, 200, 18, hwnd, (HMENU)0, NULL, NULL);
 
         y += 34;
         g_app.lbl_start = CreateWindowA("STATIC", g_lang.label_start_key, WS_CHILD | WS_VISIBLE | SS_RIGHT,
