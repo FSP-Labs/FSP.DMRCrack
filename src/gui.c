@@ -1708,7 +1708,6 @@ static int start_bruteforce(HWND hwnd)
         int pct = atoi(pct_buf);
         if (pct < 50 || pct > 95) pct = 80;
         pct = (pct / 5) * 5;
-        if (pct < 50) pct = 50; /* guard after snap */
         g_app.gpu_split_pct = pct;
         cfg.gpu_split_pct = pct;
     }
