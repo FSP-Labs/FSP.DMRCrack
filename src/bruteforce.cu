@@ -54,6 +54,8 @@ __constant__ unsigned int d_const_mi[MAX_CONST_LINES];
 __constant__ unsigned char d_const_algid[MAX_CONST_LINES];
 __constant__ unsigned char d_const_meta_flags[MAX_CONST_LINES];
 __constant__ float d_abs_floor[MAX_CONST_LINES + 1]; // Absolute screening threshold by burst count
+__constant__ uint16_t d_const_silence_idx[64];
+__constant__ int      d_const_n_silence;
 
 typedef struct {
     unsigned char S[256];
@@ -76,19 +78,6 @@ __device__ __forceinline__ uint32_t dmr_mi_lfsr_prev_dev(uint32_t mi)
 __device__ __forceinline__ uint8_t is_rc4_alg_dev(uint8_t alg)
 {
     return (uint8_t)(alg == 0x21 || alg == 0x01 || ((alg & 0x07u) == 0x01u));
-}
-
-__device__ __forceinline__ void compose_kmi9_dev(const unsigned char key5[5], uint32_t mi, unsigned char out9[9])
-{
-    out9[0] = key5[0];
-    out9[1] = key5[1];
-    out9[2] = key5[2];
-    out9[3] = key5[3];
-    out9[4] = key5[4];
-    out9[5] = (unsigned char)((mi >> 24) & 0xFFu);
-    out9[6] = (unsigned char)((mi >> 16) & 0xFFu);
-    out9[7] = (unsigned char)((mi >> 8) & 0xFFu);
-    out9[8] = (unsigned char)(mi & 0xFFu);
 }
 
 __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigned char *key, int key_len)
@@ -168,6 +157,93 @@ __device__ __forceinline__ void rc4_ksa5_dev(RC4_CTX_DEV *ctx, const unsigned ch
     j = (j + ctx->S[255] + key5[0]) & 0xFF;
     { unsigned char t = ctx->S[255]; ctx->S[255] = ctx->S[j]; ctx->S[j] = t; }
 }
+
+__device__ __forceinline__ void compose_kmi9_dev(const unsigned char key5[5], uint32_t mi, unsigned char out9[9])
+{
+    out9[0] = key5[0];
+    out9[1] = key5[1];
+    out9[2] = key5[2];
+    out9[3] = key5[3];
+    out9[4] = key5[4];
+    out9[5] = (unsigned char)((mi >> 24) & 0xFFu);
+    out9[6] = (unsigned char)((mi >> 16) & 0xFFu);
+    out9[7] = (unsigned char)((mi >> 8) & 0xFFu);
+    out9[8] = (unsigned char)(mi & 0xFFu);
+}
+
+/* KPA 1-bit pre-filter: MSB of plaintext[0] == 0 for unvoiced/silence AMBE.
+ * Returns 1 if key passes all silence checks, 0 if definitely wrong.
+ * burst_drop = 256 + (silence_idx % 6) * 21 */
+__device__ __forceinline__ int kpa_silence_check_dev(
+    const unsigned char key5[5],
+    uint16_t silence_idx,
+    uint32_t burst_drop)
+{
+    uint32_t mi = d_const_mi[silence_idx];
+    unsigned char kmi9[9];
+    compose_kmi9_dev(key5, mi, kmi9);
+
+    RC4_CTX_DEV rc4;
+    rc4_ksa9_dev(&rc4, kmi9);
+
+    /* Discard burst_drop bytes using the same PRGA idiom as rc4_discard_dev */
+    unsigned char ri = rc4.i;
+    unsigned char rj = rc4.j;
+    for (uint32_t d = 0; d < burst_drop; d++) {
+        ri = (ri + 1) & 0xFF;
+        rj = (rj + rc4.S[ri]) & 0xFF;
+        unsigned char t = rc4.S[ri];
+        rc4.S[ri] = rc4.S[rj];
+        rc4.S[rj] = t;
+    }
+    /* Read one keystream byte */
+    ri = (ri + 1) & 0xFF;
+    rj = (rj + rc4.S[ri]) & 0xFF;
+    unsigned char t2 = rc4.S[ri];
+    rc4.S[ri] = rc4.S[rj];
+    rc4.S[rj] = t2;
+    unsigned char ks0 = rc4.S[(rc4.S[ri] + rc4.S[rj]) & 0xFF];
+
+    unsigned char c0 = d_const_cipher_packs[silence_idx * 21];
+    return ((ks0 >> 7) == (c0 >> 7)) ? 1 : 0;
+}
+
+/* KPA pre-filter macros — used inside kernel loops.
+ * The strict kernel uses goto next_key; the ILP-2 kernel uses pruned flags. */
+#define KPA_PREFILTER(key5_ptr)                                                   \
+    if (d_const_n_silence > 0) {                                                  \
+        int _kpa_pass = 1;                                                        \
+        for (int _si = 0; _si < d_const_n_silence && _kpa_pass; _si++) {         \
+            uint16_t _idx = d_const_silence_idx[_si];                             \
+            uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
+            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
+                _kpa_pass = 0;                                                    \
+        }                                                                         \
+        if (!_kpa_pass) goto next_key;                                            \
+    }
+
+#define KPA_PREFILTER_A(key5_ptr)                                                 \
+    if (d_const_n_silence > 0) {                                                  \
+        for (int _si = 0; _si < d_const_n_silence && !pruned_a; _si++) {         \
+            uint16_t _idx = d_const_silence_idx[_si];                             \
+            uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
+            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
+                pruned_a = 1;                                                     \
+        }                                                                         \
+    }
+
+#define KPA_PREFILTER_B(key5_ptr)                                                 \
+    if (d_const_n_silence > 0) {                                                  \
+        for (int _si = 0; _si < d_const_n_silence && !pruned_b; _si++) {         \
+            uint16_t _idx = d_const_silence_idx[_si];                             \
+            uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
+            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
+                pruned_b = 1;                                                     \
+        }                                                                         \
+    }
 
 __device__ __forceinline__ void rc4_init_dev(RC4_CTX_DEV *ctx, const unsigned char *key)
 {
