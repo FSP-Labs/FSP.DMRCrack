@@ -1707,6 +1707,8 @@ static int start_bruteforce(HWND hwnd)
         read_edit_text(g_app.edit_gpu_pct, pct_buf, sizeof(pct_buf));
         int pct = atoi(pct_buf);
         if (pct < 50 || pct > 95) pct = 80;
+        pct = (pct / 5) * 5;
+        if (pct < 50) pct = 50; /* guard after snap */
         g_app.gpu_split_pct = pct;
         cfg.gpu_split_pct = pct;
     }
@@ -2388,6 +2390,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             if (newval > 95) newval = 95;
             newval = (newval / 5) * 5;  /* snap to multiple of 5 */
             g_app.gpu_split_pct = newval;
+            /* Push snapped value back so display matches */
+            SendMessageA(g_app.spin_gpu_split, UDM_SETPOS32, 0, (LPARAM)newval);
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d", newval);
+            SetWindowTextA(g_app.edit_gpu_pct, buf);
+            /* Return TRUE to prevent UpDown from applying the raw delta */
+            SetWindowLongPtrA(hwnd, DWLP_MSGRESULT, TRUE);
+            return TRUE;
         }
         break;
     }
