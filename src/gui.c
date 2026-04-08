@@ -350,30 +350,26 @@ static void layout_controls(int cw, int ch)
         if (g_app.edit_file)       MoveWindow(g_app.edit_file,       bf_x+45,     yb,   bf_w-82, 24, TRUE);
         if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, bf_right-32, yb,   30, 24, TRUE);
         yb += 28;
-        /* Payload label (validation summary) */
-        if (g_app.payload_label) MoveWindow(g_app.payload_label, bf_x, yb, bf_w, 16, TRUE);
-        yb += 20;
-        /* KPA silence badge (hidden when n_silence == 0) */
-        if (g_app.lbl_kpa_badge) MoveWindow(g_app.lbl_kpa_badge, bf_x, yb, bf_w - 4, 18, FALSE);
+        /* Payload label + KPA badge (same row, badge right-aligned) */
+        if (g_app.payload_label) MoveWindow(g_app.payload_label, bf_x, yb, bf_w - 130, 16, TRUE);
+        if (g_app.lbl_kpa_badge) MoveWindow(g_app.lbl_kpa_badge, bf_right - 125, yb, 125, 16, FALSE);
         yb += 22;
 
         /* Key range row */
-        if (g_app.lbl_start) MoveWindow(g_app.lbl_start, bf_x,       yb+2, 35, 18, TRUE);
-        if (g_app.edit_start)MoveWindow(g_app.edit_start, bf_x+40,    yb,  110, 24, TRUE);
-        if (g_app.lbl_end)   MoveWindow(g_app.lbl_end,    bf_x+158,   yb+2, 20, 18, TRUE);
-        if (g_app.edit_end)  MoveWindow(g_app.edit_end,   bf_x+182,   yb,  110, 24, TRUE);
-        yb += 30;
-        /* GPU % row - place after start/end key row */
-        if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  bf_x,        yb+2, 45, 18, TRUE);
-        if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, bf_x + 50,   yb,   50, 24, TRUE);
+        if (g_app.lbl_start) MoveWindow(g_app.lbl_start, bf_x,      yb+2, 35, 18, TRUE);
+        if (g_app.edit_start)MoveWindow(g_app.edit_start, bf_x+38,   yb,  100, 24, TRUE);
+        if (g_app.lbl_end)   MoveWindow(g_app.lbl_end,    bf_x+145,  yb+2, 20, 18, TRUE);
+        if (g_app.edit_end)  MoveWindow(g_app.edit_end,   bf_x+168,  yb,  100, 24, TRUE);
         yb += 30;
 
-        /* Threads + Samples row */
-        if (g_app.lbl_threads) MoveWindow(g_app.lbl_threads, bf_x,      yb+2, 50, 18, TRUE);
-        if (g_app.edit_threads)MoveWindow(g_app.edit_threads, bf_x+55,   yb,   40, 24, TRUE);
-        if (g_app.lbl_samples) MoveWindow(g_app.lbl_samples,  bf_x+102,  yb+2, 55, 18, TRUE);
-        if (g_app.edit_samples)MoveWindow(g_app.edit_samples,  bf_x+162,  yb,   60, 24, TRUE);
-        yb += 34;
+        /* GPU% + Hilos + Muestras — single row */
+        if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  bf_x,        yb+2, 38, 18, TRUE);
+        if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, bf_x+40,     yb,   48, 24, TRUE);
+        if (g_app.lbl_threads)  MoveWindow(g_app.lbl_threads,  bf_x+98,     yb+2, 40, 18, TRUE);
+        if (g_app.edit_threads) MoveWindow(g_app.edit_threads, bf_x+142,    yb,   38, 24, TRUE);
+        if (g_app.lbl_samples)  MoveWindow(g_app.lbl_samples,  bf_x+188,    yb+2, 55, 18, TRUE);
+        if (g_app.edit_samples) MoveWindow(g_app.edit_samples, bf_x+248,    yb,   55, 24, TRUE);
+        yb += 32;
 
         /* Action buttons row */
         if (g_app.btn_start)    MoveWindow(g_app.btn_start,    bf_x,      yb,  90, 30, TRUE);
@@ -390,8 +386,9 @@ static void layout_controls(int cw, int ch)
         int tile_h = 80;
         int tile_gap = 8;
         int tile_total = cw - 40;
-        int tile_w1 = tile_total / 5;
-        int tile_w3 = tile_total / 5;
+        /* Throughput: 22%, Progress: 46%, Candidate: 32% */
+        int tile_w1 = (tile_total * 22) / 100;
+        int tile_w3 = (tile_total * 32) / 100;
         int tile_w2 = tile_total - tile_w1 - tile_w3 - tile_gap * 2;
 
         g_app.tile_throughput_rect.left   = 20;
