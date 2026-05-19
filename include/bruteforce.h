@@ -90,10 +90,6 @@ extern "C" {
 // Host-side: Precompute cipher packs for all payloads (3x7 bytes per burst)
 void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_cipher_packs, int payload_limit);
 
-// Note: The CUDA kernel assumes the first payload in the .bin corresponds to burst_pos=0 of a superframe.
-// If the file is not aligned, the drop value will be incorrect and the scoring will not be valid.
-// For maximum robustness, validate alignment on the host and/or add a burst_pos_start field to PayloadItem.
-
 void bruteforce_engine_init(BruteforceEngine *engine);
 void bruteforce_engine_destroy(BruteforceEngine *engine);
 

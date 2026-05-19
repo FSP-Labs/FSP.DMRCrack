@@ -795,7 +795,7 @@ void bruteforce_kernel_strict(
             update_best_packed(total_score, current_key, dev_best_packed);
         }
 
-#undef BCNT_INC
+#undef BCNT_ADD
 #undef BCNT_GET
 
         next_key:

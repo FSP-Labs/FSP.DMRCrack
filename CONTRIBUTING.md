@@ -29,8 +29,7 @@ To adjust the GPU architecture target, edit `-arch=sm_86` in `build.bat`:
 ### Test tools (MSVC only, no CUDA required)
 
 ```bat
-build_test_bin.bat   # builds test_bin_score.exe
-build_test.bat       # builds test_score.exe
+build_test.bat       # builds bin\test_strict_score.exe
 ```
 
 ## Code style
@@ -38,14 +37,14 @@ build_test.bat       # builds test_score.exe
 - C99, no C++ in `.c` files
 - CUDA kernel code in `.cu` files
 - 4-space indentation, `snake_case` for all identifiers
-- Keep GPU kernel logic in `src/bruteforce.cu`; host-side scoring helpers in `src/bruteforce.c`
+- Keep both GPU kernel logic and host-side scoring helpers in `src/bruteforce.cu` (the host `score_candidate_host` lives in the same translation unit so the strict pipeline stays in lock-step with the kernels)
 - Do not add Windows API calls outside `src/gui.c` and `src/main.c`
 
 ## Submitting changes
 
 1. Fork the repository and create a feature branch
 2. Make your changes; ensure `build.bat` succeeds without warnings
-3. If touching scoring logic, verify with `bin\test_bin_score.exe` and `tools\verify_decrypt.py`
+3. If touching scoring logic, verify with `bin\test_strict_score.exe` and `tools\verify_decrypt.py`
 4. Open a pull request with a clear description of the change and why it is needed
 
 ## Reporting issues

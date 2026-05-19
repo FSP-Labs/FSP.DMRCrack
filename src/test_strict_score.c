@@ -213,7 +213,7 @@ int main(int argc, char *argv[]) {
     printf("CORRECT KEY strict score: %.2f  (per-burst: %.2f)\n",
            score_correct, score_correct / payload_limit);
     printf("  abs_floor[%d] = %.2f\n", payload_limit,
-           31.0f * payload_limit - 2.0f * 3.46f * sqrtf((float)payload_limit));
+           33.0f * payload_limit - 2.0f * 3.46f * sqrtf((float)payload_limit));
 
     /* Score random keys */
     srand((unsigned)time(NULL));
@@ -274,14 +274,14 @@ int main(int argc, char *argv[]) {
                 ts += (float)(48 - h01 - h12);
                 pruned_at = p + 1;
             }
-            float floor = 31.0f * pruned_at - 2.0f * 3.46f * sqrtf((float)pruned_at);
+            float floor = 33.0f * pruned_at - 2.0f * 3.46f * sqrtf((float)pruned_at);
             if (ts < floor) {
                 printf("WARNING: abs_floor would PRUNE correct key at burst %d! "
                        "score=%.1f < floor=%.1f\n", pruned_at, ts, floor);
             }
         }
         printf("Correct key passes all abs_floor checks (final: score=%.1f > floor=%.1f)\n",
-               ts, 31.0f * pruned_at - 2.0f * 3.46f * sqrtf((float)pruned_at));
+               ts, 33.0f * pruned_at - 2.0f * 3.46f * sqrtf((float)pruned_at));
     }
 
     free(cipher_packs);
