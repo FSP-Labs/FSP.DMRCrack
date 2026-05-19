@@ -25,7 +25,7 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 | Requirement | Details |
 |---|---|
 | OS | Windows 10/11, 64-bit |
-| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer); CPU fallback available |
+| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer). A multi-threaded CPU fallback runs if no GPU is present, but expect a search to take days instead of hours — a GPU is strongly recommended. |
 | Runtime | None — DSD-FME and all Cygwin DLLs are bundled by the installer |
 | Python | 3.8+ (optional, for `verify_decrypt.py` and `diag_decrypt.py`) |
 | CUDA Toolkit | 12.x (build-time only) |
@@ -53,15 +53,12 @@ Clone the repo and build with `build.bat` (requires CUDA Toolkit + Visual Studio
 
 ### From SDR capture to recovered key
 
-```
 1. Record a WAV file of the DMR RF signal (discriminator audio, 48 kHz mono recommended).
-2. Open FSP.DMRCrack and select the WAV file in the CAPTURE section.
-3. Click Demodulate — DSD-FME runs automatically, extracts encrypted voice payloads,
-   and writes a .bin file.
-4. Click Start in the BRUTEFORCE section to begin the GPU search.
+2. Open FSP.DMRCrack and select the WAV file in the **Capture** section.
+3. Click **Demodulate** — DSD-FME runs automatically, extracts encrypted voice payloads, and writes a `.bin` file.
+4. Click **Start** in the **Brute-force** section to begin the GPU search.
 5. Monitor progress: keys/sec graph, best-score evolution, ETA.
 6. The correct key produces a sharp score spike well above the noise floor.
-```
 
 ### From an existing .bin file
 
@@ -138,6 +135,16 @@ On an RTX 3080 (sm_86), expect ~2–5 billion key candidates per second. Full 40
 
 ---
 
+## What this does NOT do
+
+- **Other ciphers.** Only DMR Enhanced Privacy (RC4 with a 40-bit key). No AES (Motorola DMR-AES), no Hytera proprietary, no Tytera DMRA.
+- **Captures without MI metadata.** The strict pipeline needs the Message Indicator extracted from each superframe. Without it the legacy statistical scorer runs, which is much less reliable.
+- **Bad audio.** If DSD-FME can't cleanly demodulate the WAV, the search will run but won't find the key. Garbage in, garbage out.
+- **Live SDR ingest.** Capture is offline. Record to WAV first, then feed it in.
+- **Targeting third-party systems.** This is for authorized auditing of systems you own or have written permission to test. See `LICENSE`.
+
+---
+
 ## Building from source
 
 All build scripts auto-detect Visual Studio via `vswhere.exe`.
@@ -191,8 +198,8 @@ FSP.DMRCrack/
   src/
     main.c             Entry point (WinMain)
     gui.c              Win32 GUI, dark theme, progress graphs
-    bruteforce.cu      CUDA GPU brute-force kernel
-    bruteforce.c       CPU multi-threaded fallback
+    bruteforce.cu      CUDA GPU kernels + integrated CPU fallback
+    bruteforce.c       Pure-CPU reference implementation (not yet in production build — target: future headless CLI, see issue #11)
     rc4.c              RC4 KSA + PRGA (host-side)
     payload_io.c       .bin file loader/saver, ALG/KID/MI metadata parser
   include/             Headers
@@ -206,6 +213,19 @@ FSP.DMRCrack/
     FSP.DMRCrack.iss   Inno Setup script
   bin/                 Compiled executables (not tracked in git)
 ```
+
+---
+
+## Contributing
+
+This is open source and actively developed. The roadmap lives in the [issue tracker](https://github.com/FSP-Labs/FSP.DMRCrack/issues) and PRs are welcome.
+
+Good places to start:
+
+- [**`good first issue`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/good%20first%20issue) — well-scoped tasks that don't need deep familiarity with the code (magic-number cleanup, `__restrict__` annotations on device helpers, i18n audit, etc.)
+- [**`help wanted`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/help%20wanted) — larger items where extra hands would unlock cross-platform work: CMake migration, POSIX HAL for the engine, headless CLI mode, Linux port
+
+Setup, code style, and submission guidelines are in [CONTRIBUTING.md](CONTRIBUTING.md). If you have an idea that doesn't fit any open issue, just open one — happy to discuss.
 
 ---
 
