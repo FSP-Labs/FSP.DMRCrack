@@ -336,29 +336,31 @@ __device__ __forceinline__ int popcount_byte_dev(unsigned char b)
     return __popc((unsigned int)b);
 }
 
-__device__ __forceinline__ void update_best_score_dev(
+/* Pack float score (top 24 sortable bits) and 40-bit key into one uint64 for atomicMax.
+ * Encoding: bits[63:40] = sortable_float >> 8, bits[39:0] = key & 0xFFFFFFFFFF.
+ * The sortable transform (flip sign bit; flip all bits for negatives) makes IEEE754
+ * floats compare correctly as unsigned integers, so atomicMax picks the best score
+ * and its associated key in a single indivisible operation — no race window. */
+__device__ __forceinline__ unsigned long long pack_score_key_dev(float score, uint64_t key)
+{
+    unsigned int u = __float_as_uint(score);
+    unsigned int sortable = u ^ (-(u >> 31) | 0x80000000u);
+    return ((unsigned long long)(sortable >> 8) << 40) | (key & 0xFFFFFFFFFFULL);
+}
+
+__device__ __forceinline__ float unpack_score_dev(unsigned long long packed)
+{
+    unsigned int sortable = (unsigned int)(packed >> 40) << 8;
+    unsigned int bits = sortable ^ ((~sortable >> 31) | 0x80000000u);
+    return __uint_as_float(bits);
+}
+
+__device__ __forceinline__ void update_best_packed(
     float score,
     uint64_t current_key,
-    float* __restrict__ dev_best_score,
-    unsigned long long* __restrict__ dev_best_key)
+    unsigned long long* __restrict__ dev_best_packed)
 {
-    /* Lock-free update: atomicCAS on the float reinterpreted as int.
-     * IEEE754 floats preserve ordering under int comparison for positive values,
-     * but we use float comparison explicitly for safety. */
-    if (score > *dev_best_score) {
-        int *score_int = (int *)dev_best_score;
-        int old_val = *score_int, assumed;
-        for (;;) {
-            assumed = old_val;
-            if (score <= __int_as_float(assumed)) break;
-            old_val = atomicCAS(score_int, assumed, __float_as_int(score));
-            if (old_val == assumed) {
-                atomicExch(dev_best_key, (unsigned long long int)current_key);
-                __threadfence();
-                break;
-            }
-        }
-    }
+    atomicMax(dev_best_packed, pack_score_key_dev(score, current_key));
 }
 
 __device__ __constant__ int dmr_rW_dev[36] = {
@@ -671,8 +673,7 @@ void bruteforce_kernel_strict(
     int payload_count,
     uint32_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
-    float* __restrict__ dev_best_score,
-    unsigned long long* __restrict__ dev_best_key,
+    unsigned long long* __restrict__ dev_best_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -754,7 +755,7 @@ void bruteforce_kernel_strict(
 
             /* Relative pruning at superframe boundary: can't beat current global best */
             if (enable_prune && processed_bursts >= 6) {
-                float best_now = __ldg((const float*)dev_best_score);
+                float best_now = unpack_score_dev(__ldg(dev_best_packed));
                 float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
                 if (max_possible <= best_now) {
                     break;
@@ -791,7 +792,7 @@ void bruteforce_kernel_strict(
                 }
                 total_score += chi2 / (float)processed_bursts;
             }
-            update_best_score_dev(total_score, current_key, dev_best_score, dev_best_key);
+            update_best_packed(total_score, current_key, dev_best_packed);
         }
 
 #undef BCNT_INC
@@ -823,8 +824,7 @@ void bruteforce_kernel_strict_ilp2(
     int payload_count,
     uint32_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
-    float* __restrict__ dev_best_score,
-    unsigned long long* __restrict__ dev_best_key,
+    unsigned long long* __restrict__ dev_best_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid     = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -985,8 +985,8 @@ void bruteforce_kernel_strict_ilp2(
             score_b += chi2 * 0.1f;
         }
 
-        if (!pruned_a)                 update_best_score_dev(score_a, key_a, dev_best_score, dev_best_key);
-        if (!pruned_b && key_b != key_a) update_best_score_dev(score_b, key_b, dev_best_score, dev_best_key);
+        if (!pruned_a)                   update_best_packed(score_a, key_a, dev_best_packed);
+        if (!pruned_b && key_b != key_a) update_best_packed(score_b, key_b, dev_best_packed);
 
         local_keys += (key_b != key_a) ? 2 : 1;
     }
@@ -1007,8 +1007,7 @@ void bruteforce_kernel(
     uint8_t global_algid,
     uint8_t has_global_algid,
     unsigned long long* __restrict__ dev_keys_tested,
-    float* __restrict__ dev_best_score,
-    unsigned long long* __restrict__ dev_best_key,
+    unsigned long long* __restrict__ dev_best_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -1075,7 +1074,7 @@ void bruteforce_kernel(
                     n_freq++;
 
                     if (enable_prune && ((processed_bursts & 0x1) == 0)) {
-                        float best_now = __ldg((const float*)dev_best_score);
+                        float best_now = unpack_score_dev(__ldg(dev_best_packed));
                         float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
                         if (max_possible <= best_now) {
                             pruned = 1;
@@ -1412,8 +1411,7 @@ void bruteforce_kernel(
 
         } /* end else (legacy path) */
 
-        /* Atomic update of best score (float CAS, no FP64) */
-        update_best_score_dev(score, current_key, dev_best_score, dev_best_key);
+        update_best_packed(score, current_key, dev_best_packed);
 
         local_keys++;
         if (local_keys >= 16384) {
@@ -1838,6 +1836,18 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
     return 0;
 }
 
+static float host_unpack_score(unsigned long long packed)
+{
+    unsigned int sortable = (unsigned int)(packed >> 40) << 8;
+    unsigned int bits = sortable ^ ((~sortable >> 31) | 0x80000000u);
+    float f; memcpy(&f, &bits, sizeof(f)); return f;
+}
+
+static unsigned long long host_unpack_key(unsigned long long packed)
+{
+    return packed & 0xFFFFFFFFFFULL;
+}
+
 static unsigned __stdcall cuda_launcher_thread(void *arg)
 {
     BruteforceEngine *engine = (BruteforceEngine *)arg;
@@ -1846,14 +1856,13 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     unsigned char host_algid[MAX_CONST_LINES];
     unsigned char host_meta_flags[MAX_CONST_LINES];
     unsigned long long *d_keys_tested = NULL;
-    float *d_best_score = NULL;
-    unsigned long long *d_best_key = NULL;
+    unsigned long long *d_best_packed = NULL;
     int *d_stop_requested = NULL;
     cudaStream_t compute_stream = NULL;
     cudaStream_t compute_stream2 = NULL;  /* double-buffer stream */
     cudaStream_t query_stream = NULL;
     /* Pinned host memory for truly async D2H polling */
-    struct { unsigned long long keys_tested; float best_score; unsigned long long best_key; } *h_poll = NULL;
+    struct { unsigned long long keys_tested; unsigned long long best_packed; } *h_poll = NULL;
     cudaError_t cu_err;
     uint64_t total_keys, chunk_size, offset;
     int threadsPerBlock, blocksPerGrid;
@@ -2025,19 +2034,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     }
     CUDA_CHECK(cudaMemset(d_keys_tested, 0, sizeof(unsigned long long)), "cudaMemset keys_tested");
 
-    cu_err = cudaMalloc(&d_best_score, sizeof(float));
+    cu_err = cudaMalloc(&d_best_packed, sizeof(unsigned long long));
     if (cu_err != cudaSuccess) {
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMalloc best_score: %s", cudaGetErrorString(cu_err));
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMalloc best_packed: %s", cudaGetErrorString(cu_err));
         goto cleanup;
     }
-    { float init_score = -FLT_MAX; CUDA_CHECK(cudaMemcpy(d_best_score, &init_score, sizeof(float), cudaMemcpyHostToDevice), "cudaMemcpy best_score init"); }
-
-    cu_err = cudaMalloc(&d_best_key, sizeof(unsigned long long));
-    if (cu_err != cudaSuccess) {
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMalloc best_key: %s", cudaGetErrorString(cu_err));
-        goto cleanup;
-    }
-    CUDA_CHECK(cudaMemset(d_best_key, 0, sizeof(unsigned long long)), "cudaMemset best_key");
+    CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed");
 
     cu_err = cudaMalloc(&d_stop_requested, sizeof(int));
     if (cu_err != cudaSuccess) {
@@ -2143,13 +2145,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                         uint64_t tuned = 0;
                         float ms = 0.0f;
                         float kps;
-                        float init_score = -FLT_MAX;
-
                         if (cand_chunk == 0) continue;
 
                         cudaMemsetAsync(d_keys_tested, 0, sizeof(unsigned long long), compute_stream);
-                        cudaMemcpyAsync(d_best_score, &init_score, sizeof(float), cudaMemcpyHostToDevice, compute_stream);
-                        cudaMemsetAsync(d_best_key, 0, sizeof(unsigned long long), compute_stream);
+                        cudaMemsetAsync(d_best_packed, 0, sizeof(unsigned long long), compute_stream);
                         cudaMemsetAsync(d_stop_requested, 0, sizeof(int), compute_stream);
                         cudaStreamSynchronize(compute_stream);
 
@@ -2173,8 +2172,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                                     payload_limit,
                                     global_mi,
                                     d_keys_tested,
-                                    d_best_score,
-                                    d_best_key,
+                                    d_best_packed,
                                     d_stop_requested
                                 );
                             } else if (strict_mode) {
@@ -2184,8 +2182,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                                     payload_limit,
                                     global_mi,
                                     d_keys_tested,
-                                    d_best_score,
-                                    d_best_key,
+                                    d_best_packed,
                                     d_stop_requested
                                 );
                             } else {
@@ -2201,8 +2198,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                                     global_algid,
                                     has_global_algid,
                                     d_keys_tested,
-                                    d_best_score,
-                                    d_best_key,
+                                    d_best_packed,
                                     d_stop_requested
                                 );
                             }
@@ -2312,10 +2308,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     // Batch chunking (TDR-Safe): adjusted by autotune/cache
     {
-        float init_score = -FLT_MAX;
         CUDA_CHECK(cudaMemset(d_keys_tested, 0, sizeof(unsigned long long)), "cudaMemset keys_tested (scan reset)");
-        CUDA_CHECK(cudaMemcpy(d_best_score, &init_score, sizeof(float), cudaMemcpyHostToDevice), "cudaMemcpy best_score (scan reset)");
-        CUDA_CHECK(cudaMemset(d_best_key, 0, sizeof(unsigned long long)), "cudaMemset best_key (scan reset)");
+        CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed (scan reset)");
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
         /* Reset combined counter and GPU baseline so CPU+GPU deltas accumulate correctly */
         InterlockedExchange64(&engine->keys_tested, 0LL);
@@ -2332,34 +2326,33 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         /* Helper: poll GPU results into engine using pinned memory */
         #define POLL_GPU_RESULTS() do { \
             if (h_poll) { \
-                cudaMemcpyAsync(&h_poll->keys_tested, d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
-                cudaMemcpyAsync(&h_poll->best_score, d_best_score, sizeof(float), cudaMemcpyDeviceToHost, query_stream); \
-                cudaMemcpyAsync(&h_poll->best_key, d_best_key, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
+                cudaMemcpyAsync(&h_poll->keys_tested,  d_keys_tested,  sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
+                cudaMemcpyAsync(&h_poll->best_packed,  d_best_packed,  sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
                 { unsigned long long _gkt = h_poll->keys_tested; \
                   InterlockedAdd64(&engine->keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
                   InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
                   last_gpu_kt = _gkt; } \
-                EnterCriticalSection(&engine->lock); \
-                if (h_poll->best_score > (-FLT_MAX * 0.5f)) { \
-                    engine->best_score = (double)h_poll->best_score; \
-                    engine->best_key = h_poll->best_key; \
+                if (h_poll->best_packed != 0ULL) { \
+                    EnterCriticalSection(&engine->lock); \
+                    engine->best_score = (double)host_unpack_score(h_poll->best_packed); \
+                    engine->best_key   = host_unpack_key(h_poll->best_packed); \
+                    LeaveCriticalSection(&engine->lock); \
                 } \
-                LeaveCriticalSection(&engine->lock); \
             } else { \
-                unsigned long long _k = 0, _bk = 0; float _bs = 0.0f; \
-                cudaMemcpyAsync(&_k, d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
-                cudaMemcpyAsync(&_bs, d_best_score, sizeof(float), cudaMemcpyDeviceToHost, query_stream); \
-                cudaMemcpyAsync(&_bk, d_best_key, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
+                unsigned long long _k = 0, _bp = 0; \
+                cudaMemcpyAsync(&_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
+                cudaMemcpyAsync(&_bp, d_best_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
                 { InterlockedAdd64(&engine->keys_tested, (LONG64)(_k - last_gpu_kt)); \
                   InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_k - last_gpu_kt)); \
                   last_gpu_kt = _k; } \
-                EnterCriticalSection(&engine->lock); \
-                if (_bs > (-FLT_MAX * 0.5f)) { \
-                    engine->best_score = (double)_bs; engine->best_key = _bk; \
+                if (_bp != 0ULL) { \
+                    EnterCriticalSection(&engine->lock); \
+                    engine->best_score = (double)host_unpack_score(_bp); \
+                    engine->best_key   = host_unpack_key(_bp); \
+                    LeaveCriticalSection(&engine->lock); \
                 } \
-                LeaveCriticalSection(&engine->lock); \
             } \
             InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64()); \
         } while(0)
@@ -2369,17 +2362,17 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
             if (use_ilp2) { \
                 bruteforce_kernel_strict_ilp2<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
-                    d_keys_tested, d_best_score, d_best_key, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_stop_requested); \
             } else if (mode_policy >= 2) { \
                 bruteforce_kernel_strict<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
-                    d_keys_tested, d_best_score, d_best_key, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_stop_requested); \
             } else { \
                 bruteforce_kernel<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, bytes_per_line, \
                     engine->cfg.sample_bytes, mode_policy, global_mi, has_global_mi, \
                     global_algid, has_global_algid, \
-                    d_keys_tested, d_best_score, d_best_key, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_stop_requested); \
             } \
         } while(0)
 
@@ -2443,19 +2436,17 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     /* Final result read */
     {
-        unsigned long long final_k = 0, final_b_key = 0;
-        float final_score_f = 0.0f;
-        CUDA_CHECK(cudaMemcpy(&final_k,       d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
-        CUDA_CHECK(cudaMemcpy(&final_score_f, d_best_score,  sizeof(float),              cudaMemcpyDeviceToHost), "cudaMemcpy final best_score");
-        CUDA_CHECK(cudaMemcpy(&final_b_key,   d_best_key,    sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final best_key");
+        unsigned long long final_k = 0, final_bp = 0;
+        CUDA_CHECK(cudaMemcpy(&final_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
+        CUDA_CHECK(cudaMemcpy(&final_bp, d_best_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final best_packed");
         InterlockedAdd64(&engine->keys_tested, (LONG64)(final_k - last_gpu_kt));
         InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(final_k - last_gpu_kt));
-        EnterCriticalSection(&engine->lock);
-        if (final_score_f > (-FLT_MAX * 0.5f)) {
-            engine->best_score = (double)final_score_f;
-            engine->best_key = final_b_key;
+        if (final_bp != 0ULL) {
+            EnterCriticalSection(&engine->lock);
+            engine->best_score = (double)host_unpack_score(final_bp);
+            engine->best_key   = host_unpack_key(final_bp);
+            LeaveCriticalSection(&engine->lock);
         }
-        LeaveCriticalSection(&engine->lock);
     }
 
     if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
@@ -2471,8 +2462,7 @@ cleanup:
         free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
     }
     if (d_keys_tested) cudaFree(d_keys_tested);
-    if (d_best_score) cudaFree(d_best_score);
-    if (d_best_key) cudaFree(d_best_key);
+    if (d_best_packed) cudaFree(d_best_packed);
     if (d_stop_requested) cudaFree(d_stop_requested);
     free(host_payload_flat);
     if (h_poll) cudaFreeHost(h_poll);

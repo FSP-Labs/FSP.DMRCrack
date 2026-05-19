@@ -8,6 +8,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **CUDA atomic race on best_key / best_score** (#1): Replaced the two-step
+  `atomicCAS(score)` + `atomicExch(key)` update with a single `atomicMax` on a packed
+  `unsigned long long` that encodes both the score (top 24 sortable bits) and the 40-bit
+  key. This eliminates the race window where a polling read could observe a new score
+  paired with a stale key, fixing the inconsistent best-candidate display seen in #4.
+
 ### Added
 - **i18n: status panel, graph, and dialog strings**: Moved all hardcoded Spanish GUI strings
   to the `Lang` struct (`lang.h` / `lang_en.c`). New fields: `fmt_keys_tested`, `fmt_speed`,
