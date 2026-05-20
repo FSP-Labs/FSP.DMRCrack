@@ -8,62 +8,108 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.3.0] - 2026-05-20
+
 ### Fixed
-- **CUDA atomic race on best_key / best_score** (#1): Replaced the two-step
-  `atomicCAS(score)` + `atomicExch(key)` update with a single `atomicMax` on a packed
-  `unsigned long long` that encodes both the score (top 24 sortable bits) and the 40-bit
-  key. This eliminates the race window where a polling read could observe a new score
-  paired with a stale key, fixing the inconsistent best-candidate display seen in #4.
+- **CUDA atomic race on `best_key` / `best_score`** (#1) — the two-step
+  `atomicCAS(score)` + `atomicExch(key)` update was replaced with a single `atomicMax`
+  on a packed `unsigned long long` that encodes both the score (top 24 sortable bits)
+  and the 40-bit key. Eliminates the race window where a polling read could observe a
+  new score paired with a stale key, which caused the blank best-candidate display
+  reported in #4.
+- **CUDA error auto-fallback to CPU** — if the GPU returns an error mid-run, the engine
+  now stops the CUDA path, restarts from the same offset on CPU threads, and shows a
+  banner in the status strip. Replaces the v0.2.1 behaviour of aborting with
+  *"NVIDIA CUDA Error o no hay GPUs compatibles."*
+- **GPU/CPU keyspace split inverted** — the engine was giving 20 % of the keyspace to
+  the GPU and 80 % to the CPU; now it's 80 / 20 as documented, configurable via the
+  new GPU % spin control.
+- **Demodulation silent failure** — `run_process_stderr_redirect` only redirected stderr;
+  stdout was set to `GetStdHandle(STD_OUTPUT_HANDLE)`, which returns `NULL` in a GUI
+  process. Cygwin apps (dsd-fme) received a `NULL` stdout handle and could exit 0
+  without producing DSP output. Both streams now go to the log file.
+- **DSP output search too narrow** — added two more candidate paths under the
+  dsd-fme.exe directory so captures from non-default installs are found.
+- **Test/production parity** — `test_strict_score.c` used `31.0f * k` as the absolute
+  pruning floor while the GPU kernel uses `33.0f * k`; the test could pass keys the
+  kernel would have rejected. Aligned to `33.0f`.
+- **`#undef BCNT_INC` typo** — `BCNT_ADD` was leaking out of the strict kernel
+  translation unit because the `#undef` referenced a macro that never existed.
+- **Documentation drift** — `CONTRIBUTING.md` referenced non-existent files
+  (`build_test_bin.bat`, `test_bin_score.exe`) and pointed contributors at the wrong
+  scoring file. README claimed a CPU fallback that, in practice, takes days; both
+  corrected.
 
 ### Added
-- **i18n: status panel, graph, and dialog strings**: Moved all hardcoded Spanish GUI strings
-  to the `Lang` struct (`lang.h` / `lang_en.c`). New fields: `fmt_keys_tested`, `fmt_speed`,
-  `fmt_time`, `fmt_backend`, `fmt_best_candidate`, `fmt_best_score`, `fmt_status`,
-  `fmt_cuda_error`, `fmt_payloads_loaded`, `state_running/paused/stopped`,
-  `graph_keys_title`, `graph_score_title`, `dlg_bin_filter`, `dlg_audio_filter`,
-  `btn_copy_key`, `msg_key_found`, `msg_key_copied`.
-- **Resizable window**: Window can now be resized freely (minimum 940x720). All controls and
-  graphs reposition dynamically via `WM_SIZE` handler.
-- **DPI awareness**: Per-monitor DPI awareness (V2) enabled for crisp rendering on high-DPI displays.
-- **Copy key button**: "Copy" button next to Start/Pause/Stop copies the best candidate key
-  to the clipboard.
-- **Key-found notification**: Taskbar flashes and a system beep sounds when the brute-force
-  search completes with a result.
-- **Payload count indicator**: Shows how many payloads are loaded after demodulation or file load.
-- **Graph grid lines**: Horizontal grid lines at 25%/50%/75% with Y-axis tick labels on both
-  the keys/s and score graphs.
-- **Rounded buttons**: Owner-drawn buttons now use `RoundRect` with 8px corner radius.
-- **G/s speed display**: Speed display now auto-formats to G/s for very high throughput.
+- **Operator Dashboard GUI** — full visual redesign:
+  - Header bar with GPU status dot (running / paused / stopped) and the GPU's
+    `sm_XY · N SMs` summary.
+  - Metric tiles with hierarchy: **THROUGHPUT** dominant (Consolas 22 pt, 58 % wide),
+    **BEST CANDIDATE** beside it, **PROGRESS** as a full-width row with a large bar
+    and one-line metadata.
+  - Side-by-side line charts (keys/s, best score) with area fill, grid lines, and a
+    Z = 400 threshold marker on the score chart.
+  - Status strip anchored at the bottom of the window (Win32 convention).
+- **KPA silence-frame detection** — DMR voice frames whose first 24 bits are
+  consistent silence are flagged at load time (`SILENCE=` tag in `.bin`). The CUDA
+  kernel uses these as a pre-filter to reject wrong keys earlier in the search.
+  A badge in the GUI shows how many silence frames were detected.
+- **Configurable GPU/CPU split** — spin control (50–95 %, step 5) lets the user
+  adjust how the keyspace is divided between the GPU and CPU workers at scan start.
+- **ILP-2 kernel enabled on sm_75+** — the dual-key kernel that was previously
+  restricted to sm_89+ now runs on Turing and Ampere too, improving throughput on
+  GTX 16xx / RTX 20xx and RTX 30xx cards.
+- **Multi-arch build** — single `dmrcrack.exe` ships with native SASS for sm_75 /
+  sm_86 / sm_89 plus a `compute_75` PTX fallback for RTX 50xx and future GPUs
+  (JIT-compiled by the driver on first run).
+- **`.bin` validation on load** — payload set is inspected on file open: KMI9
+  coverage stats (how many lines carry MI metadata), KID histogram, low-payload
+  warning when `count < 64`, alignment warning if the first frame isn't at
+  `burst_pos == 0`.
+- **Full EN/ES i18n with runtime toggle** — every user-facing string routed through
+  the `Lang` struct, including engine startup errors emitted by `bruteforce.cu`.
+  The language toggle button in the header switches `g_lang_ptr` and persists the
+  choice to `dmrcrack.ini`. The help dialog is also fully localized.
+- **Help dialog** — quick-start guide accessible from the **Help** button: capture
+  with SDR# → demodulate → brute-force, with NFM / de-emphasis caveats.
+- **Copy-key button** — copies the current best-candidate key to the clipboard.
+- **Key-found notification** — taskbar flash + system beep when the search completes
+  with a candidate above the Z threshold.
+- **Resizable window with per-monitor DPI awareness** — minimum 980 × 720; all
+  controls and graphs reposition via `WM_SIZE`.
+- **WinSparkle auto-updater** — replaced the custom WinHTTP + GitHub-API updater
+  (no signature verification) with WinSparkle 0.9.2: built-in UI, EdDSA (Ed25519)
+  signature verification, Sparkle appcast support. Each release now publishes an
+  `appcast.xml` alongside the installer.
+- **`gpu_keys_tested` counter** — engine snapshot now exposes GPU and CPU
+  contributions separately, used by the THROUGHPUT tile to display
+  *"GPU 1.6 G/s · CPU 240 M/s"*.
+- **ILP test bench** — `build_bench.bat` builds `bin/test_bench.exe`, a standalone
+  micro-benchmark for the strict vs ILP-2 kernels.
 
 ### Changed
-- **Full English translation**: All Spanish comments translated to English in `bruteforce.c`,
-  `bruteforce.cu`, `bruteforce.h`, `test_score_windows.c`, and
-  `tools/extract_encrypted_from_dsdfme.bat`.
-- **Auto-update system replaced with WinSparkle**: Removed the custom WinHTTP + GitHub API
-  updater (`updater.c`, 278 lines) which had no integrity verification. Replaced with WinSparkle
-  0.9.2 (MIT license), which provides its own UI, EdDSA (Ed25519) signature verification, and
-  Sparkle appcast support. The release workflow now signs the installer and publishes an appcast
-  XML alongside each release.
+- **Capture module simplified** — WAV input + **Demodulate** + **Export** kept;
+  RTL-SDR mode, slot selector (Both / 1 / 2), inverted-polarity checkbox and the
+  WAV/RTL mode toggle removed. DSD-FME is invoked with `-V 3` (both slots) by
+  default. Users who need slot-specific or polarity-inverted demodulation can run
+  dsd-fme manually and load the resulting `.bin`.
+- **All English source code** — Spanish comments and identifiers translated to
+  English across `bruteforce.cu`, `bruteforce.c`, `bruteforce.h`,
+  `test_score_windows.c` and the DSP-converter helper script.
+- **`build.bat` rewrite** — auto-detects Visual Studio via `vswhere`, sets
+  `INCLUDE` / `PATH` for the CUDA toolkit, compiles with `-O3 /arch:AVX2`.
 
-### Fixed
-- **Demodulation silent failure**: `run_process_stderr_redirect` redirected only stderr to the log
-  file; stdout was set to `GetStdHandle(STD_OUTPUT_HANDLE)` which returns NULL in a GUI process
-  (no console). Cygwin apps (dsd-fme) received a NULL stdout handle, which could cause silent
-  failures with exit code 0 and no DSP output produced. Both stdout and stderr are now redirected
-  to the log file, giving dsd-fme a valid write handle and capturing all its output.
-- **DSP output search too narrow**: after dsd-fme ran, the app only looked for the DSP file in
-  `wav_dir\DSP\qname` and `wav_dir\qname`. Some versions of dsd-fme write relative to their own
-  executable directory. Two additional candidate paths under the dsd-fme.exe directory are now
-  searched before reporting failure.
-- **Opaque error messages**: "DSD output not found — check .dslog.txt" gave no path. All error
-  dialogs now include the full resolved path of the log file and its last ~480 bytes, so the user
-  sees what went wrong without hunting for a file.
-- **No startup warning for broken install**: if `tools\dsd-fme.exe` was missing the app started
-  normally and only failed when the user clicked Demodulate. The Demodulate button is now disabled
-  at startup and a permanent label warns immediately if dsd-fme.exe is not found.
-- **Unhelpful "missing dsd-fme" message**: previous message suggested the user install dsd-fme
-  manually. Since the app is fully self-contained (dsd-fme and all Cygwin DLLs are bundled by the
-  installer), the message now says "reinstall the app" instead.
+### Internal
+- 13 new GitHub issues filed for community contributors (`good first issue`,
+  `help wanted`): magic-number cleanup, `__restrict__` annotations, CMake build,
+  POSIX HAL, headless CLI, KPA pre-filter optimisation, legacy-kernel test
+  coverage, and more.
+
+> ⚠️ The releases v0.1.2, v0.2.0 and v0.2.1 were tagged without updating this
+> changelog. Their content is rolled forward into the 0.3.0 entry above; the
+> individual tags remain on GitHub for reference.
 
 ---
 
