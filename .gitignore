@@ -10,6 +10,9 @@ bin/*.lib
 # Auto-generated GPU tuning config (created at runtime by autotuning)
 bin/cuda_tune_*.cfg
 
+# Runtime user settings (language preference, etc. — created on first launch)
+bin/*.ini
+
 # CUDA intermediate files
 *.o
 *.ptx
