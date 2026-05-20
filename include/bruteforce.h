@@ -17,6 +17,15 @@
 #ifndef BRUTEFORCE_H
 #define BRUTEFORCE_H
 
+//3 sub-frames × 7 RC4 bytes per burst 
+#define DMR_CIPHER_PACK_BYTES   21
+//RC4 keystream discard count
+#define RC4_DISCARD_BYTES       256
+//stop-poll mask (every 1024 iterations)
+#define STOP_POLL_MASK          0x3FFu
+//local-keys flush threshold for atomicAdd
+#define LOCAL_KEYS_FLUSH        16384
+
 #include <stddef.h>
 #include <stdint.h>
 #include <windows.h>

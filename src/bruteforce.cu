@@ -51,7 +51,7 @@ extern "C" {
 // Ultra-fast constant memory (1-cycle L1 cache) for payloads shared by all threads
 #define MAX_CONST_LINES 256
 __constant__ unsigned char d_const_payloads[8192];
-__constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * 21]; // 21 bytes per burst (3x7)
+__constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * DMR_CIPHER_PACK_BYTES]; // 21 bytes per burst (3x7)
 __constant__ unsigned int d_const_mi[MAX_CONST_LINES];
 __constant__ unsigned char d_const_algid[MAX_CONST_LINES];
 __constant__ unsigned char d_const_meta_flags[MAX_CONST_LINES];
@@ -60,7 +60,7 @@ __constant__ uint16_t d_const_silence_idx[64];
 __constant__ int      d_const_n_silence;
 
 typedef struct {
-    unsigned char S[256];
+    unsigned char S[RC4_DISCARD_BYTES];
     unsigned char i;
     unsigned char j;
 } RC4_CTX_DEV;
@@ -88,7 +88,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
     int k_idx = 0;
     if (key_len <= 0) key_len = 1;
     #pragma unroll 4
-    for (i = 0; i < 256; i++) {
+    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
         ctx->S[i] = (unsigned char)i;
     }
     j = 0;
@@ -96,7 +96,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
     ctx->j = 0;
 
     #pragma unroll 4
-    for (i = 0; i < 256; i++) {
+    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
         j = (j + ctx->S[i] + key[k_idx]) & 0xFF;
         {
             unsigned char t = ctx->S[i];
@@ -112,7 +112,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
 __device__ __forceinline__ void rc4_ksa9_dev(RC4_CTX_DEV *ctx, const unsigned char key9[9])
 {
     #pragma unroll
-    for (int i = 0; i < 256; i++) ctx->S[i] = (unsigned char)i;
+    for (int i = 0; i < RC4_DISCARD_BYTES; i++) ctx->S[i] = (unsigned char)i;
     int j = 0;
     ctx->i = 0;
     ctx->j = 0;
@@ -206,7 +206,7 @@ __device__ __forceinline__ int kpa_silence_check_dev(
     rc4.S[rj] = t2;
     unsigned char ks0 = rc4.S[(rc4.S[ri] + rc4.S[rj]) & 0xFF];
 
-    unsigned char c0 = d_const_cipher_packs[silence_idx * 21];
+    unsigned char c0 = d_const_cipher_packs[silence_idx * DMR_CIPHER_PACK_BYTES];
     return ((ks0 >> 7) == (c0 >> 7)) ? 1 : 0;
 }
 
@@ -218,7 +218,7 @@ __device__ __forceinline__ int kpa_silence_check_dev(
         for (int _si = 0; _si < d_const_n_silence && _kpa_pass; _si++) {         \
             uint16_t _idx = d_const_silence_idx[_si];                             \
             uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
-            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            uint32_t _drop = RC4_DISCARD_BYTES + _bpos * DMR_CIPHER_PACK_BYTES;                                  \
             if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
                 _kpa_pass = 0;                                                    \
         }                                                                         \
@@ -230,7 +230,7 @@ __device__ __forceinline__ int kpa_silence_check_dev(
         for (int _si = 0; _si < d_const_n_silence && !pruned_a; _si++) {         \
             uint16_t _idx = d_const_silence_idx[_si];                             \
             uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
-            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            uint32_t _drop = RC4_DISCARD_BYTES + _bpos * DMR_CIPHER_PACK_BYTES;                                  \
             if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
                 pruned_a = 1;                                                     \
         }                                                                         \
@@ -241,7 +241,7 @@ __device__ __forceinline__ int kpa_silence_check_dev(
         for (int _si = 0; _si < d_const_n_silence && !pruned_b; _si++) {         \
             uint16_t _idx = d_const_silence_idx[_si];                             \
             uint32_t _bpos = (uint32_t)(_idx % 6u);                              \
-            uint32_t _drop = 256u + _bpos * 21u;                                  \
+            uint32_t _drop = RC4_DISCARD_BYTES + _bpos * DMR_CIPHER_PACK_BYTES;                                  \
             if (!kpa_silence_check_dev((key5_ptr), _idx, _drop))                  \
                 pruned_b = 1;                                                     \
         }                                                                         \
@@ -496,7 +496,7 @@ __device__ float score_burst_correct_dev(
     // RC4 KSA with 9-byte key, then discard to drop_base
     RC4_CTX_DEV rc4;
     rc4_init_dev_len(&rc4, kmi9, 9);
-    rc4_discard_dev(&rc4, 256 + burst_pos * 21);
+    rc4_discard_dev(&rc4, RC4_DISCARD_BYTES + burst_pos * DMR_CIPHER_PACK_BYTES);
     unsigned char plain7[3][7];
     // RC4 decrypt 7 bytes per sub-frame
     for (int sf = 0; sf < 3; ++sf) {
@@ -549,7 +549,7 @@ void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_ciph
             for (int i = 0; i < 49; ++i) {
                 cipher7[i >> 3] |= (unsigned char)((bits49[i] & 1u) << (7 - (i & 7)));
             }
-            memcpy(out_cipher_packs + p * 21 + sf * 7, cipher7, 7);
+            memcpy(out_cipher_packs + p * DMR_CIPHER_PACK_BYTES + sf * 7, cipher7, 7);
         }
     }
 }
@@ -668,7 +668,7 @@ __device__ __forceinline__ float score_dmr_ambe_dev(
     return best_score;
 }
 
-__global__ __launch_bounds__(256, 2)
+__global__ __launch_bounds__(RC4_DISCARD_BYTES, 2)
 void bruteforce_kernel_strict(
     uint64_t start_key,
     uint64_t total_keys,
@@ -684,7 +684,7 @@ void bruteforce_kernel_strict(
     int local_keys = 0;
 
     for (uint64_t i = tid; i < total_keys; i += stride) {
-        if ((i & 0x3FFu) == 0 && dev_stop_requested[0]) return;
+        if ((i & STOP_POLL_MASK) == 0 && dev_stop_requested[0]) return;
 
         uint64_t current_key = start_key + i;
         unsigned char key[5];
@@ -718,13 +718,13 @@ void bruteforce_kernel_strict(
             compose_kmi9_dev(key, line_mi, kmi9);
             RC4_CTX_DEV rc4;
             rc4_ksa9_dev(&rc4, kmi9);
-            rc4_discard_dev(&rc4, 256);
+            rc4_discard_dev(&rc4, RC4_DISCARD_BYTES);
 
             for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                 int p = sf_base + burst_pos;
                 if (p >= payload_count) break;
 
-                const unsigned char *cp = d_const_cipher_packs + (p * 21);
+                const unsigned char *cp = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
                 unsigned char p0[3], p1[3], p2[3];
                 rc4_crypt_first3_skip4_dev(&rc4, cp + 0,  p0);
                 rc4_crypt_first3_skip4_dev(&rc4, cp + 7,  p1);
@@ -802,8 +802,8 @@ void bruteforce_kernel_strict(
 
         next_key:
         local_keys++;
-        if (local_keys >= 16384) {
-            atomicAdd((unsigned long long int*)dev_keys_tested, 16384ULL);
+        if (local_keys >= LOCAL_KEYS_FLUSH) {
+            atomicAdd((unsigned long long int*)dev_keys_tested, LOCAL_KEYS_FLUSH);
             local_keys = 0;
         }
     }
@@ -837,7 +837,7 @@ void bruteforce_kernel_strict_ilp2(
     int local_keys = 0;
 
     for (uint64_t i = tid * 2; i < total_keys; i += stride2) {
-        if ((i & 0x3FFu) == 0 && dev_stop_requested[0]) return;
+        if ((i & STOP_POLL_MASK) == 0 && dev_stop_requested[0]) return;
 
         /* --- Key A --- */
         uint64_t key_a = start_key + i;
@@ -878,13 +878,13 @@ void bruteforce_kernel_strict_ilp2(
             RC4_CTX_DEV rc4_a, rc4_b;
             rc4_ksa9_dev(&rc4_a, kmi_a);   /* KSA-A */
             rc4_ksa9_dev(&rc4_b, kmi_b);   /* KSA-B (independent: compiler pipelines loads) */
-            rc4_discard_dev(&rc4_a, 256);
-            rc4_discard_dev(&rc4_b, 256);
+            rc4_discard_dev(&rc4_a, RC4_DISCARD_BYTES);
+            rc4_discard_dev(&rc4_b, RC4_DISCARD_BYTES);
 
             for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                 int p = sf_base + burst_pos;
                 if (p >= payload_count) break;
-                const unsigned char *cp = d_const_cipher_packs + (p * 21);
+                const unsigned char *cp = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
 
                 /* --- Decrypt 3 sub-frames for A and B, interleaved --- */
                 unsigned char pa0[3], pa1[3], pa2[3];
@@ -996,7 +996,7 @@ void bruteforce_kernel_strict_ilp2(
     atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
 }
 
-__global__ __launch_bounds__(256, 4)
+__global__ __launch_bounds__(RC4_DISCARD_BYTES, 4)
 void bruteforce_kernel(
     uint64_t start_key,
     uint64_t total_keys,
@@ -1020,7 +1020,7 @@ void bruteforce_kernel(
 
     for (uint64_t i = tid; i < total_keys; i += stride) {
         // Check stop every 1024 iterations to reduce global memory traffic
-        if ((i & 0x3FFu) == 0 && dev_stop_requested[0]) return;
+        if ((i & STOP_POLL_MASK) == 0 && dev_stop_requested[0]) return;
         uint64_t current_key = start_key + i;
         unsigned char key[5];
         key_to_5bytes_dev(current_key, key);
@@ -1046,12 +1046,12 @@ void bruteforce_kernel(
                 compose_kmi9_dev(key, line_mi, kmi9);
                 RC4_CTX_DEV rc4;
                 rc4_ksa9_dev(&rc4, kmi9);
-                rc4_discard_dev(&rc4, 256);
+                rc4_discard_dev(&rc4, RC4_DISCARD_BYTES);
 
                 for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                     int p = sf_base + burst_pos;
                     if (p >= payload_count) break;
-                    const unsigned char *cipher_packs = d_const_cipher_packs + (p * 21);
+                    const unsigned char *cipher_packs = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
                     unsigned char p0[3], p1[3], p2[3];
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 0,  p0);
                     rc4_crypt_first3_skip4_dev(&rc4, cipher_packs + 7,  p1);
@@ -1176,7 +1176,7 @@ void bruteforce_kernel(
             }
 
             if (!use_reset && use_drop256) {
-                rc4_discard_dev(&rc4_cont, 256);
+                rc4_discard_dev(&rc4_cont, RC4_DISCARD_BYTES);
             }
 
             for (int p = 0; p < payload_count; ++p) {
@@ -1236,7 +1236,7 @@ void bruteforce_kernel(
                     } else {
                         rc4 = rc4_base;
                     }
-                    if (use_drop256) rc4_discard_dev(&rc4, 256);
+                    if (use_drop256) rc4_discard_dev(&rc4, RC4_DISCARD_BYTES);
                     rc4_crypt_dev(&rc4, current_line_data, out, bytes_to_decrypt);
                 } else {
                     rc4_crypt_dev(&rc4_cont, current_line_data, out, bytes_to_decrypt);
@@ -1416,8 +1416,8 @@ void bruteforce_kernel(
         update_best_packed(score, current_key, dev_best_packed);
 
         local_keys++;
-        if (local_keys >= 16384) {
-            atomicAdd((unsigned long long int*)dev_keys_tested, 16384ULL);
+        if (local_keys >= LOCAL_KEYS_FLUSH) {
+            atomicAdd((unsigned long long int*)dev_keys_tested, LOCAL_KEYS_FLUSH);
             local_keys = 0;
         }
     }
@@ -1516,7 +1516,7 @@ static double score_candidate_host(
     int sample_bytes, const unsigned char key[5]);
 
 /* ─── Identity table for AVX2 S-box initialisation ──────────────────────── */
-static const unsigned char rc4_id256[256] = {
+static const unsigned char rc4_id256[RC4_DISCARD_BYTES] = {
       0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
      16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
      32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
@@ -1541,8 +1541,8 @@ static const unsigned char rc4_id256[256] = {
  * AVX2 is used for the identity S-box initialisation (8 × 256-bit stores
  * per S-box instead of 256 byte stores) when compiled with /arch:AVX2.    */
 static void rc4_ksa9_4way(
-    unsigned char Sa[256], unsigned char Sb[256],
-    unsigned char Sc[256], unsigned char Sd[256],
+    unsigned char Sa[RC4_DISCARD_BYTES], unsigned char Sb[RC4_DISCARD_BYTES],
+    unsigned char Sc[RC4_DISCARD_BYTES], unsigned char Sd[RC4_DISCARD_BYTES],
     const unsigned char ka[9], const unsigned char kb[9],
     const unsigned char kc[9], const unsigned char kd[9])
 {
@@ -1560,13 +1560,13 @@ static void rc4_ksa9_4way(
         _mm256_storeu_si256((__m256i *)(Sd + i * 32), v);
     }
 #else
-    for (i = 0; i < 256; i++)
+    for (i = 0; i < RC4_DISCARD_BYTES; i++)
         Sa[i] = Sb[i] = Sc[i] = Sd[i] = (unsigned char)i;
 #endif
 
     /* 4-way interleaved KSA — four independent j-chains */
     ja = jb = jc = jd = 0u;
-    for (i = 0; i < 256; i++) {
+    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
         int ki = i % 9;
         ja = (ja + Sa[i] + ka[ki]) & 0xFFu;
         jb = (jb + Sb[i] + kb[ki]) & 0xFFu;
@@ -1663,7 +1663,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             while (sf_base < pcount && !all_pruned_cpu) {
                 int n_bursts = pcount - sf_base;
                 unsigned char kmi9[4][9];
-                unsigned char Sa[256], Sb[256], Sc[256], Sd[256];
+                unsigned char Sa[RC4_DISCARD_BYTES], Sb[RC4_DISCARD_BYTES], Sc[RC4_DISCARD_BYTES], Sd[RC4_DISCARD_BYTES];
                 unsigned ia, ja, ib, jb, ic, jc, id, jd;
                 unsigned char _t;
                 int n, burst, sf;
@@ -1694,7 +1694,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
                 ia = ja = ib = jb = ic = jc = id = jd = 0u;
 
                 /* Discard 256 bytes (4-way) — positions 1..256 of keystream */
-                for (n = 0; n < 256; n++) {
+                for (n = 0; n < RC4_DISCARD_BYTES; n++) {
                     ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
                     _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
                     ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
@@ -1710,7 +1710,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
                  * identical to rc4_init(kmi9) + rc4_discard(256+b*21) per burst. */
                 for (burst = 0; burst < n_bursts; burst++) {
                     int burst_idx = sf_base + burst;
-                    const unsigned char *cp_base = cipher_packs + burst_idx * 21;
+                    const unsigned char *cp_base = cipher_packs + burst_idx * DMR_CIPHER_PACK_BYTES;
                     unsigned char dec24[4][3][24]; /* [key][sf][bit] */
 
                     for (sf = 0; sf < 3; sf++) {
@@ -1796,7 +1796,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
 
             local_count += (uint64_t)batch;
             k           += (uint64_t)batch;
-            if ((local_count & 0x3FFu) == 0)
+            if ((local_count & STOP_POLL_MASK) == 0)
                 InterlockedAdd64(&engine->keys_tested, 1024LL);
         }
     } else {
@@ -1825,15 +1825,15 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             LeaveCriticalSection(&engine->lock);
 
             local_count++;
-            if ((local_count & 0x3FFu) == 0)
+            if ((local_count & STOP_POLL_MASK) == 0)
                 InterlockedAdd64(&engine->keys_tested, 1024LL);
 
             if (k == ctx->end_key) break;
         }
     }
 
-    if ((local_count & 0x3FFu) != 0)
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & 0x3FFu));
+    if ((local_count & STOP_POLL_MASK) != 0)
+        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & STOP_POLL_MASK));
 
     return 0;
 }
@@ -1904,7 +1904,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     memset(host_algid, 0, sizeof(host_algid));
     memset(host_meta_flags, 0, sizeof(host_meta_flags));
     // Precompute cipher packs
-    unsigned char host_cipher_packs[MAX_CONST_LINES * 21];
+    unsigned char host_cipher_packs[MAX_CONST_LINES * DMR_CIPHER_PACK_BYTES];
     memset(host_cipher_packs, 0, sizeof(host_cipher_packs));
     precompute_cipher_packs(engine->payloads, host_cipher_packs, payload_limit);
     /* Compute actual max payload length instead of hardcoding 64 */
@@ -2090,7 +2090,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CudaLaunchProfile profile;
         int profile_loaded = 0;
 
-        profile.threads_per_block = 256;
+        profile.threads_per_block = RC4_DISCARD_BYTES;
         profile.blocks_per_sm = strict_mode ? 24 : 12;
         profile.chunk_mult = strict_mode ? 384 : 128;
 
@@ -2098,10 +2098,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         InterlockedExchange(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
 
         if (!profile_loaded) {
-            int tpb_candidates[2] = { 128, 256 };
+            int tpb_candidates[2] = { 128, RC4_DISCARD_BYTES };
             int bpsm_candidates_strict[2] = { 20, 24 };
             int bpsm_candidates_legacy[2] = { 10, 12 };
-            int chunk_candidates_strict[2] = { 192, 256 };
+            int chunk_candidates_strict[2] = { 192, RC4_DISCARD_BYTES };
             int chunk_candidates_legacy[2] = { 96, 128 };
             int bpsm_count = 2;
             int chunk_count = 2;
@@ -2245,7 +2245,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         threadsPerBlock = profile.threads_per_block;
         if (threadsPerBlock < 64) threadsPerBlock = 64;
         if (threadsPerBlock > prop.maxThreadsPerBlock) threadsPerBlock = prop.maxThreadsPerBlock;
-        if ((threadsPerBlock & 31) != 0) threadsPerBlock = 256;
+        if ((threadsPerBlock & 31) != 0) threadsPerBlock = RC4_DISCARD_BYTES;
 
         blocksPerGrid = prop.multiProcessorCount * profile.blocks_per_sm;
         if (blocksPerGrid < prop.multiProcessorCount) blocksPerGrid = prop.multiProcessorCount;
@@ -2536,15 +2536,15 @@ static unsigned __stdcall cpu_worker_proc(void *arg)
         }
 
         local_count++;
-        if ((local_count & 0x3FFu) == 0) {
+        if ((local_count & STOP_POLL_MASK) == 0) {
             InterlockedAdd64(&engine->keys_tested, 1024);
         }
 
         if (k == ctx->end_key) break;
     }
 
-    if ((local_count & 0x3FFu) != 0) {
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & 0x3FFu));
+    if ((local_count & STOP_POLL_MASK) != 0) {
+        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & STOP_POLL_MASK));
     }
 
     if (InterlockedIncrement(&engine->finished_threads) == engine->cfg.thread_count) {
@@ -3127,7 +3127,7 @@ static double score_burst_correct_host(
 
     RC4_CTX rc4;
     rc4_init(&rc4, kmi9, 9);
-    rc4_discard_host(&rc4, 256 + burst_pos * 21);
+    rc4_discard_host(&rc4, RC4_DISCARD_BYTES + burst_pos * DMR_CIPHER_PACK_BYTES);
 
     unsigned char dec24[3][24];
 
@@ -3319,7 +3319,7 @@ static double score_candidate_host(
             }
 
             if (!use_reset && use_drop256) {
-                rc4_discard_host(&rc4_cont, 256);
+                rc4_discard_host(&rc4_cont, RC4_DISCARD_BYTES);
             }
 
             for (size_t line_idx = 0; line_idx < line_count; ++line_idx) {
@@ -3373,7 +3373,7 @@ static double score_candidate_host(
                     } else {
                         rc4 = rc4_base;
                     }
-                    if (use_drop256) rc4_discard_host(&rc4, 256);
+                    if (use_drop256) rc4_discard_host(&rc4, RC4_DISCARD_BYTES);
                     rc4_crypt(&rc4, line->data, out, bytes_to_decrypt);
                 } else {
                     rc4_crypt(&rc4_cont, line->data, out, bytes_to_decrypt);
