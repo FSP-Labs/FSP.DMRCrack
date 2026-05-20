@@ -199,9 +199,13 @@ FSP.DMRCrack/
     main.c             Entry point (WinMain)
     gui.c              Win32 GUI, dark theme, progress graphs
     bruteforce.cu      CUDA GPU kernels + integrated CPU fallback
-    bruteforce.c       Pure-CPU reference implementation (not yet in production build — target: future headless CLI, see issue #11)
+    bruteforce.c       Pure-CPU reference implementation (target: future headless CLI, see issue #11)
     rc4.c              RC4 KSA + PRGA (host-side)
     payload_io.c       .bin file loader/saver, ALG/KID/MI metadata parser
+  tests/
+    test_strict_score.c    Per-burst scoring validation against known key
+    test_score_windows.c   Score distribution analysis tool
+    test_bench.cu          GPU kernel throughput micro-benchmark
   include/             Headers
   tools/
     dsd-fme.exe                    DSD-FME demodulator (requires Cygwin DLLs alongside)
@@ -209,6 +213,8 @@ FSP.DMRCrack/
     verify_decrypt.py              Key validation with Z-score output
     diag_decrypt.py                Decryption pipeline diagnostic
     extract_encrypted_from_dsdfme.bat  DSD-FME capture helper
+    build_bench.bat                GPU kernel throughput benchmark build
+    build_ptxas.bat                Register/occupancy diagnostic build
   installer/
     FSP.DMRCrack.iss   Inno Setup script
   bin/                 Compiled executables (not tracked in git)

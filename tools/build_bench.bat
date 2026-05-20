@@ -1,5 +1,5 @@
 @echo off
-cd /d "%~dp0"
+cd /d "%~dp0\.."
 
 REM Auto-detect Visual Studio using vswhere
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -32,7 +32,7 @@ nvcc -O3 ^
   -Iinclude ^
   -Ivendor\winsparkle\include ^
   -Xcompiler "/W3 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS /DSTANDALONE_BENCH" ^
-  src\test_bench.cu src\bruteforce.cu src\payload_io.c src\rc4.c ^
+  tests\test_bench.cu src\bruteforce.cu src\payload_io.c src\rc4.c ^
   -o bin\test_bench.exe ^
   -luser32 -lgdi32 -lcomdlg32 -lkernel32 -ldwmapi -lshell32 -ladvapi32
 

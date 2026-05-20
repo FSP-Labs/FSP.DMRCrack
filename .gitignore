@@ -59,8 +59,11 @@ test/
 *.swo
 *~
 
-# Claude Code internal files
+# Claude Code internal files and AI planning artifacts
 CLAUDE.md
+docs/plans/
+**/plans/*.md
+Mejora.md
 
 # DSD-FME runtime (binaries — run tools/get_runtime.bat to download)
 tools/*.dll

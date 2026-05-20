@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Block staged .md files that contain AI planning artifacts.
+# Install once: git config core.hooksPath .githooks
+
+PATTERNS=(
+    "For Claude:"
+    "Para Claude:"
+    "REQUIRED SUB-SKILL:"
+    "superpowers:executing-plans"
+    "executing-plans"
+)
+
+staged=$(git diff --cached --name-only --diff-filter=ACM | grep '\.md$')
+[ -z "$staged" ] && exit 0
+
+failed=0
+while IFS= read -r file; do
+    for pat in "${PATTERNS[@]}"; do
+        if git show ":$file" 2>/dev/null | grep -qF "$pat"; then
+            echo "pre-commit: $file contains AI planning artifact: \"$pat\""
+            failed=1
+        fi
+    done
+done <<< "$staged"
+
+if [ $failed -ne 0 ]; then
+    echo ""
+    echo "Commit rejected. Remove AI planning artifacts from staged .md files."
+    echo "Planning docs belong in GitHub Issues, not in the repository."
+    exit 1
+fi
