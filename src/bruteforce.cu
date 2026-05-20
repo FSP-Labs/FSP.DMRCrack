@@ -40,6 +40,8 @@ extern "C" {
 }
 #endif
 
+#include "../include/lang.h"   /* has its own extern "C" wrapper */
+
 /*
  * =========================================================================
  * GPU RC4 PROTOCOL MACROS AND COPIES (__device__)
@@ -2601,20 +2603,20 @@ int bruteforce_start(
     size_t err_len)
 {
     if (InterlockedCompareExchange(&engine->running, 0, 0) != 0) {
-        set_error(err, err_len, "A search is already active");
+        set_error(err, err_len, g_lang.err_search_already_active);
         return 0;
     }
 
     if (cfg->start_key > cfg->end_key) {
-        set_error(err, err_len, "Start key must be <= End key");
+        set_error(err, err_len, g_lang.err_start_gt_end);
         return 0;
     }
     if (cfg->end_key > 0xFFFFFFFFFFull) {
-        set_error(err, err_len, "End key exceeds 40 bits");
+        set_error(err, err_len, g_lang.err_end_exceeds_40bit);
         return 0;
     }
     if (payloads == NULL || payloads->count == 0) {
-        set_error(err, err_len, "No payloads loaded");
+        set_error(err, err_len, g_lang.err_no_payloads_loaded);
         return 0;
     }
 
@@ -2646,7 +2648,7 @@ int bruteforce_start(
             if (engine->pause_event != NULL) { CloseHandle(engine->pause_event); }
             engine->pause_event = CreateEventA(NULL, TRUE, TRUE, NULL);
             if (engine->pause_event == NULL) {
-                set_error(err, err_len, "Could not create pause event");
+                set_error(err, err_len, g_lang.err_pause_event_failed);
                 return 0;
             }
 
@@ -2655,7 +2657,7 @@ int bruteforce_start(
             if (engine->thread_handles == NULL || engine->workers == NULL) {
                 free(engine->thread_handles); engine->thread_handles = NULL;
                 free(engine->workers);        engine->workers = NULL;
-                set_error(err, err_len, "Out of memory allocating CPU worker threads");
+                set_error(err, err_len, g_lang.err_oom_cpu_threads);
                 return 0;
             }
             CpuWorkerCtx *workers = (CpuWorkerCtx *)engine->workers;
@@ -2700,7 +2702,7 @@ int bruteforce_start(
                     }
                     free(engine->thread_handles); engine->thread_handles = NULL;
                     free(engine->workers);        engine->workers = NULL;
-                    set_error(err, err_len, "Error creating CPU brute-force threads");
+                    set_error(err, err_len, g_lang.err_create_cpu_threads);
                     return 0;
                 }
                 engine->thread_handles[t] = (HANDLE)th;
@@ -2769,7 +2771,7 @@ int bruteforce_start(
     /* Allocate handle array before launching thread so the handle is never lost. */
     engine->thread_handles = (HANDLE *)calloc(1, sizeof(HANDLE));
     if (engine->thread_handles == NULL) {
-        set_error(err, err_len, "Insufficient memory for handles");
+        set_error(err, err_len, g_lang.err_oom_handles);
         return 0;
     }
 
@@ -2780,7 +2782,7 @@ int bruteforce_start(
         InterlockedExchange(&engine->running, 0);
         free(engine->thread_handles);
         engine->thread_handles = NULL;
-        set_error(err, err_len, "Error creating CUDA Launcher thread");
+        set_error(err, err_len, g_lang.err_create_cuda_thread);
         return 0;
     }
     engine->thread_handles[0] = (HANDLE)th;

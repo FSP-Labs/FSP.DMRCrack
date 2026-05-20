@@ -110,6 +110,17 @@ const Lang g_lang_es = {
     .err_wnd_class  = "Error al registrar la clase de ventana",
     .err_wnd_create = "Error al crear la ventana principal",
 
+    /* ---- Errores de arranque del motor ---- */
+    .err_search_already_active = "Ya hay una b\xc3\xbasqueda en curso",
+    .err_start_gt_end          = "La clave inicial debe ser \xe2\x89\xa4 a la final",
+    .err_end_exceeds_40bit     = "La clave final excede 40 bits",
+    .err_no_payloads_loaded    = "No hay payloads cargados",
+    .err_pause_event_failed    = "No se pudo crear el evento de pausa",
+    .err_oom_cpu_threads       = "Sin memoria para los hilos de CPU",
+    .err_create_cpu_threads    = "Error al crear los hilos de CPU",
+    .err_oom_handles           = "Sin memoria para los handles de hilo",
+    .err_create_cuda_thread    = "Error al crear el hilo lanzador CUDA",
+
     /* ---- Cadenas de formato del panel de estado ---- */
     .fmt_keys_tested    = "Claves probadas: %llu / %llu (%.2f%%)",
     .fmt_speed          = "Velocidad: %.2f claves/s",

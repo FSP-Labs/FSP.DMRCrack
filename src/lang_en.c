@@ -111,6 +111,17 @@ const Lang g_lang_en = {
     .err_wnd_class  = "Failed to register window class",
     .err_wnd_create = "Failed to create main window",
 
+    /* ---- Engine start errors ---- */
+    .err_search_already_active = "A search is already active",
+    .err_start_gt_end          = "Start key must be \xe2\x89\xa4 end key",
+    .err_end_exceeds_40bit     = "End key exceeds 40 bits",
+    .err_no_payloads_loaded    = "No payloads loaded",
+    .err_pause_event_failed    = "Could not create pause event",
+    .err_oom_cpu_threads       = "Out of memory allocating CPU worker threads",
+    .err_create_cpu_threads    = "Error creating CPU brute-force threads",
+    .err_oom_handles           = "Out of memory allocating thread handles",
+    .err_create_cuda_thread    = "Error creating CUDA launcher thread",
+
     /* ---- Status panel format strings ---- */
     .fmt_keys_tested    = "Keys tested: %llu / %llu (%.2f%%)",
     .fmt_speed          = "Speed: %.2f keys/s",

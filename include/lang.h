@@ -112,6 +112,17 @@ typedef struct {
     const char *err_wnd_class;
     const char *err_wnd_create;
 
+    /* ---- Engine start errors (bruteforce.cu set_error paths) ---- */
+    const char *err_search_already_active;
+    const char *err_start_gt_end;
+    const char *err_end_exceeds_40bit;
+    const char *err_no_payloads_loaded;
+    const char *err_pause_event_failed;
+    const char *err_oom_cpu_threads;
+    const char *err_create_cpu_threads;
+    const char *err_oom_handles;
+    const char *err_create_cuda_thread;
+
     /* ---- Status panel format strings ---- */
     const char *fmt_keys_tested;       /* "Keys tested: %llu / %llu (%.2f%%)" */
     const char *fmt_speed;             /* "Speed: %.2f keys/s"                */
@@ -148,6 +159,10 @@ typedef struct {
 
 } Lang;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* All available language tables. */
 extern const Lang g_lang_en;
 extern const Lang g_lang_es;
@@ -155,6 +170,11 @@ extern const Lang g_lang_es;
 /* Active language pointer — switch at runtime to change language.
  * Use the g_lang macro so all existing g_lang.xxx references work unchanged. */
 extern const Lang *g_lang_ptr;
+
+#ifdef __cplusplus
+}
+#endif
+
 #define g_lang (*g_lang_ptr)
 
 #endif /* LANG_H */
