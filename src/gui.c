@@ -422,109 +422,6 @@ static void fmt_hhmmss(double seconds, char *out, size_t out_len)
     }
 }
 
-static void update_status_text(void)
-{
-    char eta[32], elapsed[32], score_buf[64], best_key_buf[32], text[1024];
-    double pct = 0.0;
-    const char *cuda_stage = "INIT";
-    LONG stage_v = InterlockedCompareExchange(&g_app.engine.cuda_stage, 0, 0);
-    LONG profile_cached = InterlockedCompareExchange(&g_app.engine.cuda_profile_cached, 0, 0);
-    LONG tpb = InterlockedCompareExchange(&g_app.engine.cuda_tpb, 0, 0);
-    LONG bpsm = InterlockedCompareExchange(&g_app.engine.cuda_bpsm, 0, 0);
-    LONG chunk_mult = InterlockedCompareExchange(&g_app.engine.cuda_chunk_mult, 0, 0);
-
-    if (stage_v == 1) cuda_stage = "AUTOTUNE";
-    else if (stage_v == 2) cuda_stage = "SCANNING";
-    else if (stage_v == 3) cuda_stage = "DONE";
-    else if (stage_v == 4) cuda_stage = "DICT";
-
-    fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed, sizeof(elapsed));
-    fmt_hhmmss(g_app.snapshot.eta_seconds, eta, sizeof(eta));
-
-    if (g_app.snapshot.total_keys > 0)
-        pct = ((double)g_app.snapshot.keys_tested * 100.0) / (double)g_app.snapshot.total_keys;
-
-    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
-        strcpy_s(best_key_buf, sizeof(best_key_buf), "----------");
-    } else {
-        snprintf(best_key_buf, sizeof(best_key_buf), "%010llX",
-                 (unsigned long long)(g_app.snapshot.best_key & 0xFFFFFFFFFFull));
-    }
-
-    {
-        char line[256];
-        int pos = 0;
-        snprintf(line, sizeof(line), g_lang.fmt_keys_tested,
-                 (unsigned long long)g_app.snapshot.keys_tested,
-                 (unsigned long long)g_app.snapshot.total_keys, pct);
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_speed, g_app.snapshot.keys_per_second);
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_time, elapsed, eta);
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_backend,
-                 g_app.engine.cuda_active ? "CUDA GPU" : "CPU");
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_best_candidate, best_key_buf);
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_best_score,
-                 (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) ? "---" :
-                     (snprintf(score_buf, sizeof(score_buf), "%.4f", g_app.snapshot.best_score), score_buf));
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s\r\n", line);
-
-        snprintf(line, sizeof(line), g_lang.fmt_status,
-                 g_app.snapshot.running ? (g_app.snapshot.paused ? g_lang.state_paused : g_lang.state_running) : g_lang.state_stopped);
-        pos = (int)strlen(text);
-        snprintf(text + pos, sizeof(text) - pos, "%s", line);
-    }
-
-    if (g_app.engine.cuda_active && g_app.engine.cuda_device_name[0]) {
-        LONG sm_count = InterlockedCompareExchange(&g_app.engine.cuda_sm_count, 0, 0);
-        LONG cc_major = InterlockedCompareExchange(&g_app.engine.cuda_compute_major, 0, 0);
-        LONG cc_minor = InterlockedCompareExchange(&g_app.engine.cuda_compute_minor, 0, 0);
-        if (sm_count > 0 && cc_major > 0)
-            snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                     "\r\nGPU: %s (sm_%ld%ld, %ld SMs)",
-                     g_app.engine.cuda_device_name, cc_major, cc_minor, sm_count);
-        else
-            snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                     "\r\nGPU: %s", g_app.engine.cuda_device_name);
-    }
-
-    if (g_app.engine.cuda_active) {
-        snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                 "\r\nCUDA stage: %s  | profile: %s",
-                 cuda_stage, profile_cached ? "CACHE" : "TUNED");
-        if (tpb > 0 && bpsm > 0 && chunk_mult > 0) {
-            snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                     "\r\nLaunch: TPB=%ld BPSM=%ld CHUNK=%ld",
-                     tpb, bpsm, chunk_mult);
-        }
-    }
-
-    if (g_app.engine.cuda_error[0])
-        snprintf(text + strlen(text), sizeof(text) - strlen(text),
-                 "\r\n");
-        {
-            char cuda_err_line[300];
-            snprintf(cuda_err_line, sizeof(cuda_err_line), g_lang.fmt_cuda_error, g_app.engine.cuda_error);
-            snprintf(text + strlen(text), sizeof(text) - strlen(text), "%s", cuda_err_line);
-        }
-
-    (void)text; /* status_text removed; replaced by painted tiles in Task 7 */
-}
-
 /* --- Drawing: header bar --- */
 static void draw_header(HDC hdc, int cw)
 {
@@ -726,9 +623,9 @@ static void draw_all_tiles(HDC hdc)
             else snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
             if (cpu_kps >= 1e3) snprintf(c, sizeof(c), "%.0f K/s", cpu_kps/1e3);
             else snprintf(c, sizeof(c), "%.0f /s", cpu_kps);
-            snprintf(line2, sizeof(line2), "GPU  %s  \xb7  CPU  %s", g, c);
+            snprintf(line2, sizeof(line2), g_lang.tile_split_fmt, g, c);
         } else {
-            snprintf(line2, sizeof(line2), "CPU only");
+            snprintf(line2, sizeof(line2), "%s", g_lang.tile_cpu_only);
         }
         line3[0] = '\0';
         draw_tile(hdc, &g_app.tile_throughput_rect, /*big*/1,
@@ -744,7 +641,7 @@ static void draw_all_tiles(HDC hdc)
             unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
             snprintf(primary, sizeof(primary), "%04llX %04llX %02llX",
                      (k >> 24) & 0xFFFF, (k >> 8) & 0xFFFF, k & 0xFF);
-            snprintf(line2, sizeof(line2), "Score  %.2f", g_app.snapshot.best_score);
+            snprintf(line2, sizeof(line2), g_lang.tile_score_fmt, g_app.snapshot.best_score);
         }
         line3[0] = '\0';
         draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/0,
@@ -757,19 +654,19 @@ static void draw_all_tiles(HDC hdc)
             pct = (double)g_app.snapshot.keys_tested / (double)g_app.snapshot.total_keys;
         if (pct > 1.0) pct = 1.0;
 
-        char keys_str[64], eta_str[64], elapsed_str[64], meta[160];
+        char keys_str[64], eta_str[64], elapsed_str[64], meta[200];
         double tk = (double)g_app.snapshot.total_keys;
         double kk = (double)g_app.snapshot.keys_tested;
         if (tk >= 1e12)
-            snprintf(keys_str, sizeof(keys_str), "%.2fT / %.2fT keys", kk/1e12, tk/1e12);
+            snprintf(keys_str, sizeof(keys_str), "%.2fT / %.2fT", kk/1e12, tk/1e12);
         else if (tk >= 1e9)
-            snprintf(keys_str, sizeof(keys_str), "%.2fG / %.2fG keys", kk/1e9, tk/1e9);
+            snprintf(keys_str, sizeof(keys_str), "%.2fG / %.2fG", kk/1e9, tk/1e9);
         else
-            snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM keys", kk/1e6, tk/1e6);
+            snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM", kk/1e6, tk/1e6);
 
         fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
         fmt_hhmmss(g_app.snapshot.eta_seconds, eta_str, sizeof(eta_str));
-        snprintf(meta, sizeof(meta), "%s   \xb7   ETA  %s   \xb7   elapsed  %s",
+        snprintf(meta, sizeof(meta), g_lang.tile_progress_meta_fmt,
                  keys_str, eta_str, elapsed_str);
 
         draw_progress_tile(hdc, &g_app.tile_progress_rect,
@@ -1055,9 +952,8 @@ static void update_kpa_badge(void)
     if (!g_app.lbl_kpa_badge) return;
     if (g_app.payloads.n_silence > 0) {
         char kpa_text[64];
-        snprintf(kpa_text, sizeof(kpa_text), "KPA: %u silence frame%s",
-                 (unsigned)g_app.payloads.n_silence,
-                 g_app.payloads.n_silence == 1 ? "" : "s");
+        snprintf(kpa_text, sizeof(kpa_text), g_lang.kpa_silence_fmt,
+                 (unsigned)g_app.payloads.n_silence);
         SetWindowTextA(g_app.lbl_kpa_badge, kpa_text);
         ShowWindow(g_app.lbl_kpa_badge, SW_SHOW);
     } else {
@@ -1271,11 +1167,8 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     }
     if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path, sizeof(dsd_path))) {
         SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
-        MessageBoxA(g_app.hwnd,
-            "dsd-fme.exe was not found in the tools\\ folder.\n\n"
-            "The installation may be incomplete or corrupted.\n"
-            "Please reinstall FSP.DMRCrack.",
-            APP_TITLE, MB_ICONERROR);
+        MessageBoxA(g_app.hwnd, g_lang.err_dsd_missing_detail,
+                    APP_TITLE, MB_ICONERROR);
         goto done;
     }
 
@@ -1341,12 +1234,9 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         } else {
             char tail[512], detail[1024];
             read_log_tail(logfile, tail, sizeof(tail));
-            if (tail[0])
-                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\nLog: %s\n\n%s",
-                         g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile, tail);
-            else
-                snprintf(detail, sizeof(detail), "%s (exit %lu)\n\nLog: %s\n\n(empty log)",
-                         g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile);
+            snprintf(detail, sizeof(detail), g_lang.err_dsd_detail_fmt,
+                     g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile,
+                     tail[0] ? tail : g_lang.lbl_empty_log);
             SetWindowTextA(g_app.demod_label, g_lang.err_dsd_failed);
             MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONERROR);
         }
@@ -1383,14 +1273,9 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         if (!found) {
             char tail[512], detail[1024];
             read_log_tail(logfile, tail, sizeof(tail));
-            if (tail[0])
-                snprintf(detail, sizeof(detail),
-                         "%s\n\nLog: %s\n\ndsd-fme output:\n%s",
-                         g_lang.err_no_dsp_output, logfile, tail);
-            else
-                snprintf(detail, sizeof(detail),
-                         "%s\n\nLog: %s\n\n(empty log — dsd-fme produced no output)",
-                         g_lang.err_no_dsp_output, logfile);
+            snprintf(detail, sizeof(detail), g_lang.err_no_dsp_detail_fmt,
+                     g_lang.err_no_dsp_output, logfile,
+                     tail[0] ? tail : g_lang.lbl_empty_log_no_output);
             SetWindowTextA(g_app.demod_label, g_lang.err_no_dsp_output);
             MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONWARNING);
             goto done;
@@ -1419,7 +1304,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), out_bin);
     {
         char msg[320], summary[160], warn_txt[160], plbl[320];
-        snprintf(msg, sizeof(msg), "OK: %zu payloads -> %s", g_app.payloads.count, out_bin);
+        snprintf(msg, sizeof(msg), g_lang.msg_demod_ok_fmt, g_app.payloads.count, out_bin);
         SetWindowTextA(g_app.demod_label, msg);
         validate_payload_set(&g_app.payloads, summary, sizeof(summary),
                              warn_txt, sizeof(warn_txt));
@@ -1758,6 +1643,7 @@ static void apply_language(void)
     SetWindowTextA(g_app.lbl_end,     g_lang.label_end_key);
     SetWindowTextA(g_app.lbl_threads, g_lang.label_threads);
     SetWindowTextA(g_app.lbl_samples, g_lang.label_samples);
+    SetWindowTextA(g_app.lbl_gpu_pct, g_lang.label_gpu_pct);
     SetWindowTextA(g_app.btn_demod,    g_lang.btn_demodulate);
     SetWindowTextA(g_app.btn_export,   g_lang.btn_export);
     SetWindowTextA(g_app.btn_help,     g_lang.btn_help);
@@ -1770,6 +1656,7 @@ static void apply_language(void)
         int paused = InterlockedCompareExchange(&g_app.engine.paused, 0, 0);
         SetWindowTextA(g_app.btn_pause, paused ? g_lang.btn_resume : g_lang.btn_pause);
     }
+    update_kpa_badge();
     InvalidateRect(g_app.hwnd, NULL, TRUE);
     if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
         DestroyWindow(g_app.hwnd_help);
@@ -1994,7 +1881,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             275, y, 130, 24, hwnd, (HMENU)ID_EDIT_END, NULL, NULL);
 
         /* GPU % control */
-        g_app.lbl_gpu_pct = CreateWindowA("STATIC", "GPU %:", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+        g_app.lbl_gpu_pct = CreateWindowA("STATIC", g_lang.label_gpu_pct,
+            WS_CHILD | WS_VISIBLE | SS_RIGHT,
             0, 0, 45, 18, hwnd, NULL, NULL, NULL);
         g_app.edit_gpu_pct = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "80",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
@@ -2052,8 +1940,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             char dsd_path_check[MAX_PATH];
             if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path_check, sizeof(dsd_path_check))) {
                 EnableWindow(g_app.btn_demod, FALSE);
-                SetWindowTextA(g_app.demod_label,
-                    "WARNING: dsd-fme.exe not found — reinstall the app");
+                SetWindowTextA(g_app.demod_label, g_lang.warn_dsd_missing_startup);
             }
         }
         return 0;

@@ -22,37 +22,26 @@
 #include "../include/lang.h"
 
 const Lang g_lang_es = {
-    /* ---- Encabezados de seccion ---- */
-    .section_capture    = "CAPTURA",
-    .section_bruteforce = "FUERZA BRUTA",
-
     /* ---- Etiquetas ---- */
-    .label_audio      = "Audio:",
-    .label_file       = "Archivo:",
+    .label_audio      = "WAV:",
+    .label_file       = ".bin:",
     .label_start_key  = "Inicio:",
     .label_end_key    = "Fin:",
     .label_threads    = "Hilos:",
     .label_samples    = "Muestras:",
+    .label_gpu_pct    = "GPU %:",
 
-    /* ---- Etiquetas RTL ---- */
-    .label_freq          = "Frec (MHz)",
-    .label_gain          = "Ganancia",
-    .label_ppm           = "PPM",
-    .label_device        = "Dispositivo",
-    .label_slot          = "Slot",
-    .label_inverted      = "Invertida",
-    .slot_both           = "Ambos",
-    .slot_1              = "Slot 1",
-    .slot_2              = "Slot 2",
-    /* Modo captura */
-    .radio_wav           = "WAV",
-    .radio_rtl           = "RTL-SDR",
-    .btn_capture         = "Capturar",
-    .btn_stop_capture    = "Detener",
     /* Titulos de tiles */
     .tile_throughput     = "VELOCIDAD",
     .tile_progress       = "PROGRESO",
     .tile_candidate      = "MEJOR CANDIDATO",
+    /* Cuerpo de los tiles */
+    .tile_cpu_only            = "Solo CPU",
+    .tile_split_fmt           = "GPU  %s  \xc2\xb7  CPU  %s",
+    .tile_score_fmt           = "Puntuaci\xc3\xb3n  %.2f",
+    .tile_progress_meta_fmt   = "%s claves   \xc2\xb7   ETA  %s   \xc2\xb7   transcurrido  %s",
+    /* Badge KPA */
+    .kpa_silence_fmt          = "KPA: %u tramas de silencio",
     /* Barra de estado */
     .status_backend_cuda = "GPU CUDA",
     .status_backend_cpu  = "CPU",
@@ -88,7 +77,16 @@ const Lang g_lang_es = {
     .err_dsd_launch            = "Error al lanzar DSD-FME",
     .err_no_dsp_output         = "Error: salida DSP no encontrada (ver detalles)",
     .err_dsp_conversion        = "Error: conversion DSP->BIN fallida",
-    .err_dsd_missing           = "Error: falta dsd-fme.exe — reinstala la aplicacion",
+    .err_dsd_missing           = "Error: falta dsd-fme.exe \xe2\x80\x94 reinstala la aplicaci\xc3\xb3n",
+    .err_dsd_missing_detail    = "No se encontr\xc3\xb3 dsd-fme.exe en la carpeta tools\\.\n\n"
+                                 "La instalaci\xc3\xb3n puede estar incompleta o corrupta.\n"
+                                 "Reinstala FSP.DMRCrack.",
+    .warn_dsd_missing_startup  = "AVISO: dsd-fme.exe no encontrado \xe2\x80\x94 reinstala la aplicaci\xc3\xb3n",
+    .msg_demod_ok_fmt          = "OK: %zu payloads \xe2\x86\x92 %s",
+    .err_dsd_detail_fmt        = "%s (salida %lu)\n\nLog: %s\n\n%s",
+    .err_no_dsp_detail_fmt     = "%s\n\nLog: %s\n\nSalida de dsd-fme:\n%s",
+    .lbl_empty_log             = "(log vac\xc3\xado)",
+    .lbl_empty_log_no_output   = "(log vac\xc3\xado \xe2\x80\x94 dsd-fme no produjo salida)",
     .err_py_script_missing     = "Error: falta tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error al cargar el archivo BIN generado",
 

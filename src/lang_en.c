@@ -23,37 +23,26 @@
 #include "../include/lang.h"
 
 const Lang g_lang_en = {
-    /* ---- Section headers ---- */
-    .section_capture    = "CAPTURE",
-    .section_bruteforce = "BRUTE FORCE",
-
     /* ---- Static labels ---- */
-    .label_audio      = "Audio:",
-    .label_file       = "File:",
+    .label_audio      = "WAV:",
+    .label_file       = ".bin:",
     .label_start_key  = "Start:",
     .label_end_key    = "End:",
     .label_threads    = "Threads:",
     .label_samples    = "Samples:",
+    .label_gpu_pct    = "GPU %:",
 
-    /* ---- RTL labels ---- */
-    .label_freq          = "Freq (MHz)",
-    .label_gain          = "Gain",
-    .label_ppm           = "PPM",
-    .label_device        = "Device",
-    .label_slot          = "Slot",
-    .label_inverted      = "Inverted",
-    .slot_both           = "Both",
-    .slot_1              = "Slot 1",
-    .slot_2              = "Slot 2",
-    /* Capture mode */
-    .radio_wav           = "WAV",
-    .radio_rtl           = "RTL-SDR",
-    .btn_capture         = "Capture",
-    .btn_stop_capture    = "Stop",
     /* Tile titles */
     .tile_throughput     = "THROUGHPUT",
     .tile_progress       = "PROGRESS",
     .tile_candidate      = "BEST CANDIDATE",
+    /* Tile body formats */
+    .tile_cpu_only            = "CPU only",
+    .tile_split_fmt           = "GPU  %s  \xc2\xb7  CPU  %s",
+    .tile_score_fmt           = "Score  %.2f",
+    .tile_progress_meta_fmt   = "%s keys   \xc2\xb7   ETA  %s   \xc2\xb7   elapsed  %s",
+    /* KPA badge */
+    .kpa_silence_fmt          = "KPA: %u silence frames",
     /* Status strip */
     .status_backend_cuda = "CUDA GPU",
     .status_backend_cpu  = "CPU",
@@ -89,7 +78,16 @@ const Lang g_lang_en = {
     .err_dsd_launch            = "Error launching DSD-FME",
     .err_no_dsp_output         = "Error: DSP output not found (see details)",
     .err_dsp_conversion        = "Error: DSP->BIN conversion failed",
-    .err_dsd_missing           = "Error: dsd-fme.exe missing — reinstall the app",
+    .err_dsd_missing           = "Error: dsd-fme.exe missing \xe2\x80\x94 reinstall the app",
+    .err_dsd_missing_detail    = "dsd-fme.exe was not found in the tools\\ folder.\n\n"
+                                 "The installation may be incomplete or corrupted.\n"
+                                 "Please reinstall FSP.DMRCrack.",
+    .warn_dsd_missing_startup  = "WARNING: dsd-fme.exe not found \xe2\x80\x94 reinstall the app",
+    .msg_demod_ok_fmt          = "OK: %zu payloads \xe2\x86\x92 %s",
+    .err_dsd_detail_fmt        = "%s (exit %lu)\n\nLog: %s\n\n%s",
+    .err_no_dsp_detail_fmt     = "%s\n\nLog: %s\n\ndsd-fme output:\n%s",
+    .lbl_empty_log             = "(empty log)",
+    .lbl_empty_log_no_output   = "(empty log \xe2\x80\x94 dsd-fme produced no output)",
     .err_py_script_missing     = "Error: missing tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error loading generated BIN file",
 

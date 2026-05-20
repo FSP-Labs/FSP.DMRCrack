@@ -25,10 +25,6 @@
 #define LANG_H
 
 typedef struct {
-    /* ---- Section headers ---- */
-    const char *section_capture;
-    const char *section_bruteforce;
-
     /* ---- Static labels ---- */
     const char *label_audio;
     const char *label_file;
@@ -36,28 +32,21 @@ typedef struct {
     const char *label_end_key;
     const char *label_threads;
     const char *label_samples;
-
-    /* ---- RTL-SDR capture labels ---- */
-    const char *label_freq;          /* "Freq (MHz)" */
-    const char *label_gain;          /* "Gain" */
-    const char *label_ppm;           /* "PPM" */
-    const char *label_device;        /* "Device" */
-    const char *label_slot;          /* "Slot" */
-    const char *label_inverted;      /* "Inverted" */
-    const char *slot_both;           /* "Both" */
-    const char *slot_1;              /* "Slot 1" */
-    const char *slot_2;              /* "Slot 2" */
-
-    /* ---- Capture mode buttons ---- */
-    const char *radio_wav;           /* "WAV" */
-    const char *radio_rtl;           /* "RTL-SDR" */
-    const char *btn_capture;         /* "Capture" */
-    const char *btn_stop_capture;    /* "Stop" */
+    const char *label_gpu_pct;       /* "GPU %:" */
 
     /* ---- Metric tile titles ---- */
     const char *tile_throughput;     /* "THROUGHPUT" */
     const char *tile_progress;       /* "PROGRESS" */
     const char *tile_candidate;      /* "BEST CANDIDATE" */
+
+    /* ---- Tile body formats ---- */
+    const char *tile_cpu_only;            /* "CPU only" / "Solo CPU" */
+    const char *tile_split_fmt;           /* "GPU  %s  ·  CPU  %s" */
+    const char *tile_score_fmt;           /* "Score  %.2f" / "Puntuación  %.2f" */
+    const char *tile_progress_meta_fmt;   /* "%s keys   ·   ETA  %s   ·   elapsed  %s" */
+
+    /* ---- KPA silence badge ---- */
+    const char *kpa_silence_fmt;     /* "KPA: %u silence frames" / "KPA: %u frames de silencio" */
 
     /* ---- Status strip ---- */
     const char *status_backend_cuda; /* "CUDA GPU" */
@@ -94,6 +83,13 @@ typedef struct {
     const char *err_no_dsp_output;
     const char *err_dsp_conversion;
     const char *err_dsd_missing;              /* "Error: missing DSD-FME (tools\dsd-fme.exe)" */
+    const char *err_dsd_missing_detail;       /* Long multi-line MessageBox text */
+    const char *warn_dsd_missing_startup;     /* "WARNING: dsd-fme.exe not found ..." */
+    const char *msg_demod_ok_fmt;             /* "OK: %zu payloads -> %s" */
+    const char *err_dsd_detail_fmt;           /* "%s (exit %lu)\n\nLog: %s\n\n%s" */
+    const char *err_no_dsp_detail_fmt;        /* "%s\n\nLog: %s\n\ndsd-fme output:\n%s" */
+    const char *lbl_empty_log;                /* "(empty log)" */
+    const char *lbl_empty_log_no_output;      /* "(empty log — dsd-fme produced no output)" */
     const char *err_py_script_missing;        /* "Error: missing tools\dsdfme_dsp_to_bin.py"  */
     const char *err_bin_load;                 /* "Error loading generated BIN"                */
 
