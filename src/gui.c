@@ -61,15 +61,6 @@
 #define ID_PAYLOAD_LABEL 1016
 #define ID_BTN_HELP     1017
 #define ID_BTN_LANG     1018
-#define ID_RADIO_WAV        1019
-#define ID_RADIO_RTL        1020
-#define ID_EDIT_FREQ        1021
-#define ID_EDIT_GAIN        1022
-#define ID_EDIT_PPM         1023
-#define ID_EDIT_DEVICE      1024
-#define ID_COMBO_SLOT       1025
-#define ID_CHK_INVERTED     1026
-#define ID_BTN_STOP_CAPTURE 1027
 #define ID_EDIT_GPU_PCT  1028
 #define ID_SPIN_GPU      1029
 
@@ -131,24 +122,6 @@ typedef struct {
     HWND hwnd_help;
     HWND btn_lang;
 
-    /* RTL-SDR capture controls */
-    HWND radio_wav;
-    HWND radio_rtl;
-    HWND lbl_freq;
-    HWND edit_freq;
-    HWND lbl_gain;
-    HWND edit_gain;
-    HWND lbl_ppm;
-    HWND edit_ppm;
-    HWND lbl_device;
-    HWND edit_device;
-    HWND combo_slot;
-    HWND chk_inverted;
-    HWND lbl_slot;
-    HWND lbl_inverted_label;
-    HWND btn_stop_capture;   /* "Stop" for RTL capture */
-    int  capture_mode;       /* 0=WAV, 1=RTL */
-
     /* Metric tile rects (painted in WM_PAINT) */
     RECT tile_throughput_rect;
     RECT tile_progress_rect;
@@ -162,10 +135,11 @@ typedef struct {
     BruteforceConfig last_cfg;     /* saved to restart on fallback */
 
     /* Extra fonts */
-    HFONT font_tile_metric;   /* Consolas 14pt bold */
-    HFONT font_tile_label;    /* Segoe UI 8pt regular */
-    HFONT font_header;        /* Segoe UI 10pt bold */
-    HFONT font_header_sub;    /* Segoe UI 8pt regular */
+    HFONT font_tile_metric;        /* Consolas 14pt bold — secondary tiles */
+    HFONT font_tile_metric_big;    /* Consolas 22pt bold — throughput dominant */
+    HFONT font_tile_label;         /* Segoe UI 8pt regular */
+    HFONT font_header;             /* Segoe UI 10pt bold */
+    HFONT font_header_sub;         /* Segoe UI 8pt regular */
 
     RECT graph_rect;
     RECT score_graph_rect;
@@ -279,166 +253,148 @@ static void copy_key_to_clipboard(HWND hwnd)
     }
 }
 
-/* --- Layout: reposition controls for current window size --- */
+/* --- Layout: reposition controls for current window size.
+ *   Single-column layout: capture row at top (WAV + Demodulate + Export),
+ *   then bruteforce config, then two tile rows, graphs, status strip at bottom. */
 static void layout_controls(int cw, int ch)
 {
-    int y, row2_y, ctrl_w, graph_h, gap;
+    int y;
+    int L = 20;              /* left margin */
+    int R;                   /* right margin x-coord */
+    int W;                   /* usable width */
+    const int STATUS_H = 24;
 
-    if (cw < 960) cw = 960;
+    if (cw < 980) cw = 980;
     if (ch < 740) ch = 740;
+    R = cw - 20;
+    W = R - L;
 
-    ctrl_w = cw - 40;
+    /* Header buttons inside header bar, top right */
+    if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 96, (HEADER_H - 22) / 2, 50, 22, TRUE);
+    if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 38, (HEADER_H - 22) / 2, 32, 22, TRUE);
 
-    /* Header buttons — positioned at top right inside header bar */
-    if (g_app.btn_help) MoveWindow(g_app.btn_help, cw - 96,  (HEADER_H - 22) / 2, 50, 22, TRUE);
-    if (g_app.btn_lang) MoveWindow(g_app.btn_lang, cw - 38,  (HEADER_H - 22) / 2, 32, 22, TRUE);
-
-    /* CAPTURE section — left panel */
+    /* === Capture row === */
+    y = HEADER_H + 18;
     {
-        int cap_x = 20, cap_right = cw / 2 - 10;
-        int cap_w = cap_right - cap_x;
-        y = HEADER_H + 14;
-        y += 22;  /* space for section header */
+        /* Layout: [WAV: lbl][edit........][..][Demodulate][Export] */
+        int demod_w = 110, export_w = 80, browse_w = 30;
+        int btns_w = demod_w + 6 + export_w;
+        int browse_x = R - btns_w - 6 - browse_w;
+        int demod_x = R - btns_w;
+        int export_x = demod_x + demod_w + 6;
+        int wav_label_w = 42;
+        int wav_edit_w = browse_x - (L + wav_label_w + 4) - 4;
 
-        /* Radio buttons */
-        if (g_app.radio_wav) MoveWindow(g_app.radio_wav, cap_x, y, 55, 20, TRUE);
-        if (g_app.radio_rtl) MoveWindow(g_app.radio_rtl, cap_x + 62, y, 75, 20, TRUE);
-        y += 26;
-
-        /* WAV controls */
-        if (g_app.lbl_audio)     MoveWindow(g_app.lbl_audio,     cap_x,           y+2, 55, 18, TRUE);
-        if (g_app.edit_wav)      MoveWindow(g_app.edit_wav,      cap_x+60,        y,   cap_w-98, 24, TRUE);
-        if (g_app.btn_browse_wav)MoveWindow(g_app.btn_browse_wav, cap_right-34,   y,   30, 24, TRUE);
-
-        /* RTL controls (same y, shown/hidden) */
-        if (g_app.lbl_freq)   MoveWindow(g_app.lbl_freq,   cap_x,      y+2, 60, 18, TRUE);
-        if (g_app.edit_freq)  MoveWindow(g_app.edit_freq,  cap_x+65,   y,   70, 24, TRUE);
-        if (g_app.lbl_gain)   MoveWindow(g_app.lbl_gain,   cap_x+142,  y+2, 40, 18, TRUE);
-        if (g_app.edit_gain)  MoveWindow(g_app.edit_gain,  cap_x+185,  y,   40, 24, TRUE);
-        if (g_app.lbl_ppm)    MoveWindow(g_app.lbl_ppm,    cap_x+232,  y+2, 30, 18, TRUE);
-        if (g_app.edit_ppm)   MoveWindow(g_app.edit_ppm,   cap_x+264,  y,   40, 24, TRUE);
-        if (g_app.lbl_device) MoveWindow(g_app.lbl_device, cap_x+310,  y+2, 50, 18, TRUE);
-        if (g_app.edit_device)MoveWindow(g_app.edit_device,cap_x+360,  y,   35, 24, TRUE);
-        y += 30;
-
-        /* Slot + Inverted row */
-        if (g_app.lbl_slot)         MoveWindow(g_app.lbl_slot,         cap_x,      y+2,  30, 18, TRUE);
-        if (g_app.combo_slot)       MoveWindow(g_app.combo_slot,       cap_x+35,   y,    80, 120, TRUE);
-        if (g_app.lbl_inverted_label)MoveWindow(g_app.lbl_inverted_label,cap_x+122, y+2, 50, 18, TRUE);
-        if (g_app.chk_inverted)     MoveWindow(g_app.chk_inverted,     cap_x+175,  y,    20, 20, TRUE);
-        y += 28;
-
-        /* Buttons row */
-        if (g_app.btn_demod)        MoveWindow(g_app.btn_demod,        cap_x,       y, 100, 28, TRUE);
-        if (g_app.btn_stop_capture) MoveWindow(g_app.btn_stop_capture, cap_x+108,   y,  60, 28, TRUE);
-        if (g_app.btn_export)       MoveWindow(g_app.btn_export,       cap_x+176,   y,  60, 28, TRUE);
-        y += 32;
-
-        /* Demod status label */
-        if (g_app.demod_label) MoveWindow(g_app.demod_label, cap_x, y, cap_w, 16, TRUE);
+        if (g_app.lbl_audio)      MoveWindow(g_app.lbl_audio,      L,                  y + 2, wav_label_w, 18, TRUE);
+        if (g_app.edit_wav)       MoveWindow(g_app.edit_wav,       L + wav_label_w + 4, y,    wav_edit_w,  24, TRUE);
+        if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, browse_x,           y,     browse_w,    24, TRUE);
+        if (g_app.btn_demod)      MoveWindow(g_app.btn_demod,      demod_x,            y,     demod_w,     24, TRUE);
+        if (g_app.btn_export)     MoveWindow(g_app.btn_export,     export_x,           y,     export_w,    24, TRUE);
     }
+    y += 28;
+    if (g_app.demod_label) MoveWindow(g_app.demod_label, L, y, W, 16, TRUE);
+    y += 22;
 
-    /* BRUTE FORCE section — right panel */
+    /* === Bruteforce config rows === */
+    /* .bin path row */
+    if (g_app.lbl_file)        MoveWindow(g_app.lbl_file,        L,           y + 2, 38, 18, TRUE);
     {
-        int bf_x = cw / 2 + 10, bf_right = cw - 20;
-        int bf_w = bf_right - bf_x;
-        int yb = HEADER_H + 14;
-        yb += 22;  /* section header space */
-
-        /* .bin file row */
-        if (g_app.lbl_file)        MoveWindow(g_app.lbl_file,        bf_x,        yb+2, 40, 18, TRUE);
-        if (g_app.edit_file)       MoveWindow(g_app.edit_file,       bf_x+45,     yb,   bf_w-82, 24, TRUE);
-        if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, bf_right-32, yb,   30, 24, TRUE);
-        yb += 28;
-        /* Payload label + KPA badge (same row, badge right-aligned) */
-        if (g_app.payload_label) MoveWindow(g_app.payload_label, bf_x, yb, bf_w - 130, 16, TRUE);
-        if (g_app.lbl_kpa_badge) MoveWindow(g_app.lbl_kpa_badge, bf_right - 125, yb, 125, 16, FALSE);
-        yb += 22;
-
-        /* Key range row */
-        if (g_app.lbl_start) MoveWindow(g_app.lbl_start, bf_x,      yb+2, 35, 18, TRUE);
-        if (g_app.edit_start)MoveWindow(g_app.edit_start, bf_x+38,   yb,  100, 24, TRUE);
-        if (g_app.lbl_end)   MoveWindow(g_app.lbl_end,    bf_x+145,  yb+2, 20, 18, TRUE);
-        if (g_app.edit_end)  MoveWindow(g_app.edit_end,   bf_x+168,  yb,  100, 24, TRUE);
-        yb += 30;
-
-        /* GPU% + Hilos + Muestras — single row */
-        if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  bf_x,        yb+2, 38, 18, TRUE);
-        if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, bf_x+40,     yb,   48, 24, TRUE);
-        if (g_app.lbl_threads)  MoveWindow(g_app.lbl_threads,  bf_x+98,     yb+2, 40, 18, TRUE);
-        if (g_app.edit_threads) MoveWindow(g_app.edit_threads, bf_x+142,    yb,   38, 24, TRUE);
-        if (g_app.lbl_samples)  MoveWindow(g_app.lbl_samples,  bf_x+188,    yb+2, 55, 18, TRUE);
-        if (g_app.edit_samples) MoveWindow(g_app.edit_samples, bf_x+248,    yb,   55, 24, TRUE);
-        yb += 32;
-
-        /* Action buttons row */
-        if (g_app.btn_start)    MoveWindow(g_app.btn_start,    bf_x,      yb,  90, 30, TRUE);
-        if (g_app.btn_pause)    MoveWindow(g_app.btn_pause,    bf_x+98,   yb,  90, 30, TRUE);
-        if (g_app.btn_stop)     MoveWindow(g_app.btn_stop,     bf_x+196,  yb,  90, 30, TRUE);
-        if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, bf_x+294,  yb,  65, 30, TRUE);
-
-        row2_y = yb;
+        int browse_x = R - 30;
+        int edit_w = browse_x - (L + 42) - 6;
+        if (g_app.edit_file)       MoveWindow(g_app.edit_file,       L + 42,    y, edit_w, 24, TRUE);
+        if (g_app.btn_browse_file) MoveWindow(g_app.btn_browse_file, browse_x,  y, 30,     24, TRUE);
     }
+    y += 28;
+    /* Payload label + KPA badge right-aligned */
+    if (g_app.payload_label) MoveWindow(g_app.payload_label, L,         y, W - 140, 16, TRUE);
+    if (g_app.lbl_kpa_badge) MoveWindow(g_app.lbl_kpa_badge, R - 135,   y, 135, 16, FALSE);
+    y += 22;
 
-    /* Metric tiles row: below both panels */
+    /* Range + GPU% + threads + samples row */
     {
-        int tile_y = row2_y + 12;
-        int tile_h = 80;
-        int tile_gap = 8;
-        int tile_total = cw - 40;
-        /* Throughput: 22%, Progress: 46%, Candidate: 32% */
-        int tile_w1 = (tile_total * 22) / 100;
-        int tile_w3 = (tile_total * 32) / 100;
-        int tile_w2 = tile_total - tile_w1 - tile_w3 - tile_gap * 2;
+        int x = L;
+        if (g_app.lbl_start)    MoveWindow(g_app.lbl_start,    x,        y + 2, 36, 18, TRUE);
+        if (g_app.edit_start)   MoveWindow(g_app.edit_start,   x + 38,   y,     110, 24, TRUE);
+        x += 152;
+        if (g_app.lbl_end)      MoveWindow(g_app.lbl_end,      x,        y + 2, 18, 18, TRUE);
+        if (g_app.edit_end)     MoveWindow(g_app.edit_end,     x + 22,   y,     110, 24, TRUE);
+        x += 138;
+        if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  x,        y + 2, 50, 18, TRUE);
+        if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, x + 52,   y,     50, 24, TRUE);
+        x += 110;
+        if (g_app.lbl_threads)  MoveWindow(g_app.lbl_threads,  x,        y + 2, 50, 18, TRUE);
+        if (g_app.edit_threads) MoveWindow(g_app.edit_threads, x + 52,   y,     50, 24, TRUE);
+        x += 110;
+        if (g_app.lbl_samples)  MoveWindow(g_app.lbl_samples,  x,        y + 2, 60, 18, TRUE);
+        if (g_app.edit_samples) MoveWindow(g_app.edit_samples, x + 64,   y,     60, 24, TRUE);
+    }
+    y += 34;
 
-        g_app.tile_throughput_rect.left   = 20;
+    /* Action buttons */
+    if (g_app.btn_start)    MoveWindow(g_app.btn_start,    L,         y, 100, 32, TRUE);
+    if (g_app.btn_pause)    MoveWindow(g_app.btn_pause,    L + 108,   y, 100, 32, TRUE);
+    if (g_app.btn_stop)     MoveWindow(g_app.btn_stop,     L + 216,   y, 100, 32, TRUE);
+    if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, R - 90,    y, 90,  32, TRUE);
+    y += 32 + 16;
+
+    /* === Tile row 1: THROUGHPUT (dominant, 58%) + CANDIDATE (42%) === */
+    {
+        int tile_y = y;
+        int tile_h = 104;
+        int gap = 12;
+        int throughput_w = (W * 58) / 100;
+
+        g_app.tile_throughput_rect.left   = L;
         g_app.tile_throughput_rect.top    = tile_y;
-        g_app.tile_throughput_rect.right  = 20 + tile_w1;
+        g_app.tile_throughput_rect.right  = L + throughput_w;
         g_app.tile_throughput_rect.bottom = tile_y + tile_h;
 
-        g_app.tile_progress_rect.left   = 20 + tile_w1 + tile_gap;
-        g_app.tile_progress_rect.top    = tile_y;
-        g_app.tile_progress_rect.right  = 20 + tile_w1 + tile_gap + tile_w2;
-        g_app.tile_progress_rect.bottom = tile_y + tile_h;
-
-        g_app.tile_candidate_rect.left   = 20 + tile_w1 + tile_gap + tile_w2 + tile_gap;
+        g_app.tile_candidate_rect.left   = L + throughput_w + gap;
         g_app.tile_candidate_rect.top    = tile_y;
-        g_app.tile_candidate_rect.right  = cw - 20;
+        g_app.tile_candidate_rect.right  = R;
         g_app.tile_candidate_rect.bottom = tile_y + tile_h;
 
-        /* Status strip below tiles */
-        int strip_y = tile_y + tile_h + 6;
-        g_app.status_strip_rect.left   = 20;
-        g_app.status_strip_rect.top    = strip_y;
-        g_app.status_strip_rect.right  = cw - 20;
-        g_app.status_strip_rect.bottom = strip_y + 18;
-
-        y = strip_y + 18;
+        y = tile_y + tile_h + 10;
     }
 
-    /* Graphs: side by side below tiles + strip */
+    /* === Tile row 2: PROGRESS (full-width) === */
     {
-        int graph_y = y + 10;
-        graph_h = ch - graph_y - 35 - 6;
-        if (graph_h < 80) graph_h = 80;
-        int graph_mid = cw / 2 - 5;
+        int prog_h = 78;
+        g_app.tile_progress_rect.left   = L;
+        g_app.tile_progress_rect.top    = y;
+        g_app.tile_progress_rect.right  = R;
+        g_app.tile_progress_rect.bottom = y + prog_h;
+        y += prog_h + 12;
+    }
 
-        g_app.graph_rect.left   = 20;
+    /* === Status strip anchored to bottom === */
+    g_app.status_strip_rect.left   = 0;
+    g_app.status_strip_rect.right  = cw;
+    g_app.status_strip_rect.bottom = ch;
+    g_app.status_strip_rect.top    = ch - STATUS_H;
+
+    /* === Graphs fill remaining vertical space === */
+    {
+        int graph_y = y;
+        int graph_bottom = g_app.status_strip_rect.top - 10;
+        int graph_h = graph_bottom - graph_y;
+        if (graph_h < 100) graph_h = 100;
+        int graph_mid = (L + R) / 2;
+
+        g_app.graph_rect.left   = L;
         g_app.graph_rect.top    = graph_y;
-        g_app.graph_rect.right  = graph_mid;
+        g_app.graph_rect.right  = graph_mid - 6;
         g_app.graph_rect.bottom = graph_y + graph_h;
 
-        g_app.score_graph_rect.left   = graph_mid + 10;
+        g_app.score_graph_rect.left   = graph_mid + 6;
         g_app.score_graph_rect.top    = graph_y;
-        g_app.score_graph_rect.right  = cw - 20;
+        g_app.score_graph_rect.right  = R;
         g_app.score_graph_rect.bottom = graph_y + graph_h;
-
-        /* Progress bar at bottom */
-        g_app.progress_rect.left   = 20;
-        g_app.progress_rect.top    = graph_y + graph_h + 8;
-        g_app.progress_rect.right  = cw - 20;
-        g_app.progress_rect.bottom = g_app.progress_rect.top + 22;
     }
+
+    /* Standalone progress bar no longer rendered (merged into progress tile) */
+    g_app.progress_rect.left = g_app.progress_rect.right = 0;
+    g_app.progress_rect.top  = g_app.progress_rect.bottom = 0;
 }
 
 /* --- Utility --- */
@@ -630,28 +586,9 @@ static void draw_header(HDC hdc, int cw)
     }
 }
 
-/* --- Drawing: section header --- */
-static void draw_section_header(HDC hdc, int x, int y, int w, const char *label)
-{
-    HFONT old = (HFONT)SelectObject(hdc, g_app.ui_font_section);
-    RECT r = { x, y, x + w, y + 22 };
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, CLR_ACCENT);
-    DrawTextA(hdc, label, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, old);
-    /* underline */
-    {
-        HPEN pen = CreatePen(PS_SOLID, 1, CLR_ACCENT);
-        HPEN old_pen = (HPEN)SelectObject(hdc, pen);
-        MoveToEx(hdc, x, y + 20, NULL);
-        LineTo(hdc, x + w, y + 20);
-        SelectObject(hdc, old_pen);
-        DeleteObject(pen);
-    }
-}
-
-/* --- Drawing: metric tiles --- */
-static void draw_tile(HDC hdc, const RECT *r,
+/* --- Drawing: metric tile with title + primary metric + optional sub-lines.
+ *      `big_metric` selects the dominant 22pt font for THROUGHPUT. --- */
+static void draw_tile(HDC hdc, const RECT *r, int big_metric,
                       const char *title, const char *primary,
                       const char *line2,  const char *line3)
 {
@@ -659,6 +596,7 @@ static void draw_tile(HDC hdc, const RECT *r,
     FillRect(hdc, r, bg);
     DeleteObject(bg);
 
+    /* Top accent stripe */
     { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
       HPEN old = (HPEN)SelectObject(hdc, pen);
       MoveToEx(hdc, r->left, r->top + 1, NULL);
@@ -667,41 +605,53 @@ static void draw_tile(HDC hdc, const RECT *r,
       DeleteObject(pen); }
 
     SetBkMode(hdc, TRANSPARENT);
-    int x = r->left + 10, w = r->right - r->left - 20;
+    int pad = 18;
+    int x = r->left + pad, w = r->right - r->left - 2 * pad;
 
+    /* Title */
     { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
       SetTextColor(hdc, CLR_METRIC_LABEL);
-      RECT tr = { x, r->top + 6, x + w, r->top + 18 };
+      RECT tr = { x, r->top + 12, x + w, r->top + 26 };
       DrawTextA(hdc, title, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
       SelectObject(hdc, old); }
 
-    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_metric);
-      SetTextColor(hdc, CLR_METRIC);
-      RECT tr = { x, r->top + 20, x + w, r->top + 46 };
-      DrawTextA(hdc, primary, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-      SelectObject(hdc, old); }
+    /* Primary metric */
+    {
+        HFONT metric = big_metric ? g_app.font_tile_metric_big : g_app.font_tile_metric;
+        HFONT old = (HFONT)SelectObject(hdc, metric);
+        SetTextColor(hdc, CLR_METRIC);
+        int top = r->top + (big_metric ? 32 : 30);
+        int bot = r->top + (big_metric ? 74 : 60);
+        RECT tr = { x, top, x + w, bot };
+        DrawTextA(hdc, primary, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(hdc, old);
+    }
 
+    /* Sub-lines */
     { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
       SetTextColor(hdc, CLR_DIM);
+      int sub_top = r->top + (big_metric ? 80 : 66);
       if (line2 && line2[0]) {
-          RECT tr = { x, r->top + 50, x + w, r->top + 63 };
+          RECT tr = { x, sub_top, x + w, sub_top + 14 };
           DrawTextA(hdc, line2, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
       }
       if (line3 && line3[0]) {
-          RECT tr = { x, r->top + 64, x + w, r->top + 77 };
+          RECT tr = { x, sub_top + 14, x + w, sub_top + 28 };
           DrawTextA(hdc, line3, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
       }
       SelectObject(hdc, old); }
 }
 
+/* --- Full-width progress tile: title + percent on top row, big bar, meta line --- */
 static void draw_progress_tile(HDC hdc, const RECT *r,
                                 const char *title, double pct,
-                                const char *line2,  const char *line3)
+                                const char *meta)
 {
     HBRUSH bg = CreateSolidBrush(CLR_TILE);
     FillRect(hdc, r, bg);
     DeleteObject(bg);
 
+    /* Top accent stripe */
     { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
       HPEN old = (HPEN)SelectObject(hdc, pen);
       MoveToEx(hdc, r->left, r->top + 1, NULL);
@@ -710,46 +660,45 @@ static void draw_progress_tile(HDC hdc, const RECT *r,
       DeleteObject(pen); }
 
     SetBkMode(hdc, TRANSPARENT);
-    int x = r->left + 10, w = r->right - r->left - 20;
+    int pad = 18;
+    int x = r->left + pad, w = r->right - r->left - 2 * pad;
 
+    /* Title (left) + percent (right) on same line */
     { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
       SetTextColor(hdc, CLR_METRIC_LABEL);
-      RECT tr = { x, r->top + 6, x + w, r->top + 18 };
+      RECT tr = { x, r->top + 12, x + w, r->top + 26 };
       DrawTextA(hdc, title, -1, &tr, DT_LEFT | DT_SINGLELINE);
       SelectObject(hdc, old); }
+    { char pct_str[32];
+      snprintf(pct_str, sizeof(pct_str), "%.1f%%", pct * 100.0);
+      HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+      SetTextColor(hdc, CLR_BRIGHT);
+      RECT tr = { x, r->top + 12, x + w, r->top + 26 };
+      DrawTextA(hdc, pct_str, -1, &tr, DT_RIGHT | DT_SINGLELINE);
+      SelectObject(hdc, old); }
 
-    { RECT bar = { x, r->top + 22, x + w, r->top + 34 };
+    /* Big bar */
+    { RECT bar = { x, r->top + 32, x + w, r->top + 48 };
       HBRUSH bar_bg = CreateSolidBrush(CLR_PROGRESS_BG);
       FillRect(hdc, &bar, bar_bg);
       DeleteObject(bar_bg);
       if (pct > 0.0) {
-          if (pct > 1.0) pct = 1.0;
+          double cap = pct > 1.0 ? 1.0 : pct;
           RECT fill = bar;
-          fill.right = bar.left + (int)((bar.right - bar.left) * pct);
+          fill.right = bar.left + (int)((bar.right - bar.left) * cap);
           HBRUSH fill_br = CreateSolidBrush(CLR_ACCENT);
           FillRect(hdc, &fill, fill_br);
           DeleteObject(fill_br);
       } }
 
-    { char pct_str[32];
-      snprintf(pct_str, sizeof(pct_str), "%.1f%%", pct * 100.0);
-      HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_metric);
-      SetTextColor(hdc, CLR_METRIC);
-      RECT tr = { x, r->top + 38, x + w, r->top + 60 };
-      DrawTextA(hdc, pct_str, -1, &tr, DT_LEFT | DT_SINGLELINE);
-      SelectObject(hdc, old); }
-
-    { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
-      SetTextColor(hdc, CLR_DIM);
-      if (line2 && line2[0]) {
-          RECT tr = { x, r->top + 56, x + w, r->top + 69 };
-          DrawTextA(hdc, line2, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-      }
-      if (line3 && line3[0]) {
-          RECT tr = { x, r->top + 70, x + w, r->top + 80 };
-          DrawTextA(hdc, line3, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-      }
-      SelectObject(hdc, old); }
+    /* Metadata line */
+    if (meta && meta[0]) {
+        HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+        SetTextColor(hdc, CLR_DIM);
+        RECT tr = { x, r->top + 56, x + w, r->top + 72 };
+        DrawTextA(hdc, meta, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(hdc, old);
+    }
 }
 
 static void draw_all_tiles(HDC hdc)
@@ -757,7 +706,7 @@ static void draw_all_tiles(HDC hdc)
     char primary[64], line2[80], line3[80];
     double pct = 0.0;
 
-    /* THROUGHPUT tile */
+    /* === THROUGHPUT (dominant, left) === */
     {
         double total_kps = g_app.snapshot.keys_per_second;
         double gpu_frac  = (g_app.snapshot.keys_tested > 0)
@@ -777,45 +726,19 @@ static void draw_all_tiles(HDC hdc)
             else snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
             if (cpu_kps >= 1e3) snprintf(c, sizeof(c), "%.0f K/s", cpu_kps/1e3);
             else snprintf(c, sizeof(c), "%.0f /s", cpu_kps);
-            snprintf(line2, sizeof(line2), "GPU  %s", g);
-            snprintf(line3, sizeof(line3), "CPU  %s", c);
+            snprintf(line2, sizeof(line2), "GPU  %s  \xb7  CPU  %s", g, c);
         } else {
             snprintf(line2, sizeof(line2), "CPU only");
-            line3[0] = '\0';
         }
-        draw_tile(hdc, &g_app.tile_throughput_rect,
+        line3[0] = '\0';
+        draw_tile(hdc, &g_app.tile_throughput_rect, /*big*/1,
                   g_lang.tile_throughput, primary, line2, line3);
     }
 
-    /* PROGRESS tile */
-    {
-        if (g_app.snapshot.total_keys > 0)
-            pct = (double)g_app.snapshot.keys_tested / (double)g_app.snapshot.total_keys;
-        if (pct > 1.0) pct = 1.0;
-
-        char keys_str[64], eta_str[64], elapsed_str[64];
-        double tk = (double)g_app.snapshot.total_keys;
-        double kk = (double)g_app.snapshot.keys_tested;
-        if (tk >= 1e12)
-            snprintf(keys_str, sizeof(keys_str), "%.1fT / %.2fT keys", kk/1e12, tk/1e12);
-        else if (tk >= 1e9)
-            snprintf(keys_str, sizeof(keys_str), "%.1fG / %.2fG keys", kk/1e9, tk/1e9);
-        else
-            snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM keys", kk/1e6, tk/1e6);
-
-        fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
-        fmt_hhmmss(g_app.snapshot.eta_seconds, eta_str, sizeof(eta_str));
-        snprintf(line2, sizeof(line2), "%s", keys_str);
-        snprintf(line3, sizeof(line3), "ETA %s   Elapsed %s", eta_str, elapsed_str);
-
-        draw_progress_tile(hdc, &g_app.tile_progress_rect,
-                           g_lang.tile_progress, pct, line2, line3);
-    }
-
-    /* CANDIDATE tile */
+    /* === CANDIDATE (right) === */
     {
         if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
-            strcpy_s(primary, sizeof(primary), "----------");
+            strcpy_s(primary, sizeof(primary), "---- ---- --");
             line2[0] = '\0';
         } else {
             unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
@@ -824,17 +747,51 @@ static void draw_all_tiles(HDC hdc)
             snprintf(line2, sizeof(line2), "Score  %.2f", g_app.snapshot.best_score);
         }
         line3[0] = '\0';
-        draw_tile(hdc, &g_app.tile_candidate_rect,
+        draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/0,
                   g_lang.tile_candidate, primary, line2, line3);
+    }
+
+    /* === PROGRESS (full-width row) === */
+    {
+        if (g_app.snapshot.total_keys > 0)
+            pct = (double)g_app.snapshot.keys_tested / (double)g_app.snapshot.total_keys;
+        if (pct > 1.0) pct = 1.0;
+
+        char keys_str[64], eta_str[64], elapsed_str[64], meta[160];
+        double tk = (double)g_app.snapshot.total_keys;
+        double kk = (double)g_app.snapshot.keys_tested;
+        if (tk >= 1e12)
+            snprintf(keys_str, sizeof(keys_str), "%.2fT / %.2fT keys", kk/1e12, tk/1e12);
+        else if (tk >= 1e9)
+            snprintf(keys_str, sizeof(keys_str), "%.2fG / %.2fG keys", kk/1e9, tk/1e9);
+        else
+            snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM keys", kk/1e6, tk/1e6);
+
+        fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
+        fmt_hhmmss(g_app.snapshot.eta_seconds, eta_str, sizeof(eta_str));
+        snprintf(meta, sizeof(meta), "%s   \xb7   ETA  %s   \xb7   elapsed  %s",
+                 keys_str, eta_str, elapsed_str);
+
+        draw_progress_tile(hdc, &g_app.tile_progress_rect,
+                           g_lang.tile_progress, pct, meta);
     }
 }
 
 static void draw_status_strip(HDC hdc)
 {
     const RECT *r = &g_app.status_strip_rect;
-    HBRUSH bg = CreateSolidBrush(CLR_BG);
+    HBRUSH bg = CreateSolidBrush(CLR_HEADER);
     FillRect(hdc, r, bg);
     DeleteObject(bg);
+
+    /* Top border line — separates strip from content above */
+    { HPEN pen = CreatePen(PS_SOLID, 1, CLR_INPUT_BORDER);
+      HPEN old = (HPEN)SelectObject(hdc, pen);
+      MoveToEx(hdc, r->left, r->top, NULL);
+      LineTo(hdc, r->right, r->top);
+      SelectObject(hdc, old);
+      DeleteObject(pen); }
+
     SetBkMode(hdc, TRANSPARENT);
     HFONT old_f = (HFONT)SelectObject(hdc, g_app.font_tile_label);
 
@@ -845,9 +802,10 @@ static void draw_status_strip(HDC hdc)
         ? (paused ? g_lang.state_paused : g_lang.state_running)
         : g_lang.state_stopped;
 
+    /* Status dot inset from the left edge */
     { HBRUSH dot_br = CreateSolidBrush(dot_clr);
       int dy = r->top + (r->bottom - r->top - 8) / 2;
-      RECT dot = { r->left, dy, r->left + 8, dy + 8 };
+      RECT dot = { r->left + 14, dy, r->left + 22, dy + 8 };
       FillRect(hdc, &dot, dot_br);
       DeleteObject(dot_br); }
 
@@ -867,13 +825,13 @@ static void draw_status_strip(HDC hdc)
                    state_str, g_lang.msg_cuda_fallback, backend);
       else if (g_app.engine.cuda_active && tpb > 0)
           snprintf(strip, sizeof(strip),
-                   "%s  \xb7  %s  \xb7  Stage: %s  \xb7  TPB=%ld  BPSM=%ld  CHUNK=%ld",
+                   "%s  \xb7  %s  \xb7  %s  \xb7  TPB=%ld  BPSM=%ld  CHUNK=%ld",
                    state_str, backend, stage_s, tpb, bpsm, chunk);
       else
           snprintf(strip, sizeof(strip), "%s  \xb7  %s", state_str, backend);
 
       SetTextColor(hdc, CLR_DIM);
-      RECT tr = { r->left + 14, r->top, r->right, r->bottom };
+      RECT tr = { r->left + 32, r->top, r->right - 14, r->bottom };
       DrawTextA(hdc, strip, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS); }
 
     SelectObject(hdc, old_f);
@@ -1088,37 +1046,6 @@ static void draw_score_graph(HDC hdc, const RECT *rect)
         SelectObject(hdc, old_p);
         SelectObject(hdc, old_b);
         DeleteObject(bpen);
-    }
-}
-
-static void draw_progress(HDC hdc, const RECT *rect)
-{
-    HBRUSH bg = CreateSolidBrush(CLR_PROGRESS_BG);
-    RECT fill_rect = *rect;
-    char label[128];
-    double pct = 0.0;
-
-    FillRect(hdc, rect, bg);
-    DeleteObject(bg);
-
-    if (g_app.snapshot.total_keys > 0) {
-        pct = (double)g_app.snapshot.keys_tested / (double)g_app.snapshot.total_keys;
-        if (pct > 1.0) pct = 1.0;
-    }
-
-    fill_rect.right = fill_rect.left + (int)((rect->right - rect->left) * pct);
-    {
-        HBRUSH fill = CreateSolidBrush(CLR_ACCENT);
-        FillRect(hdc, &fill_rect, fill);
-        DeleteObject(fill);
-    }
-
-    snprintf(label, sizeof(label), "%.2f%%", pct * 100.0);
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, CLR_BRIGHT);
-    {
-        RECT tr = *rect;
-        DrawTextA(hdc, label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -1401,45 +1328,12 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         }
     }
 
-    /* Slot flag from combo */
-    char slot_flag[8] = "-V 3";
-    {
-        int slot_sel = (int)SendMessageA(g_app.combo_slot, CB_GETCURSEL, 0, 0);
-        if (slot_sel == 1) strcpy_s(slot_flag, sizeof(slot_flag), "-V 1");
-        else if (slot_sel == 2) strcpy_s(slot_flag, sizeof(slot_flag), "-V 2");
-        else strcpy_s(slot_flag, sizeof(slot_flag), "-V 3");
-    }
-
-    /* Inverted flag */
-    char inv_flag[8] = "";
-    if (SendMessageA(g_app.chk_inverted, BM_GETCHECK, 0, 0) == BST_CHECKED)
-        strcpy_s(inv_flag, sizeof(inv_flag), " -xr");
-
-    /* RTL-SDR mode: build RTL input string */
-    char rtl_input[128] = "";
-    int use_rtl = 0;
-    if (g_app.capture_mode == 1) {
-        char freq_txt[32], gain_txt[16], ppm_txt[16], dev_txt[8];
-        GetWindowTextA(g_app.edit_freq,   freq_txt, sizeof(freq_txt));
-        GetWindowTextA(g_app.edit_gain,   gain_txt, sizeof(gain_txt));
-        GetWindowTextA(g_app.edit_ppm,    ppm_txt,  sizeof(ppm_txt));
-        GetWindowTextA(g_app.edit_device, dev_txt,  sizeof(dev_txt));
-        double freq_mhz = atof(freq_txt);
-        long long freq_hz = (long long)(freq_mhz * 1e6);
-        snprintf(rtl_input, sizeof(rtl_input), "rtl:%s:%lld:%s:%s",
-                 dev_txt, freq_hz, gain_txt, ppm_txt);
-        use_rtl = 1;
-    }
-
     /* Step 1/2: run dsd-fme.exe directly (no shell), stderr → log file.
-     * -Q takes a relative filename; dsd-fme runs with CWD = wav_dir. */
+     * -V 3 = both DMR slots. -Q writes the DSP output relative to the
+     * child process CWD (which we set to wav_dir). */
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
-    if (use_rtl)
-        snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i %s -Q \"%s\" -Z %s%s",
-                 dsd_path, rtl_input, qname, slot_flag, inv_flag);
-    else
-        snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z %s%s",
-                 dsd_path, wav_path, qname, slot_flag, inv_flag);
+    snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z -V 3",
+             dsd_path, wav_path, qname);
     if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
         /* 0xC0000135 = STATUS_DLL_NOT_FOUND -- Cygwin runtime missing */
         if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
@@ -1649,7 +1543,6 @@ static void refresh_snapshot_and_ui(void)
 
     InvalidateRect(g_app.hwnd, &g_app.graph_rect, FALSE);
     InvalidateRect(g_app.hwnd, &g_app.score_graph_rect, FALSE);
-    InvalidateRect(g_app.hwnd, &g_app.progress_rect, FALSE);
 }
 
 /* --- Bruteforce control --- */
@@ -1857,38 +1750,14 @@ static void layout_controls_current(void)
     InvalidateRect(g_app.hwnd, NULL, TRUE);
 }
 
-static void update_capture_mode_visibility(void)
-{
-    int is_rtl = (g_app.capture_mode == 1);
-    /* WAV-only controls */
-    ShowWindow(g_app.lbl_audio,       is_rtl ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_app.edit_wav,        is_rtl ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_app.btn_browse_wav,  is_rtl ? SW_HIDE : SW_SHOW);
-    /* RTL-only controls */
-    ShowWindow(g_app.lbl_freq,        is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.edit_freq,       is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.lbl_gain,        is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.edit_gain,       is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.lbl_ppm,         is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.edit_ppm,        is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.lbl_device,      is_rtl ? SW_SHOW : SW_HIDE);
-    ShowWindow(g_app.edit_device,     is_rtl ? SW_SHOW : SW_HIDE);
-    /* Stop-capture button only for RTL */
-    ShowWindow(g_app.btn_stop_capture, is_rtl ? SW_SHOW : SW_HIDE);
-    /* btn_demod label changes */
-    SetWindowTextA(g_app.btn_demod, is_rtl ? g_lang.btn_capture : g_lang.btn_demodulate);
-}
-
 static void apply_language(void)
 {
-    /* Labels */
     SetWindowTextA(g_app.lbl_audio,   g_lang.label_audio);
     SetWindowTextA(g_app.lbl_file,    g_lang.label_file);
     SetWindowTextA(g_app.lbl_start,   g_lang.label_start_key);
     SetWindowTextA(g_app.lbl_end,     g_lang.label_end_key);
     SetWindowTextA(g_app.lbl_threads, g_lang.label_threads);
     SetWindowTextA(g_app.lbl_samples, g_lang.label_samples);
-    /* Buttons */
     SetWindowTextA(g_app.btn_demod,    g_lang.btn_demodulate);
     SetWindowTextA(g_app.btn_export,   g_lang.btn_export);
     SetWindowTextA(g_app.btn_help,     g_lang.btn_help);
@@ -1897,34 +1766,11 @@ static void apply_language(void)
     SetWindowTextA(g_app.btn_copy_key, g_lang.btn_copy_key);
     SetWindowTextA(g_app.btn_lang,
         (g_lang_ptr == &g_lang_es) ? "EN" : "ES");
-    /* Pause/Resume depends on current state */
     {
         int paused = InterlockedCompareExchange(&g_app.engine.paused, 0, 0);
         SetWindowTextA(g_app.btn_pause, paused ? g_lang.btn_resume : g_lang.btn_pause);
     }
-    /* RTL-SDR labels */
-    SetWindowTextA(g_app.radio_wav,        g_lang.radio_wav);
-    SetWindowTextA(g_app.radio_rtl,        g_lang.radio_rtl);
-    if (g_app.lbl_freq)   SetWindowTextA(g_app.lbl_freq,   g_lang.label_freq);
-    if (g_app.lbl_gain)   SetWindowTextA(g_app.lbl_gain,   g_lang.label_gain);
-    if (g_app.lbl_ppm)    SetWindowTextA(g_app.lbl_ppm,    g_lang.label_ppm);
-    if (g_app.lbl_device) SetWindowTextA(g_app.lbl_device, g_lang.label_device);
-    if (g_app.lbl_slot)   SetWindowTextA(g_app.lbl_slot,   g_lang.label_slot);
-    if (g_app.lbl_inverted_label) SetWindowTextA(g_app.lbl_inverted_label, g_lang.label_inverted);
-    if (g_app.btn_stop_capture) SetWindowTextA(g_app.btn_stop_capture, g_lang.btn_stop_capture);
-    /* Slot combo: clear and re-add items in current language */
-    if (g_app.combo_slot) {
-        SendMessageA(g_app.combo_slot, CB_RESETCONTENT, 0, 0);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_both);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_1);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_2);
-        SendMessageA(g_app.combo_slot, CB_SETCURSEL, 0, 0);
-    }
-    if (g_app.chk_inverted) SetWindowTextA(g_app.chk_inverted, g_lang.label_inverted);
-    update_capture_mode_visibility();
-    /* Section headers and status are redrawn on next tick */
     InvalidateRect(g_app.hwnd, NULL, TRUE);
-    /* Close help window so it doesn't show stale language text */
     if (g_app.hwnd_help && IsWindow(g_app.hwnd_help)) {
         DestroyWindow(g_app.hwnd_help);
         g_app.hwnd_help = NULL;
@@ -2040,13 +1886,21 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.ui_font_bold = create_ui_font(1, 0);
         g_app.ui_font_section = create_ui_font(1, -2);
 
-        /* Tile metric font: Consolas 14pt bold */
+        /* Tile metric font: Consolas 14pt bold (secondary tiles) */
         g_app.font_tile_metric = CreateFontA(
             -18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
         if (!g_app.font_tile_metric)
             g_app.font_tile_metric = (HFONT)GetStockObject(ANSI_FIXED_FONT);
+
+        /* Big metric font: Consolas 22pt bold (dominant throughput) */
+        g_app.font_tile_metric_big = CreateFontA(
+            -30, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
+        if (!g_app.font_tile_metric_big)
+            g_app.font_tile_metric_big = g_app.font_tile_metric;
 
         /* Tile sub-label font: Segoe UI 8pt */
         g_app.font_tile_label = CreateFontA(
@@ -2104,58 +1958,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             900, y, 36, 24, hwnd, (HMENU)ID_BTN_LANG, NULL, NULL);
 
-        y += 28;
         g_app.demod_label = CreateWindowA("STATIC", "",
             WS_CHILD | WS_VISIBLE | SS_LEFT,
-            95, y, 690, 16, hwnd, NULL, NULL, NULL);
-
-        /* WAV/RTL radio buttons */
-        g_app.radio_wav = CreateWindowA("BUTTON", g_lang.radio_wav,
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON | WS_GROUP,
-            0, 0, 60, 20, hwnd, (HMENU)ID_RADIO_WAV, NULL, NULL);
-        g_app.radio_rtl = CreateWindowA("BUTTON", g_lang.radio_rtl,
-            WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
-            0, 0, 70, 20, hwnd, (HMENU)ID_RADIO_RTL, NULL, NULL);
-        SendMessageA(g_app.radio_wav, BM_SETCHECK, BST_CHECKED, 0);
-
-        /* RTL-SDR controls (initially hidden) */
-        g_app.lbl_freq   = CreateWindowA("STATIC", g_lang.label_freq, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
-        g_app.edit_freq  = CreateWindowA("EDIT",   "851.375",
-            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0,0,1,1, hwnd, (HMENU)ID_EDIT_FREQ, NULL, NULL);
-        g_app.lbl_gain   = CreateWindowA("STATIC", g_lang.label_gain, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
-        g_app.edit_gain  = CreateWindowA("EDIT",   "0",
-            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_GAIN, NULL, NULL);
-        g_app.lbl_ppm    = CreateWindowA("STATIC", g_lang.label_ppm, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
-        g_app.edit_ppm   = CreateWindowA("EDIT",   "0",
-            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_PPM, NULL, NULL);
-        g_app.lbl_device = CreateWindowA("STATIC", g_lang.label_device, WS_CHILD, 0,0,1,1, hwnd, NULL, NULL, NULL);
-        g_app.edit_device= CreateWindowA("EDIT",   "0",
-            WS_CHILD | WS_BORDER | ES_AUTOHSCROLL | ES_NUMBER, 0,0,1,1, hwnd, (HMENU)ID_EDIT_DEVICE, NULL, NULL);
-
-        /* Slot combo (shared WAV/RTL) */
-        g_app.combo_slot = CreateWindowA("COMBOBOX", "",
-            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-            0,0,1,60, hwnd, (HMENU)ID_COMBO_SLOT, NULL, NULL);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_both);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_1);
-        SendMessageA(g_app.combo_slot, CB_ADDSTRING, 0, (LPARAM)g_lang.slot_2);
-        SendMessageA(g_app.combo_slot, CB_SETCURSEL, 0, 0);
-
-        /* Inverted checkbox (shared) */
-        g_app.chk_inverted = CreateWindowA("BUTTON", g_lang.label_inverted,
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            0,0,1,1, hwnd, (HMENU)ID_CHK_INVERTED, NULL, NULL);
-
-        /* Slot / Inverted static labels */
-        g_app.lbl_slot = CreateWindowA("STATIC", g_lang.label_slot,
-            WS_CHILD | WS_VISIBLE, 0,0,1,1, hwnd, NULL, NULL, NULL);
-        g_app.lbl_inverted_label = CreateWindowA("STATIC", g_lang.label_inverted,
-            WS_CHILD | WS_VISIBLE, 0,0,1,1, hwnd, NULL, NULL, NULL);
-
-        /* Stop-capture button (RTL only, initially hidden) */
-        g_app.btn_stop_capture = CreateWindowA("BUTTON", g_lang.btn_stop_capture,
-            WS_CHILD | BS_OWNERDRAW,
-            0,0,1,1, hwnd, (HMENU)ID_BTN_STOP_CAPTURE, NULL, NULL);
+            0, 0, 1, 1, hwnd, NULL, NULL, NULL);
 
         /* === BRUTE FORCE section === */
         y = 125;
@@ -2266,7 +2071,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO *mmi = (MINMAXINFO *)lparam;
-        mmi->ptMinTrackSize.x = 960;
+        mmi->ptMinTrackSize.x = 980;
         mmi->ptMinTrackSize.y = 740;
         return 0;
     }
@@ -2308,19 +2113,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
-        case ID_RADIO_WAV:
-            g_app.capture_mode = 0;
-            update_capture_mode_visibility();
-            layout_controls_current();
-            return 0;
-        case ID_RADIO_RTL:
-            g_app.capture_mode = 1;
-            update_capture_mode_visibility();
-            layout_controls_current();
-            return 0;
-        case ID_BTN_STOP_CAPTURE:
-            InterlockedExchange(&g_app.demod_running, 0);
-            return 0;
         case ID_BTN_BROWSE:     choose_file(hwnd); return 0;
         case ID_BTN_BROWSE_WAV: choose_wav_file(hwnd); return 0;
         case ID_BTN_DEMOD:      start_demod(hwnd); return 0;
@@ -2388,19 +2180,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         GetClientRect(hwnd, &cli);
         int cw = cli.right;
         draw_header(hdc, cw);
-
-        /* Section headers */
-        draw_section_header(hdc, 20,        HEADER_H + 8, cw/2 - 30, g_lang.section_capture);
-        draw_section_header(hdc, cw/2 + 10, HEADER_H + 8, cw/2 - 30, g_lang.section_bruteforce);
-
-        /* Metric tiles + status strip */
         draw_all_tiles(hdc);
-        draw_status_strip(hdc);
-
-        /* Graphs */
         draw_graph(hdc, &g_app.graph_rect);
         draw_score_graph(hdc, &g_app.score_graph_rect);
-        draw_progress(hdc, &g_app.progress_rect);
+        draw_status_strip(hdc);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -2436,8 +2219,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         if (g_app.ui_font)         { DeleteObject(g_app.ui_font); g_app.ui_font = NULL; }
         if (g_app.ui_font_bold)    { DeleteObject(g_app.ui_font_bold); g_app.ui_font_bold = NULL; }
         if (g_app.ui_font_section) { DeleteObject(g_app.ui_font_section); g_app.ui_font_section = NULL; }
-        if (g_app.font_tile_metric) { DeleteObject(g_app.font_tile_metric); g_app.font_tile_metric = NULL; }
-        if (g_app.font_tile_label)  { DeleteObject(g_app.font_tile_label);  g_app.font_tile_label  = NULL; }
+        if (g_app.font_tile_metric)     { DeleteObject(g_app.font_tile_metric); g_app.font_tile_metric = NULL; }
+        if (g_app.font_tile_metric_big) { DeleteObject(g_app.font_tile_metric_big); g_app.font_tile_metric_big = NULL; }
+        if (g_app.font_tile_label)      { DeleteObject(g_app.font_tile_label);  g_app.font_tile_label  = NULL; }
         if (g_app.font_header)      { DeleteObject(g_app.font_header);      g_app.font_header      = NULL; }
         if (g_app.font_header_sub)  { DeleteObject(g_app.font_header_sub);  g_app.font_header_sub  = NULL; }
         destroy_theme_brushes();
@@ -2492,7 +2276,7 @@ int run_gui(HINSTANCE instance, int cmd_show)
     g_app.hwnd = CreateWindowExA(
         0, APP_CLASS_NAME, APP_TITLE,
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-        CW_USEDEFAULT, CW_USEDEFAULT, 940, 720,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1040, 760,
         NULL, NULL, instance, NULL);
 
     if (!g_app.hwnd) {
