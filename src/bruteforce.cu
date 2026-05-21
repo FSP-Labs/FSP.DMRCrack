@@ -60,7 +60,7 @@ __constant__ uint16_t d_const_silence_idx[64];
 __constant__ int      d_const_n_silence;
 
 typedef struct {
-    unsigned char S[RC4_DISCARD_BYTES];
+    unsigned char S[RC4_SBOX_SIZE];
     unsigned char i;
     unsigned char j;
 } RC4_CTX_DEV;
@@ -88,7 +88,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
     int k_idx = 0;
     if (key_len <= 0) key_len = 1;
     #pragma unroll 4
-    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
+    for (i = 0; i < RC4_SBOX_SIZE; i++) {
         ctx->S[i] = (unsigned char)i;
     }
     j = 0;
@@ -96,7 +96,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
     ctx->j = 0;
 
     #pragma unroll 4
-    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
+    for (i = 0; i < RC4_SBOX_SIZE; i++) {
         j = (j + ctx->S[i] + key[k_idx]) & 0xFF;
         {
             unsigned char t = ctx->S[i];
@@ -112,7 +112,7 @@ __device__ __forceinline__ void rc4_init_dev_len(RC4_CTX_DEV *ctx, const unsigne
 __device__ __forceinline__ void rc4_ksa9_dev(RC4_CTX_DEV *ctx, const unsigned char key9[9])
 {
     #pragma unroll
-    for (int i = 0; i < RC4_DISCARD_BYTES; i++) ctx->S[i] = (unsigned char)i;
+    for (int i = 0; i < RC4_SBOX_SIZE; i++) ctx->S[i] = (unsigned char)i;
     int j = 0;
     ctx->i = 0;
     ctx->j = 0;
@@ -668,7 +668,7 @@ __device__ __forceinline__ float score_dmr_ambe_dev(
     return best_score;
 }
 
-__global__ __launch_bounds__(RC4_DISCARD_BYTES, 2)
+__global__ __launch_bounds__(RC4_SBOX_SIZE, 2)
 void bruteforce_kernel_strict(
     uint64_t start_key,
     uint64_t total_keys,
@@ -996,7 +996,7 @@ void bruteforce_kernel_strict_ilp2(
     atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
 }
 
-__global__ __launch_bounds__(RC4_DISCARD_BYTES, 4)
+__global__ __launch_bounds__(RC4_SBOX_SIZE, 4)
 void bruteforce_kernel(
     uint64_t start_key,
     uint64_t total_keys,
@@ -1516,7 +1516,7 @@ static double score_candidate_host(
     int sample_bytes, const unsigned char key[5]);
 
 /* ─── Identity table for AVX2 S-box initialisation ──────────────────────── */
-static const unsigned char rc4_id256[RC4_DISCARD_BYTES] = {
+static const unsigned char rc4_id256[RC4_SBOX_SIZE] = {
       0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
      16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
      32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
@@ -1541,8 +1541,8 @@ static const unsigned char rc4_id256[RC4_DISCARD_BYTES] = {
  * AVX2 is used for the identity S-box initialisation (8 × 256-bit stores
  * per S-box instead of 256 byte stores) when compiled with /arch:AVX2.    */
 static void rc4_ksa9_4way(
-    unsigned char Sa[RC4_DISCARD_BYTES], unsigned char Sb[RC4_DISCARD_BYTES],
-    unsigned char Sc[RC4_DISCARD_BYTES], unsigned char Sd[RC4_DISCARD_BYTES],
+    unsigned char Sa[RC4_SBOX_SIZE], unsigned char Sb[RC4_SBOX_SIZE],
+    unsigned char Sc[RC4_SBOX_SIZE], unsigned char Sd[RC4_SBOX_SIZE],
     const unsigned char ka[9], const unsigned char kb[9],
     const unsigned char kc[9], const unsigned char kd[9])
 {
@@ -1560,13 +1560,13 @@ static void rc4_ksa9_4way(
         _mm256_storeu_si256((__m256i *)(Sd + i * 32), v);
     }
 #else
-    for (i = 0; i < RC4_DISCARD_BYTES; i++)
+    for (i = 0; i < RC4_SBOX_SIZE; i++)
         Sa[i] = Sb[i] = Sc[i] = Sd[i] = (unsigned char)i;
 #endif
 
     /* 4-way interleaved KSA — four independent j-chains */
     ja = jb = jc = jd = 0u;
-    for (i = 0; i < RC4_DISCARD_BYTES; i++) {
+    for (i = 0; i < RC4_SBOX_SIZE; i++) {
         int ki = i % 9;
         ja = (ja + Sa[i] + ka[ki]) & 0xFFu;
         jb = (jb + Sb[i] + kb[ki]) & 0xFFu;
@@ -1663,7 +1663,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             while (sf_base < pcount && !all_pruned_cpu) {
                 int n_bursts = pcount - sf_base;
                 unsigned char kmi9[4][9];
-                unsigned char Sa[RC4_DISCARD_BYTES], Sb[RC4_DISCARD_BYTES], Sc[RC4_DISCARD_BYTES], Sd[RC4_DISCARD_BYTES];
+                unsigned char Sa[RC4_SBOX_SIZE], Sb[RC4_SBOX_SIZE], Sc[RC4_SBOX_SIZE], Sd[RC4_SBOX_SIZE];
                 unsigned ia, ja, ib, jb, ic, jc, id, jd;
                 unsigned char _t;
                 int n, burst, sf;
@@ -1694,7 +1694,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
                 ia = ja = ib = jb = ic = jc = id = jd = 0u;
 
                 /* Discard 256 bytes (4-way) — positions 1..256 of keystream */
-                for (n = 0; n < RC4_DISCARD_BYTES; n++) {
+                for (n = 0; n < RC4_SBOX_SIZE; n++) {
                     ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
                     _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
                     ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
@@ -2090,7 +2090,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CudaLaunchProfile profile;
         int profile_loaded = 0;
 
-        profile.threads_per_block = RC4_DISCARD_BYTES;
+        profile.threads_per_block = RC4_SBOX_SIZE;
         profile.blocks_per_sm = strict_mode ? 24 : 12;
         profile.chunk_mult = strict_mode ? 384 : 128;
 
@@ -2098,10 +2098,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         InterlockedExchange(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
 
         if (!profile_loaded) {
-            int tpb_candidates[2] = { 128, RC4_DISCARD_BYTES };
+            int tpb_candidates[2] = { 128, RC4_SBOX_SIZE };
             int bpsm_candidates_strict[2] = { 20, 24 };
             int bpsm_candidates_legacy[2] = { 10, 12 };
-            int chunk_candidates_strict[2] = { 192, RC4_DISCARD_BYTES };
+            int chunk_candidates_strict[2] = { 192, RC4_SBOX_SIZE };
             int chunk_candidates_legacy[2] = { 96, 128 };
             int bpsm_count = 2;
             int chunk_count = 2;
@@ -2245,7 +2245,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         threadsPerBlock = profile.threads_per_block;
         if (threadsPerBlock < 64) threadsPerBlock = 64;
         if (threadsPerBlock > prop.maxThreadsPerBlock) threadsPerBlock = prop.maxThreadsPerBlock;
-        if ((threadsPerBlock & 31) != 0) threadsPerBlock = RC4_DISCARD_BYTES;
+        if ((threadsPerBlock & 31) != 0) threadsPerBlock = RC4_SBOX_SIZE;
 
         blocksPerGrid = prop.multiProcessorCount * profile.blocks_per_sm;
         if (blocksPerGrid < prop.multiProcessorCount) blocksPerGrid = prop.multiProcessorCount;
