@@ -36,13 +36,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\Program Files\NVIDIA GPU Computing Toolkit
-          key: cuda-12.6.0-windows
+          key: cuda-13.2.0-windows
 
       - name: Install CUDA Toolkit
         if: steps.cache-cuda.outputs.cache-hit != 'true'
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
-          cuda: '12.6.0'
+          cuda: '13.2.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
           use-github-env: true
@@ -51,7 +51,7 @@ jobs:
         if: steps.cache-cuda.outputs.cache-hit == 'true'
         shell: pwsh
         run: |
-          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
           echo "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
           echo "$cuda\bin" >> $env:GITHUB_PATH
 

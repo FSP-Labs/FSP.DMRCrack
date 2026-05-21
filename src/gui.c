@@ -133,6 +133,7 @@ typedef struct {
     int  fallback_triggered;
     int  fallback_banner_ticks;    /* countdown in UI ticks (250ms each) */
     BruteforceConfig last_cfg;     /* saved to restart on fallback */
+    int  shown_gpu_warning;        /* 1 after the one-time GPU-not-found MessageBox */
 
     /* Extra fonts */
     HFONT font_tile_metric;        /* Consolas 14pt bold — secondary tiles */
@@ -321,6 +322,7 @@ static void layout_controls(int cw, int ch)
         x += 138;
         if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  x,        y + 2, 50, 18, TRUE);
         if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, x + 52,   y,     50, 24, TRUE);
+        if (g_app.spin_gpu_split) SendMessageA(g_app.spin_gpu_split, UDM_SETBUDDY, (WPARAM)g_app.edit_gpu_pct, 0);
         x += 110;
         if (g_app.lbl_threads)  MoveWindow(g_app.lbl_threads,  x,        y + 2, 50, 18, TRUE);
         if (g_app.edit_threads) MoveWindow(g_app.edit_threads, x + 52,   y,     50, 24, TRUE);
@@ -480,6 +482,22 @@ static void draw_header(HDC hdc, int cw)
         SetTextColor(hdc, CLR_DIM);
         DrawTextA(hdc, gpu_info, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, old);
+    } else if (!g_app.engine.cuda_active && g_app.engine.cuda_error[0]) {
+        /* GPU init failed: show a short diagnostic in the header */
+        HFONT old = (HFONT)SelectObject(hdc, g_app.font_header_sub);
+        RECT tr = { 200, 0, cw - 8, HEADER_H };
+
+        /* Red warning dot */
+        {
+            HBRUSH dot_br = CreateSolidBrush(CLR_WARN);
+            RECT dot_r = { 200, (HEADER_H - 8) / 2, 208, (HEADER_H - 8) / 2 + 8 };
+            FillRect(hdc, &dot_r, dot_br);
+            DeleteObject(dot_br);
+        }
+        tr.left = 214;
+        SetTextColor(hdc, CLR_WARN);
+        DrawTextA(hdc, "No GPU", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, old);
     }
 }
 
@@ -606,9 +624,13 @@ static void draw_all_tiles(HDC hdc)
     /* === THROUGHPUT (dominant, left) === */
     {
         double total_kps = g_app.snapshot.keys_per_second;
-        double gpu_frac  = (g_app.snapshot.keys_tested > 0)
-            ? (double)g_app.snapshot.gpu_keys_tested / (double)g_app.snapshot.keys_tested
-            : (g_app.engine.cuda_active ? 1.0 : 0.0);
+        double gpu_frac;
+        if (!g_app.engine.cuda_active)
+            gpu_frac = 0.0;
+        else if (g_app.snapshot.keys_tested > 0 && g_app.snapshot.gpu_keys_tested > 0)
+            gpu_frac = (double)g_app.snapshot.gpu_keys_tested / (double)g_app.snapshot.keys_tested;
+        else
+            gpu_frac = 1.0;
         double gpu_kps = total_kps * gpu_frac;
         double cpu_kps = total_kps * (1.0 - gpu_frac);
 
@@ -1520,6 +1542,13 @@ static int start_bruteforce(HWND hwnd)
     if (!bruteforce_start(&g_app.engine, &cfg, &g_app.payloads, err, sizeof(err))) {
         MessageBoxA(hwnd, err, APP_TITLE, MB_ICONERROR);
         return 0;
+    }
+
+    if (!g_app.engine.cuda_active && g_app.engine.cuda_error[0] && !g_app.shown_gpu_warning) {
+        g_app.shown_gpu_warning = 1;
+        char warn_msg[768];
+        snprintf(warn_msg, sizeof(warn_msg), g_lang.warn_gpu_not_found, g_app.engine.cuda_error);
+        MessageBoxA(hwnd, warn_msg, APP_TITLE, MB_ICONWARNING);
     }
 
     g_app.last_cfg = cfg;

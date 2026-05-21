@@ -132,6 +132,7 @@ typedef struct {
     const char *fmt_best_score;        /* "Best score: %s"                    */
     const char *fmt_status;            /* "Status: %s"                        */
     const char *fmt_cuda_error;        /* "CUDA error: %s"                    */
+    const char *warn_gpu_not_found;    /* Shown once when GPU init fails at search start */
     const char *fmt_payloads_loaded;   /* "%zu payloads loaded"               */
 
     /* ---- State labels ---- */

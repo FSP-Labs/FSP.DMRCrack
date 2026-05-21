@@ -991,9 +991,14 @@ void bruteforce_kernel_strict_ilp2(
         if (!pruned_b && key_b != key_a) update_best_packed(score_b, key_b, dev_best_packed);
 
         local_keys += (key_b != key_a) ? 2 : 1;
+        if (local_keys >= 64) {
+            atomicAdd(dev_keys_tested, 64ULL);
+            local_keys -= 64;
+        }
     }
 
-    atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
+    if (local_keys > 0)
+        atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
 }
 
 __global__ __launch_bounds__(256, 4)
@@ -2626,9 +2631,20 @@ int bruteforce_start(
         /* No CUDA GPU: fall back to CPU multi-threaded search */
         engine->cuda_active = 0;
         engine->cuda_device_name[0] = '\0';
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error),
-                 "CUDA not available (%s) -- running on CPU",
-                 cudaGetErrorString(cu_err));
+        if (cu_err != cudaSuccess)
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "cudaGetDeviceCount failed: %s (error %d). "
+                     "This binary was built with CUDA %d.%d -- "
+                     "rebuild from source with the CUDA toolkit that matches your driver.",
+                     cudaGetErrorString(cu_err), (int)cu_err,
+                     CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
+        else
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "No CUDA-capable GPU detected (cudaGetDeviceCount returned 0). "
+                     "This binary was built with CUDA %d.%d. "
+                     "Verify the NVIDIA driver is installed and the GPU is not in TCC mode "
+                     "(run: nvidia-smi -q | findstr \"Compute Mode\").",
+                     CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
 
         {
             int t;

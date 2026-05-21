@@ -37,15 +37,15 @@ const Lang g_lang_es = {
     .tile_candidate      = "MEJOR CANDIDATO",
     /* Cuerpo de los tiles */
     .tile_cpu_only            = "Solo CPU",
-    .tile_split_fmt           = "GPU  %s  \xc2\xb7  CPU  %s",
-    .tile_score_fmt           = "Puntuaci\xc3\xb3n  %.2f",
-    .tile_progress_meta_fmt   = "%s claves   \xc2\xb7   ETA  %s   \xc2\xb7   transcurrido  %s",
+    .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
+    .tile_score_fmt           = "Puntuaci\xf3n  %.2f",
+    .tile_progress_meta_fmt   = "%s claves   \xb7   ETA  %s   \xb7   transcurrido  %s",
     /* Badge KPA */
     .kpa_silence_fmt          = "KPA: %u tramas de silencio",
     /* Barra de estado */
     .status_backend_cuda = "GPU CUDA",
     .status_backend_cpu  = "CPU",
-    .msg_cuda_fallback   = "Error CUDA \xe2\x80\x94 continuando en CPU",
+    .msg_cuda_fallback   = "Error CUDA \x97 continuando en CPU",
     /* Validacion de payloads */
     .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
     .val_align_warn      = "! Advertencia de alineamiento",
@@ -77,16 +77,16 @@ const Lang g_lang_es = {
     .err_dsd_launch            = "Error al lanzar DSD-FME",
     .err_no_dsp_output         = "Error: salida DSP no encontrada (ver detalles)",
     .err_dsp_conversion        = "Error: conversion DSP->BIN fallida",
-    .err_dsd_missing           = "Error: falta dsd-fme.exe \xe2\x80\x94 reinstala la aplicaci\xc3\xb3n",
-    .err_dsd_missing_detail    = "No se encontr\xc3\xb3 dsd-fme.exe en la carpeta tools\\.\n\n"
-                                 "La instalaci\xc3\xb3n puede estar incompleta o corrupta.\n"
+    .err_dsd_missing           = "Error: falta dsd-fme.exe \x97 reinstala la aplicaci\xf3n",
+    .err_dsd_missing_detail    = "No se encontr\xf3 dsd-fme.exe en la carpeta tools\\.\n\n"
+                                 "La instalaci\xf3n puede estar incompleta o corrupta.\n"
                                  "Reinstala FSP.DMRCrack.",
-    .warn_dsd_missing_startup  = "AVISO: dsd-fme.exe no encontrado \xe2\x80\x94 reinstala la aplicaci\xc3\xb3n",
-    .msg_demod_ok_fmt          = "OK: %zu payloads \xe2\x86\x92 %s",
+    .warn_dsd_missing_startup  = "AVISO: dsd-fme.exe no encontrado \x97 reinstala la aplicaci\xf3n",
+    .msg_demod_ok_fmt          = "OK: %zu payloads -> %s",
     .err_dsd_detail_fmt        = "%s (salida %lu)\n\nLog: %s\n\n%s",
     .err_no_dsp_detail_fmt     = "%s\n\nLog: %s\n\nSalida de dsd-fme:\n%s",
-    .lbl_empty_log             = "(log vac\xc3\xado)",
-    .lbl_empty_log_no_output   = "(log vac\xc3\xado \xe2\x80\x94 dsd-fme no produjo salida)",
+    .lbl_empty_log             = "(log vac\xedo)",
+    .lbl_empty_log_no_output   = "(log vac\xedo \x97 dsd-fme no produjo salida)",
     .err_py_script_missing     = "Error: falta tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error al cargar el archivo BIN generado",
 
@@ -111,8 +111,8 @@ const Lang g_lang_es = {
     .err_wnd_create = "Error al crear la ventana principal",
 
     /* ---- Errores de arranque del motor ---- */
-    .err_search_already_active = "Ya hay una b\xc3\xbasqueda en curso",
-    .err_start_gt_end          = "La clave inicial debe ser \xe2\x89\xa4 a la final",
+    .err_search_already_active = "Ya hay una b\xfasqueda en curso",
+    .err_start_gt_end          = "La clave inicial debe ser <= a la final",
     .err_end_exceeds_40bit     = "La clave final excede 40 bits",
     .err_no_payloads_loaded    = "No hay payloads cargados",
     .err_pause_event_failed    = "No se pudo crear el evento de pausa",
@@ -130,6 +130,15 @@ const Lang g_lang_es = {
     .fmt_best_score     = "Mejor puntuacion: %s",
     .fmt_status         = "Estado: %s",
     .fmt_cuda_error     = "Error CUDA: %s",
+    .warn_gpu_not_found = "No se encontro ninguna GPU compatible con CUDA -- la busqueda se ejecutara solo en CPU.\n\n"
+                          "Detalles: %s\n\n"
+                          "Para habilitar la aceleracion por GPU:\n"
+                          "  1. Confirma que el controlador NVIDIA esta instalado (nvidia-smi debe mostrar tu GPU).\n"
+                          "  2. Instala el CUDA Toolkit que corresponda a la version CUDA de tu controlador.\n"
+                          "  3. Abre una consola x64 Native Tools para VS, ejecuta build.bat\n"
+                          "     y confirma que aparece BUILD SUCCEEDED.\n"
+                          "  4. Verifica que tu GPU no este en modo TCC:\n"
+                          "     nvidia-smi -q | findstr \"Compute Mode\"  (debe decir Default).",
     .fmt_payloads_loaded = "%zu payloads cargados",
 
     /* ---- Etiquetas de estado ---- */

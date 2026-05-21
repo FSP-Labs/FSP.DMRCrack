@@ -38,15 +38,15 @@ const Lang g_lang_en = {
     .tile_candidate      = "BEST CANDIDATE",
     /* Tile body formats */
     .tile_cpu_only            = "CPU only",
-    .tile_split_fmt           = "GPU  %s  \xc2\xb7  CPU  %s",
+    .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
     .tile_score_fmt           = "Score  %.2f",
-    .tile_progress_meta_fmt   = "%s keys   \xc2\xb7   ETA  %s   \xc2\xb7   elapsed  %s",
+    .tile_progress_meta_fmt   = "%s keys   \xb7   ETA  %s   \xb7   elapsed  %s",
     /* KPA badge */
     .kpa_silence_fmt          = "KPA: %u silence frames",
     /* Status strip */
     .status_backend_cuda = "CUDA GPU",
     .status_backend_cpu  = "CPU",
-    .msg_cuda_fallback   = "CUDA error \xe2\x80\x94 continued on CPU",
+    .msg_cuda_fallback   = "CUDA error \x97 continued on CPU",
     /* Payload validation */
     .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
     .val_align_warn      = "! Burst alignment warning",
@@ -78,16 +78,16 @@ const Lang g_lang_en = {
     .err_dsd_launch            = "Error launching DSD-FME",
     .err_no_dsp_output         = "Error: DSP output not found (see details)",
     .err_dsp_conversion        = "Error: DSP->BIN conversion failed",
-    .err_dsd_missing           = "Error: dsd-fme.exe missing \xe2\x80\x94 reinstall the app",
+    .err_dsd_missing           = "Error: dsd-fme.exe missing \x97 reinstall the app",
     .err_dsd_missing_detail    = "dsd-fme.exe was not found in the tools\\ folder.\n\n"
                                  "The installation may be incomplete or corrupted.\n"
                                  "Please reinstall FSP.DMRCrack.",
-    .warn_dsd_missing_startup  = "WARNING: dsd-fme.exe not found \xe2\x80\x94 reinstall the app",
-    .msg_demod_ok_fmt          = "OK: %zu payloads \xe2\x86\x92 %s",
+    .warn_dsd_missing_startup  = "WARNING: dsd-fme.exe not found \x97 reinstall the app",
+    .msg_demod_ok_fmt          = "OK: %zu payloads -> %s",
     .err_dsd_detail_fmt        = "%s (exit %lu)\n\nLog: %s\n\n%s",
     .err_no_dsp_detail_fmt     = "%s\n\nLog: %s\n\ndsd-fme output:\n%s",
     .lbl_empty_log             = "(empty log)",
-    .lbl_empty_log_no_output   = "(empty log \xe2\x80\x94 dsd-fme produced no output)",
+    .lbl_empty_log_no_output   = "(empty log \x97 dsd-fme produced no output)",
     .err_py_script_missing     = "Error: missing tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error loading generated BIN file",
 
@@ -113,7 +113,7 @@ const Lang g_lang_en = {
 
     /* ---- Engine start errors ---- */
     .err_search_already_active = "A search is already active",
-    .err_start_gt_end          = "Start key must be \xe2\x89\xa4 end key",
+    .err_start_gt_end          = "Start key must be <= end key",
     .err_end_exceeds_40bit     = "End key exceeds 40 bits",
     .err_no_payloads_loaded    = "No payloads loaded",
     .err_pause_event_failed    = "Could not create pause event",
@@ -131,6 +131,15 @@ const Lang g_lang_en = {
     .fmt_best_score     = "Best score: %s",
     .fmt_status         = "Status: %s",
     .fmt_cuda_error     = "CUDA error: %s",
+    .warn_gpu_not_found = "No CUDA-capable GPU was found -- the search will run on CPU only.\n\n"
+                          "Details: %s\n\n"
+                          "To enable GPU acceleration:\n"
+                          "  1. Confirm your NVIDIA driver is installed (nvidia-smi should show your GPU).\n"
+                          "  2. Install the CUDA Toolkit that matches your driver's CUDA version.\n"
+                          "  3. Open an x64 Native Tools Command Prompt for VS, run build.bat,\n"
+                          "     and confirm it prints BUILD SUCCEEDED.\n"
+                          "  4. Verify your GPU is not in TCC mode:\n"
+                          "     nvidia-smi -q | findstr \"Compute Mode\"  (must say Default).",
     .fmt_payloads_loaded = "%zu payloads loaded",
 
     /* ---- State labels ---- */
