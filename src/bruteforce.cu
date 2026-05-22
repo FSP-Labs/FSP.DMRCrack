@@ -2646,6 +2646,7 @@ int bruteforce_start(
                      "(run: nvidia-smi -q | findstr \"Compute Mode\").",
                      CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
 
+    cpu_fallback:
         {
             int t;
             uintptr_t th;
@@ -2730,14 +2731,21 @@ int bruteforce_start(
     {
         cudaDeviceProp prop;
         cu_err = cudaGetDeviceProperties(&prop, 0);
-        if (cu_err == cudaSuccess) {
-            strncpy(engine->cuda_device_name, prop.name, sizeof(engine->cuda_device_name) - 1);
-            engine->cuda_device_name[sizeof(engine->cuda_device_name) - 1] = '\0';
-            engine->cuda_active = 1;
-        } else {
-            engine->cuda_active = 1;
+        if (cu_err != cudaSuccess) {
+            /* GPU detected by count but properties query failed -- treat as no GPU */
+            engine->cuda_active = 0;
             engine->cuda_device_name[0] = '\0';
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "cudaGetDeviceProperties failed: %s (error %d). "
+                     "This binary was built with CUDA %d.%d -- "
+                     "rebuild from source with the CUDA toolkit that matches your driver.",
+                     cudaGetErrorString(cu_err), (int)cu_err,
+                     CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
+            goto cpu_fallback;
         }
+        strncpy(engine->cuda_device_name, prop.name, sizeof(engine->cuda_device_name) - 1);
+        engine->cuda_device_name[sizeof(engine->cuda_device_name) - 1] = '\0';
+        engine->cuda_active = 1;
     }
 
     engine->cfg = *cfg;

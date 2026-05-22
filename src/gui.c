@@ -629,6 +629,8 @@ static void draw_all_tiles(HDC hdc)
             gpu_frac = 0.0;
         else if (g_app.snapshot.keys_tested > 0 && g_app.snapshot.gpu_keys_tested > 0)
             gpu_frac = (double)g_app.snapshot.gpu_keys_tested / (double)g_app.snapshot.keys_tested;
+        else if (g_app.snapshot.gpu_keys_tested == 0 && g_app.snapshot.keys_tested > 100000)
+            gpu_frac = 0.0; /* GPU active but kernel never incremented counter -- running on CPU */
         else
             gpu_frac = 1.0;
         double gpu_kps = total_kps * gpu_frac;
