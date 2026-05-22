@@ -45,7 +45,7 @@ class Coordinator:
     def run(self):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", self.port))
+        srv.bind(("127.0.0.1", self.port))
         srv.listen(32)
         print(f"[coordinator] listening on port {self.port}")
         print(f"[coordinator] keyspace: {self.start:010X} – {self.end:010X}")

@@ -184,7 +184,7 @@ int main(int argc, char *argv[]) {
     if (argc >= 3 && strlen(argv[2]) == 10) {
         for (i = 0; i < 5; ++i) {
             unsigned int b;
-            sscanf(argv[2] + i*2, "%02x", &b);
+            if (sscanf(argv[2] + i*2, "%02x", &b) != 1) b = 0;
             correct_key[i] = (unsigned char)b;
         }
     }
