@@ -10,6 +10,64 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.2] - 2026-05-22
+
+### Fixed
+- **GPU kernel never executing on WDDM (GPU-Util 0 %)** — `LAUNCH_CHUNK` was launching
+  `bruteforce_kernel_strict_ilp2` with `threadsPerBlock=256`, but the kernel declares
+  `__launch_bounds__(128, 4)`. On Windows consumer-GPU mode (WDDM) this mismatch causes
+  a deferred `cudaErrorInvalidConfiguration` that `cudaGetLastError()` doesn't catch
+  synchronously, so the kernel was submitted to the stream driver-side but never ran on
+  hardware. Fixed by hardcoding `128` in the ILP-2 branch of `LAUNCH_CHUNK`.
+- **GPU not selected on Optimus/switchable-graphics laptops** — added
+  `NvOptimusEnablement = 1` and `AmdPowerXpressRequestHighPerformance = 1` exports to
+  `main.c`. Without these, the OS may route CUDA to the Intel iGPU on hybrid-graphics
+  systems, causing `cudaGetDeviceCount()` to return 0 or `cudaErrorInitializationError`.
+- **CUDA context lazy-init race** — replaced the probe `cudaMalloc` with `cudaFree(0)`,
+  the NVIDIA-recommended idiom for eager primary-context creation. The context is now
+  forced before launching the search thread, with a clear actionable error message if it
+  fails (driver version, TCC mode, Optimus).
+- **`gpu_keys_tested` counter never updated when GPU runs fast** — `POLL_GPU_RESULTS()`
+  was only called inside the `while (cudaStreamQuery == cudaErrorNotReady)` loop. When
+  kernels completed before the next launch the loop never ran and the final GPU counter
+  was never read. Added an explicit `POLL_GPU_RESULTS()` after both stream syncs.
+- **Autotuning always skipped for 40-bit searches** — `skip_benchmark` was set to true
+  whenever `total_keys > 2^28`, meaning the benchmark never ran for real searches. Fixed:
+  always benchmark on first launch using a fixed `tune_keys = 2^18` (fast, independent
+  of keyspace size). Result cached per GPU.
+- **Tune profile path collision for same compute capability** — profile filenames now
+  include `multiProcessorCount` so an RTX 3050 Ti (sm_86, 20 SMs) and an RTX 3080
+  (sm_86, 68 SMs) get separate cached profiles.
+- **Status bar showed TPB=256 for ILP-2 kernel** — cosmetic: `cuda_tpb` is now reported
+  as 128 (the actual launch value) instead of the profile's 256 when `use_ilp2` is true.
+
+### Added
+- **Named constants in `bruteforce.h`** (contributed by AndrewSheff, PR #19):
+  - `DMR_CIPHER_PACK_BYTES` (21) — 3 sub-frames × 7 RC4 bytes per burst
+  - `RC4_SBOX_SIZE` (256) — S-box array size, used in S[] declarations and KSA init loops
+  - `RC4_DISCARD_BYTES` (256) — keystream bytes discarded before decryption
+  - `STOP_POLL_MASK` (0x3FFu) — stop-flag poll interval in kernel/CPU worker loops
+  - `LOCAL_KEYS_FLUSH` (16384) — local counter flush threshold for `atomicAdd`
+
+  All five constants replace the corresponding magic numbers throughout `bruteforce.cu`.
+  GPU-specific parameters (`__launch_bounds__`, thread-count candidates) intentionally
+  retain literal `256` to avoid conflating S-box semantics with GPU block-sizing.
+
+---
+
+## [0.3.1] - 2026-05-22
+
+### Fixed
+- **`cudaGetDeviceProperties` failure not handled as GPU-absent** — if the device count
+  was > 0 but properties query failed, `cuda_active` was set to `1` with an empty device
+  name. The GPU launcher thread then failed silently while CPU workers ran, so the UI
+  showed *"GPU 0 K/s"* with no error. Now correctly falls back to CPU and surfaces the
+  error string.
+- **Throughput tile shows GPU rate when GPU contributes nothing** — tile no longer
+  displays *"GPU X M/s"* when `gpu_keys_tested` remains 0 after the first 100 k keys.
+
+---
+
 ## [0.3.0] - 2026-05-20
 
 ### Fixed

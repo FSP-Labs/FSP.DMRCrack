@@ -18,6 +18,13 @@
 
 #include "../include/gui.h"
 
+/* Force NVIDIA Optimus and AMD switchable-graphics systems to use the
+ * high-performance discrete GPU for this process.
+ * Without these exports the OS may route a laptop app to the integrated
+ * GPU, causing cudaGetDeviceCount() to return 0 or cudaErrorInitializationError. */
+__declspec(dllexport) unsigned long NvOptimusEnablement                = 1;
+__declspec(dllexport) int          AmdPowerXpressRequestHighPerformance = 1;
+
 int WINAPI WinMain(HINSTANCE h_instance, HINSTANCE h_prev, LPSTR lp_cmd_line, int n_cmd_show)
 {
     (void)h_prev;

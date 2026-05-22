@@ -17,6 +17,13 @@
 #ifndef BRUTEFORCE_H
 #define BRUTEFORCE_H
 
+/* ── Named constants (replaces magic numbers across bruteforce.cu) ── */
+#define DMR_CIPHER_PACK_BYTES   21      /* 3 sub-frames × 7 RC4 bytes per burst */
+#define RC4_SBOX_SIZE           256     /* RC4 S-box entries (S[] arrays, KSA init loops) */
+#define RC4_DISCARD_BYTES       256     /* keystream bytes discarded before decryption */
+#define STOP_POLL_MASK          0x3FFu  /* check stop-flag every 1024 kernel iterations */
+#define LOCAL_KEYS_FLUSH        16384   /* flush local key counter to global atomicAdd */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <windows.h>
