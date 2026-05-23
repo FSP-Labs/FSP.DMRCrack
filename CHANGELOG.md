@@ -6,7 +6,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased] — targeting 0.4.0
+## [Unreleased]
+
+---
+
+## [0.3.3] - 2026-05-23
 
 ### Performance
 - **ILP-2 kernel S-boxes moved to shared memory** — RC4 S-boxes in
