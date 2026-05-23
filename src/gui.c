@@ -150,6 +150,13 @@ typedef struct {
     BruteforceEngine engine;
     BruteforceSnapshot snapshot;
 
+    /* Instantaneous rate tracking (delta between UI ticks) */
+    uint64_t last_snap_keys;
+    uint64_t last_snap_gpu_keys;
+    LARGE_INTEGER last_snap_time;
+    double inst_total_kps;
+    double inst_gpu_kps;
+
     double kps_history[120];
     int hist_count;
     int hist_pos;
@@ -623,18 +630,9 @@ static void draw_all_tiles(HDC hdc)
 
     /* === THROUGHPUT (dominant, left) === */
     {
-        double total_kps = g_app.snapshot.keys_per_second;
-        double gpu_frac;
-        if (!g_app.engine.cuda_active)
-            gpu_frac = 0.0;
-        else if (g_app.snapshot.keys_tested > 0 && g_app.snapshot.gpu_keys_tested > 0)
-            gpu_frac = (double)g_app.snapshot.gpu_keys_tested / (double)g_app.snapshot.keys_tested;
-        else if (g_app.snapshot.gpu_keys_tested == 0 && g_app.snapshot.keys_tested > 100000)
-            gpu_frac = 0.0; /* GPU active but kernel never incremented counter -- running on CPU */
-        else
-            gpu_frac = 1.0;
-        double gpu_kps = total_kps * gpu_frac;
-        double cpu_kps = total_kps * (1.0 - gpu_frac);
+        double total_kps = g_app.inst_total_kps;
+        double gpu_kps   = g_app.engine.cuda_active ? g_app.inst_gpu_kps : 0.0;
+        double cpu_kps   = total_kps - gpu_kps;  /* exact: always sums to total */
 
         if      (total_kps >= 1e9) snprintf(primary, sizeof(primary), "%.2f G/s", total_kps/1e9);
         else if (total_kps >= 1e6) snprintf(primary, sizeof(primary), "%.1f M/s", total_kps/1e6);
@@ -644,9 +642,10 @@ static void draw_all_tiles(HDC hdc)
         if (g_app.engine.cuda_active) {
             char g[32], c[32];
             if (gpu_kps >= 1e6) snprintf(g, sizeof(g), "%.1f M/s", gpu_kps/1e6);
-            else snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
-            if (cpu_kps >= 1e3) snprintf(c, sizeof(c), "%.0f K/s", cpu_kps/1e3);
-            else snprintf(c, sizeof(c), "%.0f /s", cpu_kps);
+            else                snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
+            if (cpu_kps >= 1e6) snprintf(c, sizeof(c), "%.1f M/s", cpu_kps/1e6);
+            else if (cpu_kps >= 1e3) snprintf(c, sizeof(c), "%.0f K/s", cpu_kps/1e3);
+            else                snprintf(c, sizeof(c), "%.0f /s",  cpu_kps);
             snprintf(line2, sizeof(line2), g_lang.tile_split_fmt, g, c);
         } else {
             snprintf(line2, sizeof(line2), "%s", g_lang.tile_cpu_only);
@@ -1423,8 +1422,30 @@ static void append_score_sample(double score)
 
 static void refresh_snapshot_and_ui(void)
 {
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
     bruteforce_get_snapshot(&g_app.engine, &g_app.snapshot);
-    append_kps_sample(g_app.snapshot.keys_per_second);
+
+    /* Compute instantaneous rates from delta between ticks */
+    if (g_app.last_snap_time.QuadPart > 0 && g_app.engine.qpc_freq.QuadPart > 0) {
+        double dt = (double)(now.QuadPart - g_app.last_snap_time.QuadPart)
+                  / (double)g_app.engine.qpc_freq.QuadPart;
+        if (dt > 0.05) {  /* ignore sub-50ms ticks (spurious repaints) */
+            uint64_t dk  = g_app.snapshot.keys_tested     - g_app.last_snap_keys;
+            uint64_t dgk = g_app.snapshot.gpu_keys_tested - g_app.last_snap_gpu_keys;
+            g_app.inst_total_kps = (double)dk  / dt;
+            g_app.inst_gpu_kps   = (double)dgk / dt;
+        }
+    } else {
+        g_app.inst_total_kps = g_app.snapshot.keys_per_second;
+        g_app.inst_gpu_kps   = g_app.inst_total_kps
+                               * (g_app.engine.cuda_active ? 1.0 : 0.0);
+    }
+    g_app.last_snap_keys      = g_app.snapshot.keys_tested;
+    g_app.last_snap_gpu_keys  = g_app.snapshot.gpu_keys_tested;
+    g_app.last_snap_time      = now;
+
+    append_kps_sample(g_app.inst_total_kps);
     append_score_sample(g_app.snapshot.best_score);
     InvalidateRect(g_app.hwnd, &g_app.tile_throughput_rect, FALSE);
     InvalidateRect(g_app.hwnd, &g_app.tile_progress_rect, FALSE);
@@ -1561,6 +1582,11 @@ static int start_bruteforce(HWND hwnd)
     g_app.score_hist_count = g_app.score_hist_pos = 0;
     ZeroMemory(g_app.kps_history, sizeof(g_app.kps_history));
     ZeroMemory(g_app.score_history, sizeof(g_app.score_history));
+    g_app.last_snap_keys     = 0;
+    g_app.last_snap_gpu_keys = 0;
+    g_app.last_snap_time.QuadPart = 0;
+    g_app.inst_total_kps = 0.0;
+    g_app.inst_gpu_kps   = 0.0;
     refresh_snapshot_and_ui();
     return 1;
 }
@@ -2075,6 +2101,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
                 bruteforce_start(&g_app.engine, &fallback_cfg, &g_app.payloads, ferr, sizeof(ferr));
                 g_app.hist_count = g_app.hist_pos = 0;
                 g_app.score_hist_count = g_app.score_hist_pos = 0;
+                g_app.last_snap_keys     = 0;
+                g_app.last_snap_gpu_keys = 0;
+                g_app.last_snap_time.QuadPart = 0;
+                g_app.inst_total_kps = 0.0;
+                g_app.inst_gpu_kps   = 0.0;
             }
 
             /* Countdown banner */

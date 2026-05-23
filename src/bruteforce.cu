@@ -324,6 +324,90 @@ __device__ __forceinline__ void rc4_crypt_first3_skip4_dev(
     ctx->j = j;
 }
 
+/* ── Shared-memory RC4 helpers (interleaved layout) ─────────────────────── *
+ * S-box layout: S_base[byte_index * stride + lane], where stride=blockDim.x *
+ * and lane=threadIdx.x.  This interleaves per-thread S-boxes so that threads *
+ * 0-3 access bank 0, threads 4-7 access bank 1, etc. (4-way conflict) rather *
+ * than the 32-way conflict of the contiguous layout (S_base[lane*256+k]).    *
+ * All S_base accesses: address = k * stride + lane; bank = (k*stride/4+lane/4)%32. */
+
+__device__ __forceinline__ void rc4_ksa9_smem(
+    unsigned char * __restrict__ S_base, int stride, int lane,
+    const unsigned char key9[9],
+    unsigned char *out_i, unsigned char *out_j)
+{
+    #pragma unroll
+    for (int k = 0; k < 256; ++k) S_base[k * stride + lane] = (unsigned char)k;
+    unsigned char j = 0;
+    for (int round = 0; round < 28; ++round) {
+        int base = round * 9;
+        #pragma unroll
+        for (int k = 0; k < 9; ++k) {
+            int idx = base + k;
+            unsigned char s_idx = S_base[idx * stride + lane];
+            j = (unsigned char)((j + s_idx + key9[k]) & 0xFF);
+            unsigned char s_j = S_base[(int)j * stride + lane];
+            S_base[idx * stride + lane] = s_j;
+            S_base[(int)j * stride + lane] = s_idx;
+        }
+    }
+    #pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        int idx = 252 + k;
+        unsigned char s_idx = S_base[idx * stride + lane];
+        j = (unsigned char)((j + s_idx + key9[k]) & 0xFF);
+        unsigned char s_j = S_base[(int)j * stride + lane];
+        S_base[idx * stride + lane] = s_j;
+        S_base[(int)j * stride + lane] = s_idx;
+    }
+    *out_i = 0;
+    *out_j = 0;
+}
+
+__device__ __forceinline__ void rc4_discard_smem(
+    unsigned char * __restrict__ S_base, int stride, int lane,
+    unsigned char *pi, unsigned char *pj, int n)
+{
+    unsigned char ci = *pi, cj = *pj;
+    for (int k = 0; k < n; ++k) {
+        ci = (ci + 1) & 0xFF;
+        unsigned char s_ci = S_base[(int)ci * stride + lane];
+        cj = (unsigned char)((cj + s_ci) & 0xFF);
+        unsigned char s_cj = S_base[(int)cj * stride + lane];
+        S_base[(int)ci * stride + lane] = s_cj;
+        S_base[(int)cj * stride + lane] = s_ci;
+    }
+    *pi = ci; *pj = cj;
+}
+
+__device__ __forceinline__ void rc4_crypt_first3_skip4_smem(
+    unsigned char * __restrict__ S_base, int stride, int lane,
+    unsigned char *pi, unsigned char *pj,
+    const unsigned char in7[7], unsigned char out3[3])
+{
+    unsigned char ci = *pi, cj = *pj;
+    #pragma unroll
+    for (int k = 0; k < 3; ++k) {
+        ci = (ci + 1) & 0xFF;
+        unsigned char s_ci = S_base[(int)ci * stride + lane];
+        cj = (unsigned char)((cj + s_ci) & 0xFF);
+        unsigned char s_cj = S_base[(int)cj * stride + lane];
+        S_base[(int)ci * stride + lane] = s_cj;
+        S_base[(int)cj * stride + lane] = s_ci;
+        out3[k] = in7[k] ^ S_base[((unsigned char)((s_ci + s_cj) & 0xFF)) * stride + lane];
+    }
+    #pragma unroll
+    for (int k = 3; k < 7; ++k) {
+        ci = (ci + 1) & 0xFF;
+        unsigned char s_ci = S_base[(int)ci * stride + lane];
+        cj = (unsigned char)((cj + s_ci) & 0xFF);
+        unsigned char s_cj = S_base[(int)cj * stride + lane];
+        S_base[(int)ci * stride + lane] = s_cj;
+        S_base[(int)cj * stride + lane] = s_ci;
+    }
+    *pi = ci; *pj = cj;
+}
+
 __device__ __forceinline__ void key_to_5bytes_dev(uint64_t key, unsigned char out[5])
 {
     out[0] = (unsigned char)((key >> 32) & 0xFFu);
@@ -815,11 +899,12 @@ void bruteforce_kernel_strict(
 
 /* =========================================================================
  * ILP-2 STRICT KERNEL — 2 keys per thread, 128 threads/block
- * Each thread interleaves two independent RC4 chains to hide L1 load latency
- * without relying solely on warp switching.
- * Config: __launch_bounds__(128, 4) -> ≤64 regs/thread target
+ * S-boxes live in 64 KB dynamic shared memory (2 × 128 × 256 bytes/block).
+ * __launch_bounds__(128, 2): compiler targets ≤2 active blocks/SM so that
+ * the register file is partitioned for 256 threads, reducing spill pressure.
+ * Hardware constraint: 2 × 64 KB = 128 KB shared per SM (Ada limit).
  * ========================================================================= */
-__global__ __launch_bounds__(128, 4)
+__global__ __launch_bounds__(128, 2)
 void bruteforce_kernel_strict_ilp2(
     uint64_t start_key,
     uint64_t total_keys,
@@ -833,6 +918,13 @@ void bruteforce_kernel_strict_ilp2(
     uint64_t stride  = (uint64_t)gridDim.x * blockDim.x;
     /* Each thread processes 2 consecutive keys: base_key and base_key+1 */
     uint64_t stride2 = stride * 2ULL;
+    extern __shared__ unsigned char sh_s[];
+    /* Interleaved layout: S_base[byte_k * 128 + lane] — 4-way bank conflicts
+     * vs 32-way for the contiguous layout (S[lane*256+k]). */
+    const int lane = (int)threadIdx.x;
+    constexpr int smem_stride = 128;
+    unsigned char * const Sa = sh_s;               /* first 32 KB */
+    unsigned char * const Sb = sh_s + 256 * 128;   /* next  32 KB */
     const int enable_prune = (total_keys > (1ULL << 20)) ? 1 : 0;
     int local_keys = 0;
 
@@ -853,6 +945,9 @@ void bruteforce_kernel_strict_ilp2(
         float score_a = 0.0f, score_b = 0.0f;
         int bursts_a = 0, bursts_b = 0;
         int pruned_a = 0, pruned_b = 0;
+
+        KPA_PREFILTER_A(ka);
+        KPA_PREFILTER_B(kb);
 
         /* Packed uint16 bit-freq accumulators — one set per key */
         unsigned int ba[12], bb[12];
@@ -875,11 +970,11 @@ void bruteforce_kernel_strict_ilp2(
             compose_kmi9_dev(ka, mi, kmi_a);
             compose_kmi9_dev(kb, mi, kmi_b);
 
-            RC4_CTX_DEV rc4_a, rc4_b;
-            rc4_ksa9_dev(&rc4_a, kmi_a);   /* KSA-A */
-            rc4_ksa9_dev(&rc4_b, kmi_b);   /* KSA-B (independent: compiler pipelines loads) */
-            rc4_discard_dev(&rc4_a, RC4_DISCARD_BYTES);
-            rc4_discard_dev(&rc4_b, RC4_DISCARD_BYTES);
+            unsigned char ia, ja, ib, jb;
+            rc4_ksa9_smem(Sa, smem_stride, lane, kmi_a, &ia, &ja);
+            rc4_ksa9_smem(Sb, smem_stride, lane, kmi_b, &ib, &jb);
+            rc4_discard_smem(Sa, smem_stride, lane, &ia, &ja, RC4_DISCARD_BYTES);
+            rc4_discard_smem(Sb, smem_stride, lane, &ib, &jb, RC4_DISCARD_BYTES);
 
             for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                 int p = sf_base + burst_pos;
@@ -890,12 +985,12 @@ void bruteforce_kernel_strict_ilp2(
                 unsigned char pa0[3], pa1[3], pa2[3];
                 unsigned char pb0[3], pb1[3], pb2[3];
 
-                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 0,  pa0);
-                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 0,  pb0); /* independent chain */
-                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 7,  pa1);
-                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 7,  pb1);
-                rc4_crypt_first3_skip4_dev(&rc4_a, cp + 14, pa2);
-                rc4_crypt_first3_skip4_dev(&rc4_b, cp + 14, pb2);
+                rc4_crypt_first3_skip4_smem(Sa, smem_stride, lane, &ia, &ja, cp + 0,  pa0);
+                rc4_crypt_first3_skip4_smem(Sb, smem_stride, lane, &ib, &jb, cp + 0,  pb0);
+                rc4_crypt_first3_skip4_smem(Sa, smem_stride, lane, &ia, &ja, cp + 7,  pa1);
+                rc4_crypt_first3_skip4_smem(Sb, smem_stride, lane, &ib, &jb, cp + 7,  pb1);
+                rc4_crypt_first3_skip4_smem(Sa, smem_stride, lane, &ia, &ja, cp + 14, pa2);
+                rc4_crypt_first3_skip4_smem(Sb, smem_stride, lane, &ib, &jb, cp + 14, pb2);
 
                 /* --- Hamming scores --- */
                 int ha01 = __popc((unsigned int)(pa0[0]^pa1[0]))
@@ -2075,6 +2170,10 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
      * legacy mode. KMI9 path (mode_policy>=2) uses one S-box per thread. */
     cuda_sm = prop.major * 10 + prop.minor;
     use_ilp2 = (mode_policy >= 2) && (cuda_sm >= 75);
+    if (use_ilp2) {
+        cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+    }
 
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
     if (cu_err != cudaSuccess) {
@@ -2377,7 +2476,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
          * cudaErrorInvalidConfiguration on WDDM (the kernel never runs). */
         #define LAUNCH_CHUNK(stream_idx, off, cnt) do { \
             if (use_ilp2) { \
-                bruteforce_kernel_strict_ilp2<<<blocksPerGrid, 128, 0, streams[stream_idx]>>>( \
+                bruteforce_kernel_strict_ilp2<<<blocksPerGrid, 128, 65536, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
                     d_keys_tested, d_best_packed, d_stop_requested); \
             } else if (mode_policy >= 2) { \

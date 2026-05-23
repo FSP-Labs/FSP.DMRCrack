@@ -6,7 +6,44 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [Unreleased] — targeting 0.4.0
+
+### Performance
+- **ILP-2 kernel S-boxes moved to shared memory** — RC4 S-boxes in
+  `bruteforce_kernel_strict_ilp2` previously spilled to L2 cache (~100-cycle
+  latency per access). They are now allocated in 64 KB of dynamic shared memory
+  (4–30 cycle latency). Three new `__device__ __forceinline__` helpers operate
+  on the shared-memory S-box: `rc4_ksa9_smem`, `rc4_discard_smem`, and
+  `rc4_crypt_first3_skip4_smem`.
+- **Interleaved S-box layout eliminates 32-way bank conflicts** — the initial
+  layout stored each thread's S-box contiguously (`S[threadIdx.x * 256 + k]`),
+  causing all 32 threads in a warp to access the same shared-memory bank on
+  every instruction (32-way serialization). The new interleaved layout
+  (`S_base[k * 128 + threadIdx.x]`) distributes accesses across banks so that
+  each warp incurs at most 4-way conflicts — an 8× reduction in bank-conflict
+  penalty.
+- **`__launch_bounds__(128, 2)` (was 4)** — lower occupancy hint lets the
+  compiler allocate the full register budget for ≤ 256 threads/SM. ILP-2 now
+  compiles with **0 bytes of spill** on sm_86 and sm_89 (was non-zero), using
+  all 255 available registers.
+- **`cudaFuncSetAttribute(MaxDynamicSharedMemorySize, 65536)`** — required on
+  Ada Lovelace (sm_89) and later to use more than 48 KB of dynamic shared
+  memory per block. Called once after `use_ilp2` is determined.
+- **KPA prefilter wired into ILP-2 hot path** — `KPA_PREFILTER_A/B` macros are
+  now invoked for each key pair. They are no-ops when no silence frames are
+  loaded (`d_const_n_silence == 0`), adding zero overhead in the common case.
+
+### Fixed
+- **VELOCIDAD tile sub-labels did not add up to the displayed total** — the
+  displayed GPU and CPU speeds were derived by splitting the since-start
+  cumulative average (`keys_tested / elapsed`) using the cumulative
+  `gpu_keys_tested / keys_tested` ratio. Mixed display units (GPU in `M/s`,
+  CPU in `K/s` with no decimals) produced apparent sums that differed from
+  the primary value by up to 0.1 M/s. Fixed: all three values are now derived
+  from delta-based instantaneous rates (Δkeys / Δt between consecutive UI
+  timer ticks). CPU is derived as `total − GPU` before formatting, so the
+  three displayed numbers are always exactly consistent. CPU speed now uses
+  `M/s` units when ≥ 1 M/s, matching the GPU format.
 
 ---
 
