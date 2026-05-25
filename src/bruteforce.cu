@@ -2992,7 +2992,23 @@ static uint64_t read_u64(const volatile LONG64 *value)
     return (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)value, 0, 0);
 }
 
-void bruteforce_get_snapshot(BruteforceEngine *engine, BruteforceSnapshot *out)
+static LONG read_long(const volatile LONG *value)
+{
+    return InterlockedCompareExchange((volatile LONG *)value, 0, 0);
+}
+
+static void enter_snapshot_lock(const BruteforceEngine *engine)
+{
+    /* Taking a Windows critical section is a logically read-only snapshot operation. */
+    EnterCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+}
+
+static void leave_snapshot_lock(const BruteforceEngine *engine)
+{
+    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+}
+
+void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot *out)
 {
     LARGE_INTEGER now;
     double elapsed;
@@ -3010,16 +3026,16 @@ void bruteforce_get_snapshot(BruteforceEngine *engine, BruteforceSnapshot *out)
     if (elapsed < 0.0) elapsed = 0.0;
 
     out->keys_tested = keys;
-    out->gpu_keys_tested = (uint64_t)InterlockedCompareExchange64(&engine->gpu_keys_tested, 0, 0);
+    out->gpu_keys_tested = read_u64(&engine->gpu_keys_tested);
     out->total_keys = total;
-    EnterCriticalSection(&engine->lock);
+    enter_snapshot_lock(engine);
     out->best_key = engine->best_key;
     out->best_score = engine->best_score;
-    LeaveCriticalSection(&engine->lock);
+    leave_snapshot_lock(engine);
     out->elapsed_seconds = elapsed;
-    out->running = InterlockedCompareExchange(&engine->running, 0, 0);
-    out->paused = InterlockedCompareExchange(&engine->paused, 0, 0);
-    out->finished = InterlockedCompareExchange(&engine->search_completed, 0, 0);
+    out->running = read_long(&engine->running);
+    out->paused = read_long(&engine->paused);
+    out->finished = read_long(&engine->search_completed);
 
     if (elapsed > 0.0) out->keys_per_second = (double)keys / elapsed;
     else out->keys_per_second = 0.0;
