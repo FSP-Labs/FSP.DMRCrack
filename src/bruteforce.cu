@@ -569,8 +569,8 @@ static const int sf_dibit_idx_host[3][36] = {
  * =========================================================================
  */
 __device__ float score_burst_correct_dev(
-    const unsigned char *cipher_packs,
-    const unsigned char key5[5],
+    const unsigned char * __restrict__ cipher_packs,
+    const unsigned char * __restrict__ key5,
     uint32_t mi,
     int burst_pos)
 {
@@ -639,7 +639,7 @@ void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_ciph
 }
 
 __device__ __forceinline__ int extract_voice_dibits_dev(
-    const unsigned char *bytes,
+    const unsigned char * __restrict__ bytes,
     int bytes_to_test,
     int dibit_variant,
     unsigned char out_dibits[108])
@@ -673,7 +673,7 @@ __device__ __forceinline__ int extract_voice_dibits_dev(
 }
 
 __device__ __forceinline__ float score_dmr_ambe_dev(
-    const unsigned char *bytes,
+    const unsigned char * __restrict__ bytes,
     int bytes_to_test,
     unsigned int *out_sig_first,
     unsigned int *out_sig_last)
