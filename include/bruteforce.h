@@ -110,7 +110,7 @@ int bruteforce_start(
 void bruteforce_pause(BruteforceEngine *engine);
 void bruteforce_resume(BruteforceEngine *engine);
 void bruteforce_stop(BruteforceEngine *engine);
-void bruteforce_get_snapshot(BruteforceEngine *engine, BruteforceSnapshot *out);
+void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot *out);
 
 /* Public test API for scoring */
 double bruteforce_test_score(
