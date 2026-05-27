@@ -42,12 +42,23 @@
 #include <signal.h>
 #include <inttypes.h>
 
-#if defined(_WIN32)
-#  include <windows.h>   /* Sleep() */
-#else
-#  include <unistd.h>    /* sleep() */
-static void Sleep(unsigned ms) { usleep((useconds_t)ms * 1000u); }
-#endif
+/* ── Banner ───────────────────────────────────────────────────────────── */
+
+static void print_banner(void)
+{
+    printf(
+        "\n"
+        "  ____  __  __ ____    ____                      _    \n"
+        " |  _ \\|  \\/  |  _ \\  / ___|_ __ __ _  ___| | __\n"
+        " | | | | |\\/| | |_) || |   | '__/ _` |/ __| |/ /\n"
+        " | |_| | |  | |  _ < | |___| | | (_| | (__|   < \n"
+        " |____/|_|  |_|_| \\_\\ \\____|_|  \\__,_|\\___|_|\\_\\\n"
+        "\n"
+        " v" DMRCRACK_VERSION "  |  RC4-40 key recovery for DMR Enhanced Privacy\n"
+        " FSP-Labs  |  https://github.com/FSP-Labs/FSP.DMRCrack\n"
+        "\n"
+    );
+}
 
 /* ── Globals ──────────────────────────────────────────────────────────── */
 static BruteforceEngine g_engine;
@@ -84,9 +95,7 @@ static void print_key(uint64_t key)
 
 static void print_usage(void)
 {
-    fprintf(stderr,
-        "FSP.DMRCrack v" DMRCRACK_VERSION " - RC4 40-bit DMR key recovery\n"
-        "\n"
+    printf(
         "Usage: dmrcrack --bin <payload.bin> [options]\n"
         "\n"
         "  --bin   <file>      .bin payload file (required)\n"
@@ -143,6 +152,8 @@ int wmain(int argc, wchar_t **wargv)
 int main(int argc, char **argv)
 {
 #endif
+    print_banner();
+
     const char *bin_path   = NULL;
     const char *key_str    = NULL;
     uint64_t    start_key  = 0x0000000000ULL;
@@ -282,7 +293,7 @@ int main(int argc, char **argv)
     /* ── Poll loop ──────────────────────────────────────────────────────── */
     BruteforceSnapshot snap;
     do {
-        Sleep(500);
+        plat_sleep_ms(500);
         bruteforce_get_snapshot(&g_engine, &snap);
         print_progress(&snap);
     } while (snap.running && !g_interrupted);
