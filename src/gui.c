@@ -40,7 +40,7 @@
     "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 #define APP_CLASS_NAME "FSPDMRCrackWindow"
-#define APP_TITLE "FSP.DMRCrack - RC4 40-bit DMR Brute Forcer"
+#define APP_TITLE "FSP.DMRCrack v" DMRCRACK_VERSION " - RC4 40-bit DMR Brute Forcer"
 
 /* --- Control IDs --- */
 #define ID_EDIT_FILE    1001
@@ -450,12 +450,20 @@ static void draw_header(HDC hdc, int cw)
 
     SetBkMode(hdc, TRANSPARENT);
 
-    /* App name */
+    /* App name + version */
     {
         HFONT old = (HFONT)SelectObject(hdc, g_app.font_header);
         SetTextColor(hdc, CLR_BRIGHT);
         RECT tr = { 12, 0, 300, HEADER_H };
         DrawTextA(hdc, "FSP.DMRCrack", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        /* Measure app name width to position version tag right after it */
+        SIZE sz = { 0, 0 };
+        GetTextExtentPoint32A(hdc, "FSP.DMRCrack", 12, &sz);
+        SelectObject(hdc, g_app.font_header_sub);
+        SetTextColor(hdc, CLR_DIM);
+        RECT vr = { 12 + sz.cx + 6, 0, 300, HEADER_H };
+        DrawTextA(hdc, "v" DMRCRACK_VERSION, -1, &vr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, old);
     }
 
