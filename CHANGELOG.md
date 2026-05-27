@@ -8,6 +8,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Linux / AMD ROCm port** — engine compiles and runs on Linux without code changes;
+  Windows-only paths are gated behind `platform.h` wrappers:
+  - **Platform HAL** (`include/platform.h`) — portable wrappers for threading,
+    mutexes, manual-reset events, 32/64-bit atomics, `plat_sleep_ms`, high-resolution
+    timing, CPU count, mkdir, and file deletion for Win32 and POSIX.
+  - **HIP/ROCm backend** (`include/gpu_compat.h`) — aliases `cudaXxx → hipXxx` when
+    `-DUSE_HIP=ON`; zero-overhead pass-through on NVIDIA builds. GPU targets configurable
+    via `GPU_TARGETS` CMake variable (default: gfx1030, gfx1100, gfx906, …).
+  - **CMake build system** (`CMakeLists.txt`) — replaces the Windows-only `build.bat`
+    for source builds; `USE_HIP=ON` for AMD, `NO_GUI=ON` forced on Linux, CUDA
+    sm_75/86/89 with version-gated sm_100 and PTX fallback, `BUILD_TESTS` option.
+  - **Headless CLI** (`src/cli.c`) — `dmrcrack --bin <file>` interface with
+    `--start`, `--end`, `--threads`, `--gpu-pct`, `--samples`, `--key`, `--no-resume`;
+    checkpoint/resume; live progress bar with ETA; ASCII art banner.
+  - **Debian packaging** (`debian/`) — for Kali Linux tool submission; debhelper +
+    cmake rules, `NO_GUI=ON`, man page (`man/dmrcrack.1`), DEP-5 copyright.
+- **Checkpoint / resume** (#34) — the CUDA launcher thread writes
+  `<payload.bin>.progress` every 30 s (current offset + end key); deleted on clean
+  completion. GUI shows a resume dialog when a matching sidecar is found on file load.
+- **Autotune cache versioning** (#33) — `.cfg` profiles now include `VER=N`; stale
+  files from incompatible kernel versions are auto-deleted, triggering a re-tune on
+  next launch.
+- **GUI: version in title bar and header** — window title is now
+  *"FSP.DMRCrack vX.Y.Z — …"*; version tag rendered next to the app name in the
+  header bar in the sub-text color, using `GetTextExtentPoint32` for exact placement.
+- **CLI: ASCII art banner** — shown on every invocation above usage / progress output.
+- **GUI `--help` / `--version` from command line** (#32) — when the GUI binary is
+  launched from a terminal with `--help` or `--version` it prints to stdout and exits
+  without opening a window (Windows only).
+
+### Fixed
+- **`stop_sig` use-after-scope in double-buffer dispatch** (#6) — `stop_sig` was a
+  stack `int` whose address was passed to `cudaMemcpyAsync`; both async copies now
+  reference a single `const int` at stable block scope.
+- **CMake CUDA arch flags rejected on Linux** — `--generate-code arch=X,code=Y`
+  (with space) is treated as a single shell token on Makefile generators, causing nvcc
+  to emit *"single input file required"*. Switched to `-gencode=arch=X,code=Y` form
+  and added `set(CMAKE_CUDA_ARCHITECTURES OFF)` to prevent duplicate flag generation.
+- **`_Atomic` / `<stdatomic.h>` incompatible with NVCC C++ host mode** — NVCC
+  compiles `.cu` host code as C++; C11 `_Atomic` and `<stdatomic.h>` are not
+  available. Replaced with `volatile` + GCC/Clang `__atomic_*` built-ins
+  (`__atomic_load_n`, `__atomic_store_n`, `__atomic_fetch_add`, `__atomic_add_fetch`),
+  which compile in both C and C++ mode.
+- **`Sleep()` called directly in `bruteforce.cu`** — Windows-only symbol; replaced
+  with `plat_sleep_ms()` from the platform HAL.
+- **CLI help output showed full exe path in `Usage:` line** — `argv[0]` on Windows
+  contains the resolved path; replaced with the hardcoded name `dmrcrack`.
+- **CLI em dash garbled in Windows console** — the UTF-8 `—` in the header string was
+  misread by CP850/CP1252 consoles; replaced with ASCII `-`.
+
+### Internal
+- `.editorconfig` added for consistent indentation and line endings across editors (PR #35)
+- `__restrict__` annotations on device scoring function pointer parameters (PR #37)
+- `const BruteforceEngine *` in `bruteforce_get_snapshot()` for caller-side const
+  correctness (PR #36)
+- CI: Linux build job on Ubuntu 24.04 with CUDA 12.6; artifact `dmrcrack-linux-<sha>`
+- CI: Dependabot weekly updates for GitHub Actions (Monday, grouped)
+
 ---
 
 ## [0.3.3] - 2026-05-23
