@@ -168,6 +168,10 @@ static inline double plat_hrtimer_elapsed_s(const plat_hrtimer_t *start,
          / (double)freq->val.QuadPart;
 }
 
+/* ── Sleep ────────────────────────────────────────────────────────────── */
+
+static inline void plat_sleep_ms(unsigned ms) { Sleep(ms); }
+
 /* ── CPU count ────────────────────────────────────────────────────────── */
 
 static inline int plat_cpu_count(void)
@@ -193,7 +197,6 @@ static inline void plat_delete_file(const char *path) { DeleteFileA(path); }
 #endif
 
 #include <pthread.h>
-#include <stdatomic.h>
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
@@ -201,8 +204,10 @@ static inline void plat_delete_file(const char *path) { DeleteFileA(path); }
 
 typedef pthread_t        plat_thread_t;
 typedef pthread_mutex_t  plat_mutex_t;
-typedef _Atomic int32_t  plat_atomic32_t;
-typedef _Atomic int64_t  plat_atomic64_t;
+/* Use volatile + GCC/Clang __atomic_* built-ins instead of C11 _Atomic so
+ * this header compiles cleanly in C++ mode (e.g. when included from NVCC). */
+typedef volatile int32_t plat_atomic32_t;
+typedef volatile int64_t plat_atomic64_t;
 
 /* POSIX doesn't have manual-reset events natively; we build one from a
  * mutex + condvar + boolean flag.  The struct is small enough to embed. */
@@ -303,30 +308,30 @@ static inline void plat_event_wait(plat_event_t *e)
 
 static inline int32_t plat_atomic32_load(plat_atomic32_t *a)
 {
-    return atomic_load_explicit(a, memory_order_acquire);
+    return __atomic_load_n(a, __ATOMIC_ACQUIRE);
 }
 static inline void plat_atomic32_store(plat_atomic32_t *a, int32_t val)
 {
-    atomic_store_explicit(a, val, memory_order_release);
+    __atomic_store_n(a, val, __ATOMIC_RELEASE);
 }
 static inline int32_t plat_atomic32_inc(plat_atomic32_t *a)
 {
-    return atomic_fetch_add_explicit(a, 1, memory_order_acq_rel) + 1;
+    return __atomic_add_fetch(a, 1, __ATOMIC_ACQ_REL);
 }
 
 /* ── 64-bit atomics ───────────────────────────────────────────────────── */
 
 static inline int64_t plat_atomic64_load(plat_atomic64_t *a)
 {
-    return atomic_load_explicit(a, memory_order_acquire);
+    return __atomic_load_n(a, __ATOMIC_ACQUIRE);
 }
 static inline void plat_atomic64_store(plat_atomic64_t *a, int64_t val)
 {
-    atomic_store_explicit(a, val, memory_order_release);
+    __atomic_store_n(a, val, __ATOMIC_RELEASE);
 }
 static inline void plat_atomic64_add(plat_atomic64_t *a, int64_t delta)
 {
-    atomic_fetch_add_explicit(a, delta, memory_order_acq_rel);
+    (void)__atomic_fetch_add(a, delta, __ATOMIC_ACQ_REL);
 }
 
 /* ── Timing ───────────────────────────────────────────────────────────── */
@@ -352,6 +357,10 @@ static inline double plat_hrtimer_elapsed_s(const plat_hrtimer_t *start,
     double dn = (double)(end->val.tv_nsec - start->val.tv_nsec) * 1e-9;
     return ds + dn;
 }
+
+/* ── Sleep ────────────────────────────────────────────────────────────── */
+
+static inline void plat_sleep_ms(unsigned ms) { usleep((useconds_t)ms * 1000u); }
 
 /* ── CPU count ────────────────────────────────────────────────────────── */
 

@@ -2527,7 +2527,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                         cudaStreamSynchronize(query_stream);
                     }
                     POLL_GPU_RESULTS();
-                    Sleep(5);
+                    plat_sleep_ms(5);
                 }
             }
 
