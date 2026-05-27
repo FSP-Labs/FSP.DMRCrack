@@ -1,0 +1,6 @@
+# Debian packaging files and man pages must use LF on all platforms
+debian/*   eol=lf
+man/*      eol=lf
+
+# Shell scripts
+*.sh       eol=lf

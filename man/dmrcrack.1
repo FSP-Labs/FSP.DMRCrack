@@ -1,0 +1,144 @@
+.TH DMRCRACK 1 "May 2026" "FSP\-Labs" "dmrcrack Manual"
+.SH NAME
+dmrcrack \- GPU\-accelerated RC4 40\-bit key recovery for DMR Enhanced Privacy
+.SH SYNOPSIS
+.B dmrcrack
+.B \-\-bin
+.I payload.bin
+.RI [ options ]
+.SH DESCRIPTION
+.B dmrcrack
+brute\-forces the 5\-byte (40\-bit) RC4 key used in DMR Enhanced Privacy
+encrypted voice transmissions.
+It takes demodulated voice frame payloads in
+.I .bin
+format (produced by DSD\-FME with
+.B \-Q
+DSP output mode) and exhaustively searches the 40\-bit keyspace
+(up to 1,099,511,627,775 candidates).
+.PP
+When an NVIDIA CUDA\-capable GPU is available, the search is offloaded to the
+GPU with a configurable CPU assist.
+If no compatible GPU is detected,
+.B dmrcrack
+falls back to a multi\-threaded CPU search automatically.
+.PP
+Progress is periodically saved to a
+.I .progress
+checkpoint file so an interrupted search can be resumed without restarting
+from the beginning.
+.SH OPTIONS
+.TP
+.BI \-\-bin " file"
+.I .bin
+payload file to search against.
+Required.
+The file must contain at least one line in the format produced by
+.BR dsdfme_dsp_to_bin.py :
+66 hex characters (33 bytes) optionally followed by
+.I ;ALG=XX;KID=XX;MI=XXXXXXXX
+metadata.
+.TP
+.BI \-\-start " hex"
+Start of the key search range.
+40\-bit hexadecimal value (10 hex digits).
+Default:
+.B 0000000000
+.TP
+.BI \-\-end " hex"
+End of the key search range (inclusive).
+40\-bit hexadecimal value.
+Default:
+.B FFFFFFFFFF
+.TP
+.BI \-\-threads " n"
+Number of CPU worker threads.
+Default: number of logical CPUs minus one.
+.TP
+.BI \-\-gpu\-pct " 50\-95"
+Percentage of the keyspace assigned to the GPU when CUDA is available.
+The remaining fraction is searched in parallel by CPU workers.
+Default:
+.B 80
+.TP
+.BI \-\-samples " n"
+Number of payload lines sampled per key candidate.
+0 (default) means all lines.
+Reducing this speeds up the search at the cost of accuracy.
+.TP
+.BI \-\-key " hex"
+Score a single specific key and exit, without running the full search.
+Useful for validating that a candidate key is correct.
+.TP
+.B \-\-no\-resume
+Ignore any existing checkpoint file and start the search from the beginning.
+.TP
+.B \-\-help ", " \-h
+Print a usage summary and exit.
+.SH EXIT STATUS
+.TP
+.B 0
+Success (search completed, or
+.B \-\-help
+was requested).
+.TP
+.B 1
+Error (missing arguments, unreadable payload file, engine failure).
+.SH FILES
+.TP
+.IB payload.bin .progress
+Checkpoint file written periodically during a search, in the same directory
+as the payload file.
+Contains the last tested key so the search can be resumed.
+Deleted automatically when the search completes successfully.
+.SH EXAMPLES
+Full keyspace search using a captured payload:
+.PP
+.RS
+.EX
+dmrcrack \-\-bin capture.bin
+.EE
+.RE
+.PP
+Resume an interrupted search:
+.PP
+.RS
+.EX
+dmrcrack \-\-bin capture.bin
+.EE
+.RE
+(Checkpoint is loaded automatically if
+.I capture.bin.progress
+exists.)
+.PP
+Score a known candidate key:
+.PP
+.RS
+.EX
+dmrcrack \-\-bin capture.bin \-\-key AB12CD34EF
+.EE
+.RE
+.PP
+Search a subrange on 8 CPU threads with no GPU:
+.PP
+.RS
+.EX
+dmrcrack \-\-bin capture.bin \-\-start 0000000000 \-\-end 000FFFFFFF \-\-threads 8 \-\-gpu\-pct 0
+.EE
+.RE
+.SH SEE ALSO
+The project repository and documentation are available at:
+.UR https://github.com/FSP\-Labs/FSP.DMRCrack
+.UE
+.PP
+DSD\-FME (the companion demodulator) is available at:
+.UR https://github.com/lwvmobile/dsd\-fme
+.UE
+.SH AUTHOR
+Written by the FSP\-Labs project contributors.
+.SH LICENSE
+.B dmrcrack
+is free software: you can redistribute it and/or modify it under the terms
+of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.

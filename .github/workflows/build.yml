@@ -119,3 +119,58 @@ jobs:
           name: dmrcrack-${{ github.sha }}
           path: bin\dmrcrack.exe
           retention-days: 7
+
+  build-linux:
+    name: Compile dmrcrack (Linux CLI)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── CUDA ─────────────────────────────────────────────────────────────────
+      - name: Cache CUDA Toolkit
+        id: cache-cuda
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/cuda-12.6
+          key: cuda-12.6.0-linux
+
+      - name: Install CUDA Toolkit
+        if: steps.cache-cuda.outputs.cache-hit != 'true'
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: '12.6.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart"]'
+          use-github-env: true
+
+      - name: Set CUDA environment after cache restore
+        if: steps.cache-cuda.outputs.cache-hit == 'true'
+        run: |
+          echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
+          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+
+      - name: Verify CUDA installation
+        run: nvcc --version
+
+      # ── Build ─────────────────────────────────────────────────────────────────
+      - name: Configure
+        run: cmake -S . -B build -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify binary
+        run: |
+          test -f bin/dmrcrack
+          file bin/dmrcrack | grep -q "ELF 64-bit"
+          echo "Binary OK: $(file bin/dmrcrack)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmrcrack-linux-${{ github.sha }}
+          path: bin/dmrcrack
+          retention-days: 7

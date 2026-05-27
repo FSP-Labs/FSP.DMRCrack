@@ -83,8 +83,10 @@ else()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    # Supported SM targets (PTX fallback covers future cards via JIT)
-    set(CMAKE_CUDA_ARCHITECTURES "75;86;89" CACHE STRING "CUDA architectures")
+    # Disable CMake's automatic arch-flag generation; we manage --generate-code
+    # flags explicitly below, gated on the detected CUDA compiler version to
+    # avoid passing unsupported SM targets to older nvcc installs.
+    set(CMAKE_CUDA_ARCHITECTURES OFF)
 
     add_executable(dmrcrack ${SOURCES_COMMON})
 
@@ -93,18 +95,50 @@ else()
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
 
+    # sm_75 (Turing) and sm_86 (Ampere) — supported since CUDA 10.0 / 11.1
     target_compile_options(dmrcrack PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:
             -O3
             --generate-code arch=compute_75,code=sm_75
             --generate-code arch=compute_86,code=sm_86
-            --generate-code arch=compute_89,code=sm_89
-            --generate-code arch=compute_100,code=sm_100
-            --generate-code arch=compute_89,code=compute_89
-            -Xcompiler /W4,/D_CRT_SECURE_NO_WARNINGS
         >
+    )
+
+    # sm_89 (Ada Lovelace, RTX 4xxx) — requires CUDA 11.8+
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
+        target_compile_options(dmrcrack PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:
+                --generate-code arch=compute_89,code=sm_89
+            >
+        )
+    endif()
+
+    # sm_100 (Blackwell) — requires CUDA 12.8+
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
+        target_compile_options(dmrcrack PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:
+                --generate-code arch=compute_100,code=sm_100
+            >
+        )
+    endif()
+
+    # PTX fallback for future GPUs via JIT (highest supported arch)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
+        target_compile_options(dmrcrack PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_100,code=compute_100>)
+    elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
+        target_compile_options(dmrcrack PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_89,code=compute_89>)
+    else()
+        target_compile_options(dmrcrack PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_86,code=compute_86>)
+    endif()
+
+    # Windows-only MSVC host-compiler flags — gated explicitly to avoid passing
+    # MSVC-style /flags to gcc/clang on Linux builds.
+    target_compile_options(dmrcrack PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${WIN32}>>:
-            -Xcompiler /DWIN32,/D_WINDOWS
+            -Xcompiler /W4,/D_CRT_SECURE_NO_WARNINGS,/DWIN32,/D_WINDOWS
         >
     )
 
@@ -152,4 +186,15 @@ if(BUILD_TESTS)
     endif()
     set_target_properties(test_strict_score PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+endif()
+
+# ── Install targets (used by cmake --install and Debian packaging) ─────────
+include(GNUInstallDirs)
+install(TARGETS dmrcrack
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+if(EXISTS "${CMAKE_SOURCE_DIR}/man/dmrcrack.1")
+    install(FILES man/dmrcrack.1
+        DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+    )
 endif()
