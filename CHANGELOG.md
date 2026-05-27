@@ -23,8 +23,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Headless CLI** (`src/cli.c`) — `dmrcrack --bin <file>` interface with
     `--start`, `--end`, `--threads`, `--gpu-pct`, `--samples`, `--key`, `--no-resume`;
     checkpoint/resume; live progress bar with ETA; ASCII art banner.
-  - **Debian packaging** (`debian/`) — for Kali Linux tool submission; debhelper +
-    cmake rules, `NO_GUI=ON`, man page (`man/dmrcrack.1`), DEP-5 copyright.
+  - **Debian packaging** (`debian/`) — debhelper + cmake rules, `NO_GUI=ON`,
+    man page (`man/dmrcrack.1`), DEP-5 copyright.
 - **Checkpoint / resume** (#34) — the CUDA launcher thread writes
   `<payload.bin>.progress` every 30 s (current offset + end key); deleted on clean
   completion. GUI shows a resume dialog when a matching sidecar is found on file load.

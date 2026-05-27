@@ -2,14 +2,30 @@
 
 ## Prerequisites
 
+**Windows:**
 - Windows 10/11 x64
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) with **Desktop development with C++** workload (includes MSVC x64 toolchain)
-- [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads) with an NVIDIA GPU (sm_75 or newer)
-- Python 3.8+ (optional, for conversion/verification tools)
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) with the Desktop C++ workload
+- [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads) and an NVIDIA GPU (sm_75+)
+
+**Linux:**
+- GCC or Clang
+- CMake >= 3.18
+- CUDA Toolkit 12.x (or ROCm 5.7+ for AMD, with `-DUSE_HIP=ON`)
+
+Python 3.8+ is optional; only needed for the conversion and verification scripts in `tools/`.
 
 ## Building
 
-Open an **x64 Native Tools Command Prompt for VS** in the project root and run:
+### Linux
+
+```bash
+cmake -S . -B build -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+### Windows (GUI)
+
+Open an **x64 Native Tools Command Prompt for VS** in the project root:
 
 ```bat
 build.bat
@@ -17,16 +33,7 @@ build.bat
 
 Output: `bin\dmrcrack.exe`
 
-To adjust the GPU architecture target, edit `-arch=sm_86` in `build.bat`:
-
-| GPU generation | `-arch` value |
-|---|---|
-| Turing (RTX 20xx) | `sm_75` |
-| Ampere (RTX 30xx) | `sm_86` |
-| Ada (RTX 40xx) | `sm_89` |
-| Blackwell (RTX 50xx) | `sm_100` |
-
-### Test tools (MSVC only, no CUDA required)
+### Test tools (no CUDA required)
 
 ```bat
 build_test.bat       # builds bin\test_strict_score.exe
@@ -35,28 +42,27 @@ build_test.bat       # builds bin\test_strict_score.exe
 ## Code style
 
 - C99, no C++ in `.c` files
-- CUDA kernel code in `.cu` files
+- CUDA/HIP kernel code in `.cu` files
 - 4-space indentation, `snake_case` for all identifiers
-- Keep both GPU kernel logic and host-side scoring helpers in `src/bruteforce.cu` (the host `score_candidate_host` lives in the same translation unit so the strict pipeline stays in lock-step with the kernels)
-- Do not add Windows API calls outside `src/gui.c` and `src/main.c`
+- Platform-specific code goes through `include/platform.h`. Don't call Win32 APIs directly outside `src/gui.c` and `src/main.c`
+- GPU kernel logic and host-side scoring helpers both live in `src/bruteforce.cu` so the strict pipeline stays in sync between the two
 
 ## Submitting changes
 
-1. Fork the repository and create a feature branch
-2. Make your changes; ensure `build.bat` succeeds without warnings
-3. If touching scoring logic, verify with `bin\test_strict_score.exe` and `tools\verify_decrypt.py`
-4. Open a pull request with a clear description of the change and why it is needed
+1. Fork and create a feature branch
+2. Make your changes; `build.bat` (Windows) or CMake (Linux) should succeed without new warnings
+3. If you touched scoring logic, run `bin\test_strict_score.exe` and `tools\verify_decrypt.py` against the test data in `test/aaaaa/`
+4. Open a PR with a description of what changed and why
 
 ## Reporting issues
 
-Open an issue on GitHub and include:
+Open an issue and include:
 
-- OS version and GPU model
+- OS and GPU model
 - CUDA Toolkit version (`nvcc --version`)
-- The exact error message or unexpected behavior
-- Minimal reproduction steps (anonymized `.bin` file if relevant)
+- Exact error message or unexpected behavior
+- Steps to reproduce (anonymized `.bin` file if relevant)
 
 ## License
 
-By contributing you agree that your contributions will be licensed under the
-GNU General Public License v3.0 (see [LICENSE](LICENSE)).
+By contributing you agree that your work will be licensed under GPL v3.0 (see [LICENSE](LICENSE)).

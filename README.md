@@ -2,10 +2,11 @@
 
 **GPU-accelerated ARC4 key recovery for DMR Enhanced Privacy voice communications.**
 
-FSP.DMRCrack is a native Windows application that performs exhaustive 40-bit RC4 key search against captured DMR Enhanced Privacy voice frames. It integrates DSD-FME as the demodulation backend: select a WAV capture in the GUI and the app runs DSD-FME automatically to extract encrypted voice payloads.
+FSP.DMRCrack performs exhaustive 40-bit RC4 key search against captured DMR Enhanced Privacy voice frames. On Windows it ships as a native GUI application with DSD-FME integration. On Linux it runs as a headless CLI tool.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-blue)](https://github.com/FSP-Labs)
+[![Platform: Linux x64](https://img.shields.io/badge/Platform-Linux%20x64-orange)](https://github.com/FSP-Labs)
 [![Download](https://img.shields.io/github/v/release/FSP-Labs/FSP.DMRCrack?label=Download&color=green)](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)
 
 > **[Download the latest installer →](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)**
@@ -22,14 +23,25 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 
 ## Requirements
 
+### Windows (GUI)
+
 | Requirement | Details |
 |---|---|
 | OS | Windows 10/11, 64-bit |
-| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer). A multi-threaded CPU fallback runs if no GPU is present, but expect a search to take days instead of hours — a GPU is strongly recommended. |
+| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer). CPU fallback available but expect days instead of hours — a GPU is strongly recommended. |
 | Runtime | None — DSD-FME and all Cygwin DLLs are bundled by the installer |
 | Python | 3.8+ (optional, for `verify_decrypt.py` and `diag_decrypt.py`) |
 | CUDA Toolkit | 12.x (build-time only) |
 | Visual Studio | 2022 with Desktop C++ workload (build-time only) |
+
+### Linux (CLI)
+
+| Requirement | Details |
+|---|---|
+| OS | Any x86-64 Linux distribution |
+| GPU | NVIDIA sm_75+ with CUDA 12.x **or** AMD RDNA/CDNA with ROCm 5.7+ (`-DUSE_HIP=ON`) |
+| Build tools | CMake ≥ 3.18, GCC/Clang, CUDA Toolkit 12.x or ROCm |
+| Python | 3.8+ (optional) |
 
 ---
 
@@ -43,9 +55,17 @@ DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit
 
 Everything is included: the GPU brute-force engine, the DSD-FME demodulator, and all required Cygwin runtime DLLs. No additional downloads or configuration needed.
 
-### Build from source
+### Build from source (Windows)
 
 Clone the repo and build with `build.bat` (requires CUDA Toolkit + Visual Studio). `dsd-fme.exe` and the Cygwin DLLs are already in `tools/`. If they are missing (e.g. on a clean CI checkout), run `tools\get_runtime.bat` to fetch them. See [Building from source](#building-from-source) below.
+
+### Build from source (Linux)
+
+```bash
+cmake -S . -B build -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+# binary at bin/dmrcrack
+```
 
 ---
 
@@ -147,47 +167,40 @@ On an RTX 3080 (sm_86), expect ~2–5 billion key candidates per second. Full 40
 
 ## Building from source
 
-All build scripts auto-detect Visual Studio via `vswhere.exe`.
+### Linux (CMake)
 
-### Main build (CUDA + Win32 GUI)
+Requires CMake >= 3.18, GCC/Clang, and CUDA Toolkit 12.x.
 
-Open an **x64 Native Tools Command Prompt for VS** in the project root:
+```bash
+cmake -S . -B build -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+```
+
+Output: `bin/dmrcrack`
+
+For AMD GPUs, add `-DUSE_HIP=ON` and make sure ROCm 5.7+ is installed. GPU targets default to common RDNA/CDNA architectures; override with `-DGPU_TARGETS="gfx1100;gfx1030"`.
+
+### Windows (GUI, batch file)
+
+Open an **x64 Native Tools Command Prompt for VS** and run:
 
 ```bat
 build.bat
 ```
 
-Output: `bin\dmrcrack.exe`
+Output: `bin\dmrcrack.exe`. The script auto-detects Visual Studio via `vswhere.exe`. Targets sm_75/86/89 natively with a PTX fallback for newer GPUs (JIT-compiled on first run).
 
-Or manually:
-
-```bat
-nvcc -O3 ^
-  -gencode arch=compute_75,code=sm_75 ^
-  -gencode arch=compute_86,code=sm_86 ^
-  -gencode arch=compute_89,code=sm_89 ^
-  -gencode arch=compute_75,code=compute_75 ^
-  -cudart static -Iinclude -Ivendor\winsparkle\include ^
-  -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" ^
-  src\main.c src\gui.c src\bruteforce.cu src\payload_io.c src\rc4.c src\lang_en.c src\updater.c ^
-  -o bin\dmrcrack.exe ^
-  -luser32 -lgdi32 -lcomdlg32 -lkernel32 -ldwmapi -lshell32 -ladvapi32 ^
-  vendor\winsparkle\x64\WinSparkle.lib
-```
-
-The default build targets sm_75/86/89 natively plus a PTX fallback for RTX 50xx and newer (JIT-compiled by the driver on first run). Supported GPUs: GTX 16xx, RTX 20xx–50xx.
-
-### CPU-only test tools (MSVC, no CUDA)
+### Test tools (MSVC, no CUDA)
 
 ```bat
 build_test.bat       # → bin\test_strict_score.exe
 ```
 
-### Generate installer
+### Installer
 
 1. Install [Inno Setup](https://jrsoftware.org/isinfo.php)
 2. Open `installer\FSP.DMRCrack.iss`
-3. Build → `installer\output\FSP.DMRCrack-0.1.0-Setup.exe`
+3. Build
 
 ---
 
@@ -196,42 +209,49 @@ build_test.bat       # → bin\test_strict_score.exe
 ```
 FSP.DMRCrack/
   src/
-    main.c             Entry point (WinMain)
+    main.c             WinMain entry point (Windows GUI)
     gui.c              Win32 GUI, dark theme, progress graphs
-    bruteforce.cu      CUDA GPU kernels + integrated CPU fallback
-    bruteforce.c       Pure-CPU reference implementation (target: future headless CLI, see issue #11)
-    rc4.c              RC4 KSA + PRGA (host-side)
-    payload_io.c       .bin file loader/saver, ALG/KID/MI metadata parser
-  tests/
+    cli.c              Headless CLI entry point (Linux / NO_GUI builds)
+    bruteforce.cu      CUDA/HIP GPU kernels + CPU fallback
+    bruteforce.c       CPU-only build path (used by test tools)
+    rc4.c              RC4 KSA + PRGA, host-side
+    payload_io.c       .bin loader/saver, ALG/KID/MI metadata parser
+    lang.c / lang_en.c / lang_es.c   i18n string tables
+    updater.c          WinSparkle auto-update integration
+  include/
+    platform.h         Win32/POSIX abstraction (threads, atomics, timing)
+    gpu_compat.h       CUDA/HIP compatibility shim
+    bruteforce.h       Engine API and BruteforceEngine struct
+    lang.h / version.h / payload_io.h / updater.h
+  src/
     test_strict_score.c    Per-burst scoring validation against known key
     test_score_windows.c   Score distribution analysis tool
     test_bench.cu          GPU kernel throughput micro-benchmark
-  include/             Headers
   tools/
-    dsd-fme.exe                    DSD-FME demodulator (requires Cygwin DLLs alongside)
+    dsd-fme.exe                    DSD-FME demodulator (Cygwin DLLs required alongside)
     dsdfme_dsp_to_bin.py           DSD-FME DSP output → .bin converter
     verify_decrypt.py              Key validation with Z-score output
     diag_decrypt.py                Decryption pipeline diagnostic
-    extract_encrypted_from_dsdfme.bat  DSD-FME capture helper
-    build_bench.bat                GPU kernel throughput benchmark build
-    build_ptxas.bat                Register/occupancy diagnostic build
+  debian/              Debian packaging (control, rules, changelog, copyright)
+  man/
+    dmrcrack.1         Man page
   installer/
     FSP.DMRCrack.iss   Inno Setup script
-  bin/                 Compiled executables (not tracked in git)
+  CMakeLists.txt       Cross-platform build (Linux + Windows)
+  build.bat            Windows batch build (auto-detects VS + CUDA)
+  bin/                 Compiled output (not tracked in git)
 ```
 
 ---
 
 ## Contributing
 
-This is open source and actively developed. The roadmap lives in the [issue tracker](https://github.com/FSP-Labs/FSP.DMRCrack/issues) and PRs are welcome.
+PRs are welcome. The [issue tracker](https://github.com/FSP-Labs/FSP.DMRCrack/issues) has tagged issues if you want somewhere to start:
 
-Good places to start:
+- [**`good first issue`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/good%20first%20issue) — well-scoped tasks: magic-number cleanup, i18n audit, test coverage
+- [**`help wanted`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/help%20wanted) — bigger items that need more familiarity with the codebase
 
-- [**`good first issue`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/good%20first%20issue) — well-scoped tasks that don't need deep familiarity with the code (magic-number cleanup, `__restrict__` annotations on device helpers, i18n audit, etc.)
-- [**`help wanted`**](https://github.com/FSP-Labs/FSP.DMRCrack/labels/help%20wanted) — larger items where extra hands would unlock cross-platform work: CMake migration, POSIX HAL for the engine, headless CLI mode, Linux port
-
-Setup, code style, and submission guidelines are in [CONTRIBUTING.md](CONTRIBUTING.md). If you have an idea that doesn't fit any open issue, just open one — happy to discuss.
+Build setup, code style, and PR guidelines are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 

@@ -119,11 +119,11 @@ dmrcrack \-\-bin capture.bin \-\-key AB12CD34EF
 .EE
 .RE
 .PP
-Search a subrange on 8 CPU threads with no GPU:
+Search a subrange on 8 CPU threads, GPU takes 50% of keyspace:
 .PP
 .RS
 .EX
-dmrcrack \-\-bin capture.bin \-\-start 0000000000 \-\-end 000FFFFFFF \-\-threads 8 \-\-gpu\-pct 0
+dmrcrack \-\-bin capture.bin \-\-start 0000000000 \-\-end 000FFFFFFF \-\-threads 8 \-\-gpu\-pct 50
 .EE
 .RE
 .SH SEE ALSO
