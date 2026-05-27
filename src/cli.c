@@ -82,12 +82,12 @@ static void print_key(uint64_t key)
            (unsigned)( key        & 0xFF));
 }
 
-static void print_usage(const char *argv0)
+static void print_usage(void)
 {
     fprintf(stderr,
-        "FSP.DMRCrack v" DMRCRACK_VERSION " — RC4 40-bit DMR key recovery\n"
+        "FSP.DMRCrack v" DMRCRACK_VERSION " - RC4 40-bit DMR key recovery\n"
         "\n"
-        "Usage: %s --bin <payload.bin> [options]\n"
+        "Usage: dmrcrack --bin <payload.bin> [options]\n"
         "\n"
         "  --bin   <file>      .bin payload file (required)\n"
         "  --start <hex>       start key (default: 0000000000)\n"
@@ -97,7 +97,7 @@ static void print_usage(const char *argv0)
         "  --samples <n>       payload lines to sample per key (default: all)\n"
         "  --key   <hex>       score a single key and exit\n"
         "  --no-resume         ignore any saved checkpoint\n"
-        "\n", argv0);
+        "\n");
 }
 
 /* ── Progress bar ─────────────────────────────────────────────────────── */
@@ -170,13 +170,13 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--key")       == 0 && i+1 < argc) { key_str  = argv[++i]; }
         else if (strcmp(argv[i], "--no-resume") == 0)                { no_resume = 1; }
         else if (strcmp(argv[i], "--help")      == 0 ||
-                 strcmp(argv[i], "-h")          == 0) { print_usage(argv[0]); return 0; }
+                 strcmp(argv[i], "-h")          == 0) { print_usage(); return 0; }
         else { fprintf(stderr, "error: unknown argument '%s'\n", argv[i]); return 1; }
     }
 
     if (!bin_path) {
         fprintf(stderr, "error: --bin is required\n\n");
-        print_usage(argv[0]);
+        print_usage();
         return 1;
     }
     if (start_key > end_key) {
@@ -311,13 +311,12 @@ int main(int argc, char **argv)
     bruteforce_stop(&g_engine);
     bruteforce_engine_destroy(&g_engine);
     payload_set_free(&g_payloads);
-    return 0;
 
 #if defined(_WIN32)
-    /* Free narrow args */
     for (int i = 0; i < argc; ++i) free(argv[i]);
     free(argv);
 #endif
+    return 0;
 }
 
 #endif /* NO_GUI / Linux */
