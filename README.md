@@ -15,9 +15,11 @@ FSP.DMRCrack performs exhaustive 40-bit RC4 key search against captured DMR Enha
 
 ## Use case
 
-DMR Enhanced Privacy (EP) uses ARC4 (RC4) with a 40-bit (5-byte) key. The 40-bit keyspace (2^40 ≈ 1 trillion keys) is tractable on a modern GPU in hours. FSP.DMRCrack exploits the structure of AMBE voice coding — valid speech produces predictable inter-frame parameter distributions — to identify the correct key with a statistical Z-score far above the noise floor (Z > 7 threshold).
+DMR Enhanced Privacy (EP) is the encryption layer built into MOTOTRBO, Hytera, and other DMR Tier II/III radios. It uses ARC4 (RC4) with a 40-bit (5-byte) key. At roughly one trillion candidates that keyspace is tractable on a modern GPU in a few hours.
 
-**Intended users:** licensed radio operators performing authorized security audits of their own systems, researchers, and CTF participants.
+FSP.DMRCrack exploits the structure of AMBE voice coding: valid speech produces predictable inter-frame parameter distributions, so the correct key stands out as a Z-score spike well above the noise floor (Z > 7 threshold). It runs the same pipeline as DSD-FME's own decoder, so what the tool finds actually decrypts the audio.
+
+**Intended users:** licensed radio operators auditing their own systems, security researchers, and CTF participants.
 
 ---
 
