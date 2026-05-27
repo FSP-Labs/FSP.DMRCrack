@@ -15,11 +15,10 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 #include "../include/bruteforce.h"
+#include "../include/platform.h"
 
 #include <float.h>
 #include <math.h>
-#include <process.h>
-#include <windows.h>
 #include <stdlib.h>
 
 #include "../include/rc4.h"
@@ -43,25 +42,14 @@ static void set_error(char *err, size_t err_len, const char *msg)
     }
 }
 
-static uint64_t read_u64(const volatile LONG64 *value)
-{
-    return (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)value, 0, 0);
-}
-
-static LONG read_long(const volatile LONG *value)
-{
-    return InterlockedCompareExchange((volatile LONG *)value, 0, 0);
-}
-
 static void enter_snapshot_lock(const BruteforceEngine *engine)
 {
-    /* Taking a Windows critical section is a logically read-only snapshot operation. */
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+    plat_mutex_lock((plat_mutex_t *)&engine->lock);
 }
 
 static void leave_snapshot_lock(const BruteforceEngine *engine)
 {
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+    plat_mutex_unlock((plat_mutex_t *)&engine->lock);
 }
 
 static void close_worker_resources(BruteforceEngine *engine)
@@ -70,9 +58,7 @@ static void close_worker_resources(BruteforceEngine *engine)
 
     if (engine->thread_handles != NULL) {
         for (t = 0; t < engine->cfg.thread_count; ++t) {
-            if (engine->thread_handles[t] != NULL) {
-                CloseHandle(engine->thread_handles[t]);
-            }
+            plat_thread_close(engine->thread_handles[t]);
         }
         free(engine->thread_handles);
         engine->thread_handles = NULL;
@@ -80,11 +66,6 @@ static void close_worker_resources(BruteforceEngine *engine)
 
     free(engine->workers);
     engine->workers = NULL;
-
-    if (engine->pause_event != NULL) {
-        CloseHandle(engine->pause_event);
-        engine->pause_event = NULL;
-    }
 }
 
 static void key_to_5bytes(uint64_t key, unsigned char out[5])
@@ -335,7 +316,7 @@ static double score_candidate(
     for (line_idx = 0; line_idx < line_count; ++line_idx) {
         const PayloadLine *line = &payloads->items[line_idx];
         size_t bytes_to_test = line->len;
-        __declspec(align(16)) unsigned char out[64];
+        unsigned char out[64];
         RC4_CTX rc4;
         size_t i;
         double local_score = 0.0;
@@ -535,7 +516,7 @@ static double score_candidate(
     return score;
 }
 
-static unsigned __stdcall worker_proc(void *arg)
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL worker_proc(void *arg)
 {
     WorkerCtx *ctx = (WorkerCtx *)arg;
     BruteforceEngine *engine = ctx->engine;
@@ -543,24 +524,17 @@ static unsigned __stdcall worker_proc(void *arg)
     uint64_t local_count = 0;
     double local_best_score = -DBL_MAX;
 
-    // Thread affinity: pin each worker to a different logical core if possible
-    if (ctx->worker_index < 64) {
-        SetThreadIdealProcessor(GetCurrentThread(), (DWORD)ctx->worker_index);
-    }
+    plat_thread_set_ideal_processor(ctx->worker_index);
 
     for (k = ctx->start_key; k <= ctx->end_key; ++k) {
         unsigned char key_bytes[5];
         double score;
 
         if ((local_count & 0xFFFu) == 0) {
-            if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
-                break;
-            }
-            if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
-                WaitForSingleObject(engine->pause_event, INFINITE);
-                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
-                    break;
-                }
+            if (plat_atomic32_load(&engine->stop_requested) != 0) break;
+            if (plat_atomic32_load(&engine->paused) != 0) {
+                plat_event_wait(&engine->pause_event);
+                if (plat_atomic32_load(&engine->stop_requested) != 0) break;
             }
         }
 
@@ -569,51 +543,51 @@ static unsigned __stdcall worker_proc(void *arg)
 
         if (score > local_best_score) {
             local_best_score = score;
-            EnterCriticalSection(&engine->lock);
+            plat_mutex_lock(&engine->lock);
             if (score > engine->best_score) {
                 engine->best_score = score;
                 engine->best_key = k;
             }
-            LeaveCriticalSection(&engine->lock);
+            plat_mutex_unlock(&engine->lock);
         }
 
         local_count++;
         if ((local_count & 0x3FFu) == 0) {
-            InterlockedAdd64(&engine->keys_tested, 1024);
+            plat_atomic64_add(&engine->keys_tested, 1024LL);
         }
 
-        if (k == ctx->end_key) {
-            break;
-        }
+        if (k == ctx->end_key) break;
     }
 
     if ((local_count & 0x3FFu) != 0) {
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & 0x3FFu));
+        plat_atomic64_add(&engine->keys_tested, (int64_t)(local_count & 0x3FFu));
     }
 
-    if (InterlockedIncrement(&engine->finished_threads) == engine->cfg.thread_count) {
-        if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
-            InterlockedExchange(&engine->search_completed, 1);
+    if (plat_atomic32_inc(&engine->finished_threads) == engine->cfg.thread_count) {
+        if (plat_atomic32_load(&engine->stop_requested) == 0) {
+            plat_atomic32_store(&engine->search_completed, 1);
         }
-        InterlockedExchange(&engine->running, 0);
-        SetEvent(engine->pause_event);
+        plat_atomic32_store(&engine->running, 0);
+        plat_event_set(&engine->pause_event);
     }
 
-    return 0;
+    PLAT_THREAD_RETURN;
 }
 
 void bruteforce_engine_init(BruteforceEngine *engine)
 {
-    ZeroMemory(engine, sizeof(*engine));
-    InitializeCriticalSection(&engine->lock);
-    QueryPerformanceFrequency(&engine->qpc_freq);
+    memset(engine, 0, sizeof(*engine));
+    plat_mutex_init(&engine->lock);
+    plat_hrfreq_init(&engine->qpc_freq);
+    engine->pause_event = plat_event_create(1); /* signaled — workers run immediately */
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)
 {
     bruteforce_stop(engine);
     close_worker_resources(engine);
-    DeleteCriticalSection(&engine->lock);
+    plat_event_destroy(&engine->pause_event);
+    plat_mutex_destroy(&engine->lock);
 }
 
 int bruteforce_start(
@@ -624,13 +598,12 @@ int bruteforce_start(
     size_t err_len)
 {
     int t;
-    uintptr_t th;
     uint64_t total;
     uint64_t chunk;
     uint64_t rem;
     uint64_t start;
 
-    if (InterlockedCompareExchange(&engine->running, 0, 0) != 0) {
+    if (plat_atomic32_load(&engine->running) != 0) {
         set_error(err, err_len, "A search is already running");
         return 0;
     }
@@ -655,16 +628,12 @@ int bruteforce_start(
     }
 
     engine->cfg = *cfg;
-    if (engine->cfg.sample_bytes <= 0) {
-        engine->cfg.sample_bytes = 33;
-    }
-    if (engine->cfg.sample_lines <= 0 || (size_t)engine->cfg.sample_lines > payloads->count) {
+    if (engine->cfg.sample_bytes <= 0) engine->cfg.sample_bytes = 33;
+    if (engine->cfg.sample_lines <= 0 || (size_t)engine->cfg.sample_lines > payloads->count)
         engine->cfg.sample_lines = (int)payloads->count;
-    }
     engine->payloads = payloads;
 
-
-    engine->thread_handles = (HANDLE *)calloc((size_t)engine->cfg.thread_count, sizeof(HANDLE));
+    engine->thread_handles = (plat_thread_t *)calloc((size_t)engine->cfg.thread_count, sizeof(plat_thread_t));
     engine->workers = calloc((size_t)engine->cfg.thread_count, sizeof(WorkerCtx));
     if (engine->thread_handles == NULL || engine->workers == NULL) {
         close_worker_resources(engine);
@@ -673,30 +642,24 @@ int bruteforce_start(
     }
     WorkerCtx *workers = (WorkerCtx *)engine->workers;
 
-    engine->pause_event = CreateEventA(NULL, TRUE, TRUE, NULL);
-    if (engine->pause_event == NULL) {
-        close_worker_resources(engine);
-        set_error(err, err_len, "Could not create pause event");
-        return 0;
-    }
+    plat_event_set(&engine->pause_event); /* ensure threads won't block initially */
 
     total = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
-    if ((uint64_t)engine->cfg.thread_count > total) {
+    if ((uint64_t)engine->cfg.thread_count > total)
         engine->cfg.thread_count = (int)total;
-    }
     chunk = total / (uint64_t)engine->cfg.thread_count;
-    rem = total % (uint64_t)engine->cfg.thread_count;
+    rem   = total % (uint64_t)engine->cfg.thread_count;
     start = engine->cfg.start_key;
 
-    InterlockedExchange64(&engine->keys_tested, 0);
-    InterlockedExchange(&engine->stop_requested, 0);
-    InterlockedExchange(&engine->paused, 0);
-    InterlockedExchange(&engine->finished_threads, 0);
-    InterlockedExchange(&engine->search_completed, 0);
+    plat_atomic64_store(&engine->keys_tested, 0LL);
+    plat_atomic32_store(&engine->stop_requested, 0);
+    plat_atomic32_store(&engine->paused, 0);
+    plat_atomic32_store(&engine->finished_threads, 0);
+    plat_atomic32_store(&engine->search_completed, 0);
     engine->best_key = engine->cfg.start_key;
     engine->best_score = -DBL_MAX;
-    QueryPerformanceCounter(&engine->qpc_start);
-    InterlockedExchange(&engine->running, 1);
+    plat_hrtimer_now(&engine->qpc_start);
+    plat_atomic32_store(&engine->running, 1);
 
     for (t = 0; t < engine->cfg.thread_count; ++t) {
         uint64_t this_count = chunk + ((uint64_t)t < rem ? 1ull : 0ull);
@@ -707,17 +670,15 @@ int bruteforce_start(
         workers[t].end_key = end;
         workers[t].worker_index = t;
 
-        th = _beginthreadex(NULL, 0, worker_proc, &workers[t], 0, NULL);
-        if (th == 0) {
-            InterlockedExchange(&engine->running, 0);
-            InterlockedExchange(&engine->stop_requested, 1);
-            SetEvent(engine->pause_event);
+        if (plat_thread_create(&engine->thread_handles[t], worker_proc, &workers[t]) != 0) {
+            plat_atomic32_store(&engine->running, 0);
+            plat_atomic32_store(&engine->stop_requested, 1);
+            plat_event_set(&engine->pause_event);
             bruteforce_stop(engine);
             set_error(err, err_len, "Error creating brute-force threads");
             return 0;
         }
 
-        engine->thread_handles[t] = (HANDLE)th;
         start = end + 1ull;
     }
 
@@ -726,56 +687,50 @@ int bruteforce_start(
 
 void bruteforce_pause(BruteforceEngine *engine)
 {
-    if (InterlockedCompareExchange(&engine->running, 0, 0) == 0) {
-        return;
-    }
-    InterlockedExchange(&engine->paused, 1);
-    ResetEvent(engine->pause_event);
+    if (plat_atomic32_load(&engine->running) == 0) return;
+    plat_atomic32_store(&engine->paused, 1);
+    plat_event_reset(&engine->pause_event);
 }
 
 void bruteforce_resume(BruteforceEngine *engine)
 {
-    if (InterlockedCompareExchange(&engine->running, 0, 0) == 0) {
-        return;
-    }
-    InterlockedExchange(&engine->paused, 0);
-    SetEvent(engine->pause_event);
+    if (plat_atomic32_load(&engine->running) == 0) return;
+    plat_atomic32_store(&engine->paused, 0);
+    plat_event_set(&engine->pause_event);
 }
 
 void bruteforce_stop(BruteforceEngine *engine)
 {
     if (engine->thread_handles == NULL) {
-        InterlockedExchange(&engine->running, 0);
+        plat_atomic32_store(&engine->running, 0);
         return;
     }
 
-    InterlockedExchange(&engine->stop_requested, 1);
-    InterlockedExchange(&engine->paused, 0);
-    SetEvent(engine->pause_event);
+    plat_atomic32_store(&engine->stop_requested, 1);
+    plat_atomic32_store(&engine->paused, 0);
+    plat_event_set(&engine->pause_event);
 
-    WaitForMultipleObjects((DWORD)engine->cfg.thread_count, engine->thread_handles, TRUE, INFINITE);
-    InterlockedExchange(&engine->running, 0);
+    plat_threads_join(engine->thread_handles, engine->cfg.thread_count);
+    plat_atomic32_store(&engine->running, 0);
     close_worker_resources(engine);
 }
 
 void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot *out)
 {
-    LARGE_INTEGER now;
+    plat_hrtimer_t now;
     double elapsed;
     uint64_t keys;
     uint64_t total;
 
-    keys = read_u64(&engine->keys_tested);
+    keys = (uint64_t)plat_atomic64_load((plat_atomic64_t *)&engine->keys_tested);
     total = 0;
     if (engine->cfg.end_key >= engine->cfg.start_key) {
         total = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
     }
 
-    QueryPerformanceCounter(&now);
-    elapsed = (double)(now.QuadPart - engine->qpc_start.QuadPart) / (double)engine->qpc_freq.QuadPart;
-    if (elapsed < 0.0) {
-        elapsed = 0.0;
-    }
+    plat_hrtimer_now(&now);
+    elapsed = plat_hrtimer_elapsed_s(&engine->qpc_start, &now, &engine->qpc_freq);
+    if (elapsed < 0.0) elapsed = 0.0;
 
     out->keys_tested = keys;
     out->total_keys = total;
@@ -784,9 +739,9 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     out->best_score = engine->best_score;
     leave_snapshot_lock(engine);
     out->elapsed_seconds = elapsed;
-    out->running = read_long(&engine->running);
-    out->paused = read_long(&engine->paused);
-    out->finished = read_long(&engine->search_completed);
+    out->running  = (int)plat_atomic32_load((plat_atomic32_t *)&engine->running);
+    out->paused   = (int)plat_atomic32_load((plat_atomic32_t *)&engine->paused);
+    out->finished = (int)plat_atomic32_load((plat_atomic32_t *)&engine->search_completed);
 
     if (elapsed > 0.0) {
         out->keys_per_second = (double)keys / elapsed;

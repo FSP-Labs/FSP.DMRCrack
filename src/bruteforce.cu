@@ -20,17 +20,13 @@
  */
 
 #include "../include/bruteforce.h"
+#include "../include/platform.h"
+#include "../include/gpu_compat.h"
 #include <float.h>
-#include <windows.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <process.h>
 #include <string.h>
 #include <immintrin.h>   /* AVX2 intrinsics for 4-way CPU worker S-box init */
-
-// CUDA headers
-#include <cuda_runtime.h>
-#include <device_launch_parameters.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -1572,7 +1568,7 @@ static int load_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode,
         int ver = 0;
         if (fscanf(fp, "VER=%d\n", &ver) != 1 || ver != CUDA_PROFILE_VERSION) {
             fclose(fp);
-            DeleteFileA(path); /* stale profile — delete so autotune re-runs */
+            plat_delete_file(path); /* stale profile — delete so autotune re-runs */
             return 0;
         }
     }
@@ -1598,8 +1594,8 @@ static void save_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode
     FILE *fp;
 
     build_tune_profile_path(prop, strict_mode, path, sizeof(path));
-    /* Ensure bin\ directory exists before writing (not tracked by git). */
-    CreateDirectoryA("bin", NULL);
+    /* Ensure bin/ directory exists before writing (not tracked by git). */
+    plat_mkdir("bin");
     fp = fopen(path, "wt");
     if (fp == NULL) return;
 
@@ -1712,7 +1708,7 @@ static void rc4_ksa9_4way(
  *     scatter/gather chains, roughly doubling effective IPC on the KSA loop
  *   • Per-superframe KSA: one KSA per 6-burst superframe (instead of 6),
  *     then continuous PRGA across all bursts — 6× fewer KSA calls
- *   • P-core pinning via SetThreadAffinityMask(1ULL << worker_index)
+ *   • P-core pinning via plat_thread_set_affinity(worker_index)
  *
  * Scores keys using the same inter-frame Hamming metric as the GPU kernel
  * (score_burst = 48 − HD(sf0,sf1) − HD(sf1,sf2)) so GPU/CPU best_score are
@@ -1723,7 +1719,7 @@ static void rc4_ksa9_4way(
  *
  * Does NOT touch finished_threads/search_completed/running — the GPU thread
  * owns those. */
-static unsigned __stdcall cpu_4way_worker_proc(void *arg)
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
 {
     CpuWorkerCtx *ctx = (CpuWorkerCtx *)arg;
     BruteforceEngine *engine = ctx->engine;
@@ -1733,10 +1729,7 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
     uint64_t k;
     int b;
 
-    /* Pin to logical processor = worker_index (P-cores 0-5 on i7-12700H) */
-    if (ctx->worker_index < 64) {
-        SetThreadAffinityMask(GetCurrentThread(), 1ULL << (unsigned)ctx->worker_index);
-    }
+    plat_thread_set_affinity(ctx->worker_index);
 
     if (ctx->mode_policy >= 2 && cipher_packs != NULL && pcount > 0) {
         /* ── Correct pipeline: 4-way KSA + per-superframe PRGA ── */
@@ -1749,10 +1742,10 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
 
             /* Stop/pause check every 4096 keys */
             if ((local_count & 0xFFFu) == 0) {
-                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
-                if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
-                    WaitForSingleObject(engine->pause_event, INFINITE);
-                    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                if (plat_atomic32_load(&engine->stop_requested) != 0) break;
+                if (plat_atomic32_load(&engine->paused) != 0) {
+                    plat_event_wait(&engine->pause_event);
+                    if (plat_atomic32_load(&engine->stop_requested) != 0) break;
                 }
             }
 
@@ -1901,18 +1894,18 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             /* Update global best only for keys that survived all pruning checks */
             for (b = 0; b < batch; b++) {
                 if (pruned[b]) continue;
-                EnterCriticalSection(&engine->lock);
+                plat_mutex_lock(&engine->lock);
                 if (scores[b] > engine->best_score) {
                     engine->best_score = scores[b];
                     engine->best_key   = k + (uint64_t)b;
                 }
-                LeaveCriticalSection(&engine->lock);
+                plat_mutex_unlock(&engine->lock);
             }
 
             local_count += (uint64_t)batch;
             k           += (uint64_t)batch;
             if ((local_count & STOP_POLL_MASK) == 0)
-                InterlockedAdd64(&engine->keys_tested, 1024LL);
+                plat_atomic64_add(&engine->keys_tested, 1024LL);
         }
     } else {
         /* ── Fallback: scalar scoring for legacy mode (mode_policy < 2) ── */
@@ -1921,10 +1914,10 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             double score;
 
             if ((local_count & 0xFFFu) == 0) {
-                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
-                if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
-                    WaitForSingleObject(engine->pause_event, INFINITE);
-                    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+                if (plat_atomic32_load(&engine->stop_requested) != 0) break;
+                if (plat_atomic32_load(&engine->paused) != 0) {
+                    plat_event_wait(&engine->pause_event);
+                    if (plat_atomic32_load(&engine->stop_requested) != 0) break;
                 }
             }
 
@@ -1932,25 +1925,25 @@ static unsigned __stdcall cpu_4way_worker_proc(void *arg)
             score = score_candidate_host(engine->payloads, engine->cfg.sample_lines,
                                          engine->cfg.sample_bytes, key_bytes);
 
-            EnterCriticalSection(&engine->lock);
+            plat_mutex_lock(&engine->lock);
             if (score > engine->best_score) {
                 engine->best_score = score;
                 engine->best_key   = k;
             }
-            LeaveCriticalSection(&engine->lock);
+            plat_mutex_unlock(&engine->lock);
 
             local_count++;
             if ((local_count & STOP_POLL_MASK) == 0)
-                InterlockedAdd64(&engine->keys_tested, 1024LL);
+                plat_atomic64_add(&engine->keys_tested, 1024LL);
 
             if (k == ctx->end_key) break;
         }
     }
 
     if ((local_count & STOP_POLL_MASK) != 0)
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & STOP_POLL_MASK));
+        plat_atomic64_add(&engine->keys_tested, (int64_t)(local_count & STOP_POLL_MASK));
 
-    return 0;
+    PLAT_THREAD_RETURN;
 }
 
 static float host_unpack_score(unsigned long long packed)
@@ -1965,7 +1958,7 @@ static unsigned long long host_unpack_key(unsigned long long packed)
     return packed & 0xFFFFFFFFFFULL;
 }
 
-static unsigned __stdcall cuda_launcher_thread(void *arg)
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
 {
     BruteforceEngine *engine = (BruteforceEngine *)arg;
     unsigned char *host_payload_flat = NULL;
@@ -1989,7 +1982,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     int cuda_sm = 0;
     int use_ilp2 = 0;
     CpuWorkerCtx *cpu_assist_ctxs = NULL;
-    HANDLE *cpu_assist_handles = NULL;
+    plat_thread_t *cpu_assist_handles = NULL;
     int n_cpu_assist = 0;
     unsigned long long last_gpu_kt = 0; /* GPU keys_tested at last poll — for delta-add */
     cudaDeviceProp prop;
@@ -2001,12 +1994,12 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
     uint32_t global_mi = engine->payloads->global_mi;
     int mode_policy = 0;
 
-    InterlockedExchange(&engine->cuda_stage, 0);
-    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+    plat_atomic32_store(&engine->cuda_stage, 0);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
 
     /* Dictionary phase: test common/default keys before GPU scan */
     run_dictionary_phase(engine);
-    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) goto cleanup;
+    if (plat_atomic32_load(&engine->stop_requested) != 0) goto cleanup;
 
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
     if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
@@ -2171,9 +2164,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         goto cleanup;
     }
 
-    InterlockedExchange(&engine->cuda_sm_count, prop.multiProcessorCount);
-    InterlockedExchange(&engine->cuda_compute_major, prop.major);
-    InterlockedExchange(&engine->cuda_compute_minor, prop.minor);
+    plat_atomic32_store(&engine->cuda_sm_count, prop.multiProcessorCount);
+    plat_atomic32_store(&engine->cuda_compute_major, prop.major);
+    plat_atomic32_store(&engine->cuda_compute_minor, prop.minor);
 
     /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved RC4 chains.
      * ILP-2: safe on all Turing+ (sm_75+); the double S-box concern was for
@@ -2212,7 +2205,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         profile.chunk_mult = strict_mode ? 384 : 128;
 
         profile_loaded = load_cuda_launch_profile(&prop, strict_mode, &profile);
-        InterlockedExchange(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
+        plat_atomic32_store(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
 
         if (!profile_loaded) {
             /* Auto-tune: find the best TPB/BPSM/CHUNK for this specific GPU.
@@ -2230,11 +2223,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
             float best_kps = -1.0f;
             cudaEvent_t ev_start = NULL;
             cudaEvent_t ev_stop = NULL;
-            ULONGLONG tune_start_tick = GetTickCount64();
-            const ULONGLONG tune_budget_ms = 2500ULL; /* 2.5 s max */
+            uint64_t tune_start_ms = plat_ticks_ms();
+            const uint64_t tune_budget_ms = 2500ULL; /* 2.5 s max */
             int skip_benchmark = 0; /* always benchmark when no profile cached */
 
-            InterlockedExchange(&engine->cuda_stage, 1);
+            plat_atomic32_store(&engine->cuda_stage, 1);
 
             if (cudaEventCreate(&ev_start) != cudaSuccess ||
                 cudaEventCreate(&ev_stop)  != cudaSuccess) {
@@ -2247,7 +2240,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 if (use_ilp2 && tpb != 128) continue; /* ILP-2 fixed to 128 tpb */
 
                 for (int bi = 0; bi < bpsm_count; ++bi) {
-                    if (GetTickCount64() - tune_start_tick >= tune_budget_ms) {
+                    if (plat_ticks_ms() - tune_start_ms >= tune_budget_ms) {
                         skip_benchmark = 1;
                         break;
                     }
@@ -2271,11 +2264,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
                         cudaEventRecord(ev_start, compute_stream);
                         while (tuned < tune_keys) {
-                            if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
+                            if (plat_atomic32_load(&engine->stop_requested) != 0) {
                                 skip_benchmark = 1;
                                 break;
                             }
-                            if (GetTickCount64() - tune_start_tick >= tune_budget_ms) {
+                            if (plat_ticks_ms() - tune_start_ms >= tune_budget_ms) {
                                 skip_benchmark = 1;
                                 break;
                             }
@@ -2325,8 +2318,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                                 break;
                             }
                             tuned += cur;
-                            InterlockedExchange64(&engine->keys_tested, (LONG64)tuned);
-                            InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+                            plat_atomic64_store(&engine->keys_tested, (int64_t)tuned);
+                            plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
                         }
                         if (skip_benchmark) break;
                         cudaEventRecord(ev_stop, compute_stream);
@@ -2355,9 +2348,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
         /* ILP-2 kernel is __launch_bounds__(128,4) -- actual tpb is always 128.
          * Report 128 in the status bar so the user sees the real value. */
-        InterlockedExchange(&engine->cuda_tpb, use_ilp2 ? 128 : profile.threads_per_block);
-        InterlockedExchange(&engine->cuda_bpsm, profile.blocks_per_sm);
-        InterlockedExchange(&engine->cuda_chunk_mult, profile.chunk_mult);
+        plat_atomic32_store(&engine->cuda_tpb, use_ilp2 ? 128 : profile.threads_per_block);
+        plat_atomic32_store(&engine->cuda_bpsm, profile.blocks_per_sm);
+        plat_atomic32_store(&engine->cuda_chunk_mult, profile.chunk_mult);
 
         threadsPerBlock = profile.threads_per_block;
         if (threadsPerBlock < 64) threadsPerBlock = 64;
@@ -2378,16 +2371,14 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         }
     }
 
-    InterlockedExchange(&engine->cuda_stage, 2);
+    plat_atomic32_store(&engine->cuda_stage, 2);
 
     /* === CPU assist workers: 4-way AVX2 workers cover remaining keyspace ===== *
      * GPU handles gpu_split_pct% (cfg, default 80); CPU workers cover the rest
      * using cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
      * Workers are pinned to logical processors 0..n_cpu_assist-1 (P-cores). */
     {
-        SYSTEM_INFO sysinfo;
-        GetSystemInfo(&sysinfo);
-        int avail = (int)sysinfo.dwNumberOfProcessors - 2;
+        int avail = plat_cpu_count() - 2;
         if (avail < 1) avail = 1;
         if (avail > 8) avail = 8;
         n_cpu_assist = avail;
@@ -2402,7 +2393,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
             uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
 
             cpu_assist_ctxs   = (CpuWorkerCtx *)calloc(n_cpu_assist, sizeof(CpuWorkerCtx));
-            cpu_assist_handles = (HANDLE *)calloc(n_cpu_assist, sizeof(HANDLE));
+            cpu_assist_handles = (plat_thread_t *)calloc(n_cpu_assist, sizeof(plat_thread_t));
             if (cpu_assist_ctxs && cpu_assist_handles) {
                 for (int t = 0; t < n_cpu_assist; t++) {
                     cpu_assist_ctxs[t].engine        = engine;
@@ -2414,9 +2405,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                     cpu_assist_ctxs[t].cipher_packs  = host_cipher_packs;
                     cpu_assist_ctxs[t].payload_count = payload_limit;
                     cpu_assist_ctxs[t].mode_policy   = mode_policy;
-                    cpu_assist_handles[t] = (HANDLE)_beginthreadex(NULL, 0, cpu_4way_worker_proc,
-                                                                    &cpu_assist_ctxs[t], 0, NULL);
-                    if (!cpu_assist_handles[t]) { n_cpu_assist = t; break; }
+                    if (plat_thread_create(&cpu_assist_handles[t], cpu_4way_worker_proc,
+                                           &cpu_assist_ctxs[t]) != 0)
+                        { n_cpu_assist = t; break; }
                 }
                 total_keys = gpu_range; /* GPU only covers its share */
             } else {
@@ -2435,8 +2426,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed (scan reset)");
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
         /* Reset combined counter and GPU baseline so CPU+GPU deltas accumulate correctly */
-        InterlockedExchange64(&engine->keys_tested, 0LL);
-        InterlockedExchange64(&engine->gpu_keys_tested, 0LL);
+        plat_atomic64_store(&engine->keys_tested, 0LL);
+        plat_atomic64_store(&engine->gpu_keys_tested, 0LL);
         last_gpu_kt = 0;
     }
 
@@ -2446,7 +2437,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         int active = 0;
         int have_pending = 0;
         const int stop_sig = 1;             /* #6: hoisted — stable address for async memcpy */
-        DWORD last_checkpoint_ticks = GetTickCount(); /* #34: periodic checkpoint timer */
+        uint64_t last_checkpoint_ms = plat_ticks_ms(); /* #34: periodic checkpoint timer */
 
         /* Helper: poll GPU results into engine using pinned memory */
         #define POLL_GPU_RESULTS() do { \
@@ -2455,31 +2446,31 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 cudaMemcpyAsync(&h_poll->best_packed,  d_best_packed,  sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
                 { unsigned long long _gkt = h_poll->keys_tested; \
-                  InterlockedAdd64(&engine->keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
-                  InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_gkt - last_gpu_kt)); \
+                  plat_atomic64_add(&engine->keys_tested, (int64_t)(_gkt - last_gpu_kt)); \
+                  plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(_gkt - last_gpu_kt)); \
                   last_gpu_kt = _gkt; } \
                 if (h_poll->best_packed != 0ULL) { \
-                    EnterCriticalSection(&engine->lock); \
+                    plat_mutex_lock(&engine->lock); \
                     engine->best_score = (double)host_unpack_score(h_poll->best_packed); \
                     engine->best_key   = host_unpack_key(h_poll->best_packed); \
-                    LeaveCriticalSection(&engine->lock); \
+                    plat_mutex_unlock(&engine->lock); \
                 } \
             } else { \
                 unsigned long long _k = 0, _bp = 0; \
                 cudaMemcpyAsync(&_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaMemcpyAsync(&_bp, d_best_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost, query_stream); \
                 cudaStreamSynchronize(query_stream); \
-                { InterlockedAdd64(&engine->keys_tested, (LONG64)(_k - last_gpu_kt)); \
-                  InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(_k - last_gpu_kt)); \
+                { plat_atomic64_add(&engine->keys_tested, (int64_t)(_k - last_gpu_kt)); \
+                  plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(_k - last_gpu_kt)); \
                   last_gpu_kt = _k; } \
                 if (_bp != 0ULL) { \
-                    EnterCriticalSection(&engine->lock); \
+                    plat_mutex_lock(&engine->lock); \
                     engine->best_score = (double)host_unpack_score(_bp); \
                     engine->best_key   = host_unpack_key(_bp); \
-                    LeaveCriticalSection(&engine->lock); \
+                    plat_mutex_unlock(&engine->lock); \
                 } \
             } \
-            InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64()); \
+            plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms()); \
         } while(0)
 
         /* Helper: launch kernel on given stream.
@@ -2506,11 +2497,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
         for (offset = 0; offset < total_keys; offset += chunk_size) {
             /* Pause check */
-            while (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
-                WaitForSingleObject(engine->pause_event, INFINITE);
-                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+            while (plat_atomic32_load(&engine->paused) != 0) {
+                plat_event_wait(&engine->pause_event);
+                if (plat_atomic32_load(&engine->stop_requested) != 0) break;
             }
-            if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
+            if (plat_atomic32_load(&engine->stop_requested) != 0) {
                 cudaMemcpyAsync(d_stop_requested, &stop_sig, sizeof(int), cudaMemcpyHostToDevice, query_stream);
                 cudaStreamSynchronize(query_stream);
                 break;
@@ -2531,7 +2522,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
             if (have_pending) {
                 int other = 1 - active;
                 while (cudaStreamQuery(streams[other]) == cudaErrorNotReady) {
-                    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
+                    if (plat_atomic32_load(&engine->stop_requested) != 0) {
                         cudaMemcpyAsync(d_stop_requested, &stop_sig, sizeof(int), cudaMemcpyHostToDevice, query_stream);
                         cudaStreamSynchronize(query_stream);
                     }
@@ -2545,8 +2536,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
             /* #34: write checkpoint every 30 s so the search can be resumed */
             if (engine->progress_path[0] != '\0') {
-                DWORD now_ticks = GetTickCount();
-                if ((DWORD)(now_ticks - last_checkpoint_ticks) >= 30000U) {
+                uint64_t now_ms = plat_ticks_ms();
+                if (now_ms - last_checkpoint_ms >= 30000ULL) {
                     FILE *fp_ckpt = fopen(engine->progress_path, "wt");
                     if (fp_ckpt) {
                         fprintf(fp_ckpt, "offset=%llu\nend=%llu\n",
@@ -2554,7 +2545,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                                 (unsigned long long)(engine->cfg.start_key + total_keys - 1ULL));
                         fclose(fp_ckpt);
                     }
-                    last_checkpoint_ticks = now_ticks;
+                    last_checkpoint_ms = now_ms;
                 }
             }
         }
@@ -2572,8 +2563,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     /* Wait for CPU assist workers to finish */
     if (n_cpu_assist > 0 && cpu_assist_handles) {
-        WaitForMultipleObjects((DWORD)n_cpu_assist, cpu_assist_handles, TRUE, INFINITE);
-        for (int t = 0; t < n_cpu_assist; t++) CloseHandle(cpu_assist_handles[t]);
+        plat_threads_join(cpu_assist_handles, n_cpu_assist);
+        for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_assist_handles[t]);
     }
     free(cpu_assist_handles); cpu_assist_handles = NULL;
     free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
@@ -2583,21 +2574,21 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         unsigned long long final_k = 0, final_bp = 0;
         CUDA_CHECK(cudaMemcpy(&final_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
         CUDA_CHECK(cudaMemcpy(&final_bp, d_best_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final best_packed");
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(final_k - last_gpu_kt));
-        InterlockedAdd64(&engine->gpu_keys_tested, (LONG64)(final_k - last_gpu_kt));
+        plat_atomic64_add(&engine->keys_tested, (int64_t)(final_k - last_gpu_kt));
+        plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(final_k - last_gpu_kt));
         if (final_bp != 0ULL) {
-            EnterCriticalSection(&engine->lock);
+            plat_mutex_lock(&engine->lock);
             engine->best_score = (double)host_unpack_score(final_bp);
             engine->best_key   = host_unpack_key(final_bp);
-            LeaveCriticalSection(&engine->lock);
+            plat_mutex_unlock(&engine->lock);
         }
     }
 
-    if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
-        InterlockedExchange(&engine->search_completed, 1);
+    if (plat_atomic32_load(&engine->stop_requested) == 0) {
+        plat_atomic32_store(&engine->search_completed, 1);
         /* #34: search finished cleanly — delete the progress file */
         if (engine->progress_path[0] != '\0') {
-            DeleteFileA(engine->progress_path);
+            plat_delete_file(engine->progress_path);
             engine->progress_path[0] = '\0';
         }
     }
@@ -2605,8 +2596,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 cleanup:
     /* Stop and wait for CPU assist workers if still running (e.g. CUDA error path) */
     if (n_cpu_assist > 0 && cpu_assist_handles) {
-        WaitForMultipleObjects((DWORD)n_cpu_assist, cpu_assist_handles, TRUE, INFINITE);
-        for (int t = 0; t < n_cpu_assist; t++) CloseHandle(cpu_assist_handles[t]);
+        plat_threads_join(cpu_assist_handles, n_cpu_assist);
+        for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_assist_handles[t]);
         free(cpu_assist_handles); cpu_assist_handles = NULL;
         free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
     }
@@ -2619,11 +2610,11 @@ cleanup:
     if (compute_stream2) cudaStreamDestroy(compute_stream2);
     if (query_stream) cudaStreamDestroy(query_stream);
 
-    InterlockedExchange(&engine->cuda_stage, 3);
-    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
-    InterlockedExchange(&engine->running, 0);
-    SetEvent(engine->pause_event);
-    return 0;
+    plat_atomic32_store(&engine->cuda_stage, 3);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
+    plat_atomic32_store(&engine->running, 0);
+    plat_event_set(&engine->pause_event);
+    PLAT_THREAD_RETURN;
 }
 
 #undef CUDA_CHECK
@@ -2644,7 +2635,7 @@ static double score_candidate_host(
     const PayloadSet *payloads, int sample_lines,
     int sample_bytes, const unsigned char key[5]);
 
-static unsigned __stdcall cpu_worker_proc(void *arg)
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_worker_proc(void *arg)
 {
     CpuWorkerCtx *ctx = (CpuWorkerCtx *)arg;
     BruteforceEngine *engine = ctx->engine;
@@ -2652,19 +2643,17 @@ static unsigned __stdcall cpu_worker_proc(void *arg)
     uint64_t local_count = 0;
     double local_best_score = -DBL_MAX;
 
-    if (ctx->worker_index < 64) {
-        SetThreadIdealProcessor(GetCurrentThread(), (DWORD)ctx->worker_index);
-    }
+    plat_thread_set_ideal_processor(ctx->worker_index);
 
     for (k = ctx->start_key; k <= ctx->end_key; ++k) {
         unsigned char key_bytes[5];
         double score;
 
         if ((local_count & 0xFFFu) == 0) {
-            if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
-            if (InterlockedCompareExchange(&engine->paused, 0, 0) != 0) {
-                WaitForSingleObject(engine->pause_event, INFINITE);
-                if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+            if (plat_atomic32_load(&engine->stop_requested) != 0) break;
+            if (plat_atomic32_load(&engine->paused) != 0) {
+                plat_event_wait(&engine->pause_event);
+                if (plat_atomic32_load(&engine->stop_requested) != 0) break;
             }
         }
 
@@ -2674,65 +2663,52 @@ static unsigned __stdcall cpu_worker_proc(void *arg)
 
         if (score > local_best_score) {
             local_best_score = score;
-            EnterCriticalSection(&engine->lock);
+            plat_mutex_lock(&engine->lock);
             if (score > engine->best_score) {
                 engine->best_score = score;
                 engine->best_key = k;
             }
-            LeaveCriticalSection(&engine->lock);
+            plat_mutex_unlock(&engine->lock);
         }
 
         local_count++;
         if ((local_count & STOP_POLL_MASK) == 0) {
-            InterlockedAdd64(&engine->keys_tested, 1024);
+            plat_atomic64_add(&engine->keys_tested, 1024LL);
         }
 
         if (k == ctx->end_key) break;
     }
 
     if ((local_count & STOP_POLL_MASK) != 0) {
-        InterlockedAdd64(&engine->keys_tested, (LONG64)(local_count & STOP_POLL_MASK));
+        plat_atomic64_add(&engine->keys_tested, (int64_t)(local_count & STOP_POLL_MASK));
     }
 
-    if (InterlockedIncrement(&engine->finished_threads) == engine->cfg.thread_count) {
-        if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
-            InterlockedExchange(&engine->search_completed, 1);
+    if (plat_atomic32_inc(&engine->finished_threads) == engine->cfg.thread_count) {
+        if (plat_atomic32_load(&engine->stop_requested) == 0) {
+            plat_atomic32_store(&engine->search_completed, 1);
         }
-        InterlockedExchange(&engine->running, 0);
-        SetEvent(engine->pause_event);
+        plat_atomic32_store(&engine->running, 0);
+        plat_event_set(&engine->pause_event);
     }
 
-    return 0;
+    PLAT_THREAD_RETURN;
 }
 
 // ==== ORIGINAL HOST API EXPORTS (bruteforce.h) ====
 
 void bruteforce_engine_init(BruteforceEngine *engine)
 {
-    ZeroMemory(engine, sizeof(*engine));
-    InitializeCriticalSection(&engine->lock);
-    QueryPerformanceFrequency(&engine->qpc_freq);
-    engine->cuda_active = 0;
-    engine->cuda_device_name[0] = '\0';
-    engine->cuda_stage = 0;
-    engine->cuda_profile_cached = 0;
-    engine->cuda_tpb = 0;
-    engine->cuda_bpsm = 0;
-    engine->cuda_chunk_mult = 0;
-    engine->cuda_sm_count = 0;
-    engine->cuda_compute_major = 0;
-    engine->cuda_compute_minor = 0;
-    engine->cuda_last_update_ms = 0;
+    memset(engine, 0, sizeof(*engine));
+    plat_mutex_init(&engine->lock);
+    plat_hrfreq_init(&engine->qpc_freq);
+    engine->pause_event = plat_event_create(1); /* signaled — workers run immediately */
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)
 {
     bruteforce_stop(engine);
-    if (engine->pause_event != NULL) {
-        CloseHandle(engine->pause_event);
-        engine->pause_event = NULL;
-    }
-    DeleteCriticalSection(&engine->lock);
+    plat_event_destroy(&engine->pause_event);
+    plat_mutex_destroy(&engine->lock);
 }
 
 static void set_error(char *err, size_t err_len, const char *msg)
@@ -2749,7 +2725,7 @@ int bruteforce_start(
     char *err,
     size_t err_len)
 {
-    if (InterlockedCompareExchange(&engine->running, 0, 0) != 0) {
+    if (plat_atomic32_load(&engine->running) != 0) {
         set_error(err, err_len, g_lang.err_search_already_active);
         return 0;
     }
@@ -2791,7 +2767,6 @@ int bruteforce_start(
     cpu_fallback:
         {
             int t;
-            uintptr_t th;
             uint64_t total, chunk, rem, start;
             int n_threads = cfg->thread_count;
             if (n_threads <= 0 || n_threads > 64) n_threads = 1;
@@ -2803,15 +2778,9 @@ int bruteforce_start(
             if (engine->cfg.sample_lines <= 0 || (size_t)engine->cfg.sample_lines > payloads->count)
                 engine->cfg.sample_lines = (int)payloads->count;
 
-            /* Create pause event */
-            if (engine->pause_event != NULL) { CloseHandle(engine->pause_event); }
-            engine->pause_event = CreateEventA(NULL, TRUE, TRUE, NULL);
-            if (engine->pause_event == NULL) {
-                set_error(err, err_len, g_lang.err_pause_event_failed);
-                return 0;
-            }
+            plat_event_set(&engine->pause_event); /* ensure threads won't block initially */
 
-            engine->thread_handles = (HANDLE *)calloc((size_t)n_threads, sizeof(HANDLE));
+            engine->thread_handles = (plat_thread_t *)calloc((size_t)n_threads, sizeof(plat_thread_t));
             engine->workers = calloc((size_t)n_threads, sizeof(CpuWorkerCtx));
             if (engine->thread_handles == NULL || engine->workers == NULL) {
                 free(engine->thread_handles); engine->thread_handles = NULL;
@@ -2828,15 +2797,15 @@ int bruteforce_start(
             rem   = total % (uint64_t)n_threads;
             start = cfg->start_key;
 
-            InterlockedExchange64(&engine->keys_tested, 0);
-            InterlockedExchange(&engine->stop_requested, 0);
-            InterlockedExchange(&engine->paused, 0);
-            InterlockedExchange(&engine->finished_threads, 0);
-            InterlockedExchange(&engine->search_completed, 0);
+            plat_atomic64_store(&engine->keys_tested, 0LL);
+            plat_atomic32_store(&engine->stop_requested, 0);
+            plat_atomic32_store(&engine->paused, 0);
+            plat_atomic32_store(&engine->finished_threads, 0);
+            plat_atomic32_store(&engine->search_completed, 0);
             engine->best_key = cfg->start_key;
             engine->best_score = -DBL_MAX;
-            QueryPerformanceCounter(&engine->qpc_start);
-            InterlockedExchange(&engine->running, 1);
+            plat_hrtimer_now(&engine->qpc_start);
+            plat_atomic32_store(&engine->running, 1);
 
             /* Dictionary phase: test common/default keys before CPU scan */
             run_dictionary_phase(engine);
@@ -2849,22 +2818,20 @@ int bruteforce_start(
                 workers[t].worker_index = t;
                 start += this_count;
 
-                th = _beginthreadex(NULL, 0, cpu_worker_proc, &workers[t], 0, NULL);
-                if (th == 0) {
+                if (plat_thread_create(&engine->thread_handles[t], cpu_worker_proc, &workers[t]) != 0) {
                     int j;
-                    InterlockedExchange(&engine->running, 0);
-                    InterlockedExchange(&engine->stop_requested, 1);
-                    SetEvent(engine->pause_event);
+                    plat_atomic32_store(&engine->running, 0);
+                    plat_atomic32_store(&engine->stop_requested, 1);
+                    plat_event_set(&engine->pause_event);
                     for (j = 0; j < t; ++j) {
-                        WaitForSingleObject(engine->thread_handles[j], INFINITE);
-                        CloseHandle(engine->thread_handles[j]);
+                        plat_thread_join(engine->thread_handles[j]);
+                        plat_thread_close(engine->thread_handles[j]);
                     }
                     free(engine->thread_handles); engine->thread_handles = NULL;
                     free(engine->workers);        engine->workers = NULL;
                     set_error(err, err_len, g_lang.err_create_cpu_threads);
                     return 0;
                 }
-                engine->thread_handles[t] = (HANDLE)th;
             }
         }
         return 1;
@@ -2925,147 +2892,132 @@ int bruteforce_start(
     }
     engine->payloads = payloads;
 
-    if (engine->pause_event != NULL) {
-        CloseHandle(engine->pause_event);
-    }
-    engine->pause_event = CreateEventA(NULL, TRUE, TRUE, NULL);
+    plat_event_set(&engine->pause_event); /* ensure threads won't block initially */
 
-    InterlockedExchange64(&engine->keys_tested, 0);
-    InterlockedExchange(&engine->stop_requested, 0);
-    InterlockedExchange(&engine->paused, 0);
-    InterlockedExchange(&engine->search_completed, 0);
+    plat_atomic64_store(&engine->keys_tested, 0LL);
+    plat_atomic32_store(&engine->stop_requested, 0);
+    plat_atomic32_store(&engine->paused, 0);
+    plat_atomic32_store(&engine->search_completed, 0);
     engine->best_key = engine->cfg.start_key;
     engine->best_score = -DBL_MAX;
-    InterlockedExchange(&engine->cuda_stage, 0);
-    InterlockedExchange(&engine->cuda_profile_cached, 0);
-    InterlockedExchange(&engine->cuda_tpb, 0);
-    InterlockedExchange(&engine->cuda_bpsm, 0);
-    InterlockedExchange(&engine->cuda_chunk_mult, 0);
-    InterlockedExchange(&engine->cuda_sm_count, 0);
-    InterlockedExchange(&engine->cuda_compute_major, 0);
-    InterlockedExchange(&engine->cuda_compute_minor, 0);
-    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+    plat_atomic32_store(&engine->cuda_stage, 0);
+    plat_atomic32_store(&engine->cuda_profile_cached, 0);
+    plat_atomic32_store(&engine->cuda_tpb, 0);
+    plat_atomic32_store(&engine->cuda_bpsm, 0);
+    plat_atomic32_store(&engine->cuda_chunk_mult, 0);
+    plat_atomic32_store(&engine->cuda_sm_count, 0);
+    plat_atomic32_store(&engine->cuda_compute_major, 0);
+    plat_atomic32_store(&engine->cuda_compute_minor, 0);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
 
     engine->cuda_error[0] = '\0';
-    QueryPerformanceCounter(&engine->qpc_start);
+    plat_hrtimer_now(&engine->qpc_start);
 
     /* Allocate handle array before launching thread so the handle is never lost. */
-    engine->thread_handles = (HANDLE *)calloc(1, sizeof(HANDLE));
+    engine->thread_handles = (plat_thread_t *)calloc(1, sizeof(plat_thread_t));
     if (engine->thread_handles == NULL) {
         set_error(err, err_len, g_lang.err_oom_handles);
         return 0;
     }
 
-    InterlockedExchange(&engine->running, 1);
+    plat_atomic32_store(&engine->running, 1);
 
-    uintptr_t th = _beginthreadex(NULL, 0, cuda_launcher_thread, engine, 0, NULL);
-    if (th == 0) {
-        InterlockedExchange(&engine->running, 0);
+    if (plat_thread_create(&engine->thread_handles[0], cuda_launcher_thread, engine) != 0) {
+        plat_atomic32_store(&engine->running, 0);
         free(engine->thread_handles);
         engine->thread_handles = NULL;
         set_error(err, err_len, g_lang.err_create_cuda_thread);
         return 0;
     }
-    engine->thread_handles[0] = (HANDLE)th;
 
     return 1;
 }
 
 void bruteforce_pause(BruteforceEngine *engine)
 {
-    if (InterlockedCompareExchange(&engine->running, 0, 0) == 0) return;
-    InterlockedExchange(&engine->paused, 1);
-    ResetEvent(engine->pause_event);
+    if (plat_atomic32_load(&engine->running) == 0) return;
+    plat_atomic32_store(&engine->paused, 1);
+    plat_event_reset(&engine->pause_event);
 }
 
 void bruteforce_resume(BruteforceEngine *engine)
 {
-    if (InterlockedCompareExchange(&engine->running, 0, 0) == 0) return;
-    InterlockedExchange(&engine->paused, 0);
-    SetEvent(engine->pause_event);
+    if (plat_atomic32_load(&engine->running) == 0) return;
+    plat_atomic32_store(&engine->paused, 0);
+    plat_event_set(&engine->pause_event);
 }
 
 void bruteforce_stop(BruteforceEngine *engine)
 {
     if (engine->thread_handles == NULL) {
-        InterlockedExchange(&engine->running, 0);
+        plat_atomic32_store(&engine->running, 0);
         return;
     }
 
-    InterlockedExchange(&engine->stop_requested, 1);
-    InterlockedExchange(&engine->paused, 0);
-    SetEvent(engine->pause_event);
+    plat_atomic32_store(&engine->stop_requested, 1);
+    plat_atomic32_store(&engine->paused, 0);
+    plat_event_set(&engine->pause_event);
 
     if (engine->workers != NULL) {
         /* CPU fallback mode: wait on all worker threads */
         int t;
         for (t = 0; t < engine->cfg.thread_count; ++t) {
-            WaitForSingleObject(engine->thread_handles[t], INFINITE);
-            CloseHandle(engine->thread_handles[t]);
+            plat_thread_join(engine->thread_handles[t]);
+            plat_thread_close(engine->thread_handles[t]);
         }
         free(engine->workers);
         engine->workers = NULL;
     } else {
         /* GPU mode: single CUDA launcher thread */
-        WaitForSingleObject(engine->thread_handles[0], INFINITE);
-        CloseHandle(engine->thread_handles[0]);
+        plat_thread_join(engine->thread_handles[0]);
+        plat_thread_close(engine->thread_handles[0]);
     }
 
     free(engine->thread_handles);
     engine->thread_handles = NULL;
 
-    InterlockedExchange(&engine->running, 0);
-}
-
-static uint64_t read_u64(const volatile LONG64 *value)
-{
-    return (uint64_t)InterlockedCompareExchange64((volatile LONG64 *)value, 0, 0);
-}
-
-static LONG read_long(const volatile LONG *value)
-{
-    return InterlockedCompareExchange((volatile LONG *)value, 0, 0);
+    plat_atomic32_store(&engine->running, 0);
 }
 
 static void enter_snapshot_lock(const BruteforceEngine *engine)
 {
-    /* Taking a Windows critical section is a logically read-only snapshot operation. */
-    EnterCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+    /* Logically read-only, but mutex guarantees consistency with worker threads. */
+    plat_mutex_lock((plat_mutex_t *)&engine->lock);
 }
 
 static void leave_snapshot_lock(const BruteforceEngine *engine)
 {
-    LeaveCriticalSection((LPCRITICAL_SECTION)&engine->lock);
+    plat_mutex_unlock((plat_mutex_t *)&engine->lock);
 }
 
 void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot *out)
 {
-    LARGE_INTEGER now;
+    plat_hrtimer_t now;
     double elapsed;
     uint64_t keys;
     uint64_t total;
 
-    keys = read_u64(&engine->keys_tested);
+    keys = (uint64_t)plat_atomic64_load((plat_atomic64_t *)&engine->keys_tested);
     total = 0;
     if (engine->cfg.end_key >= engine->cfg.start_key) {
         total = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
     }
 
-    QueryPerformanceCounter(&now);
-    elapsed = (double)(now.QuadPart - engine->qpc_start.QuadPart) / (double)engine->qpc_freq.QuadPart;
+    plat_hrtimer_now(&now);
+    elapsed = plat_hrtimer_elapsed_s(&engine->qpc_start, &now, &engine->qpc_freq);
     if (elapsed < 0.0) elapsed = 0.0;
 
     out->keys_tested = keys;
-    out->gpu_keys_tested = read_u64(&engine->gpu_keys_tested);
+    out->gpu_keys_tested = (uint64_t)plat_atomic64_load((plat_atomic64_t *)&engine->gpu_keys_tested);
     out->total_keys = total;
     enter_snapshot_lock(engine);
     out->best_key = engine->best_key;
     out->best_score = engine->best_score;
     leave_snapshot_lock(engine);
     out->elapsed_seconds = elapsed;
-    out->running = read_long(&engine->running);
-    out->paused = read_long(&engine->paused);
-    out->finished = read_long(&engine->search_completed);
+    out->running  = (int)plat_atomic32_load((plat_atomic32_t *)&engine->running);
+    out->paused   = (int)plat_atomic32_load((plat_atomic32_t *)&engine->paused);
+    out->finished = (int)plat_atomic32_load((plat_atomic32_t *)&engine->search_completed);
 
     if (elapsed > 0.0) out->keys_per_second = (double)keys / elapsed;
     else out->keys_per_second = 0.0;
@@ -3848,26 +3800,26 @@ static void run_dictionary_phase(BruteforceEngine *engine)
     int sample_lines = engine->cfg.sample_lines;
     int sample_bytes = engine->cfg.sample_bytes;
 
-    InterlockedExchange(&engine->cuda_stage, 4);
-    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+    plat_atomic32_store(&engine->cuda_stage, 4);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
 
     for (i = 0; i < S_DICT_KEY_COUNT; ++i) {
         unsigned char key5[5];
         double score;
 
-        if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
+        if (plat_atomic32_load(&engine->stop_requested) != 0) break;
 
         key_to_5bytes_cpu(s_dict_keys[i], key5);
         score = score_candidate_host(engine->payloads, sample_lines, sample_bytes, key5);
 
-        EnterCriticalSection(&engine->lock);
+        plat_mutex_lock(&engine->lock);
         if (score > engine->best_score) {
             engine->best_score = score;
             engine->best_key   = s_dict_keys[i];
         }
-        LeaveCriticalSection(&engine->lock);
+        plat_mutex_unlock(&engine->lock);
     }
 
-    InterlockedExchange(&engine->cuda_stage, 0);
-    InterlockedExchange64(&engine->cuda_last_update_ms, (LONG64)GetTickCount64());
+    plat_atomic32_store(&engine->cuda_stage, 0);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
 }

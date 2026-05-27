@@ -26,9 +26,17 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <windows.h>
-
+#include "platform.h"
 #include "payload_io.h"
+
+/* Maximum path length for the progress sidecar file */
+#ifndef PLAT_MAX_PATH
+#  if defined(_WIN32)
+#    define PLAT_MAX_PATH 260
+#  else
+#    define PLAT_MAX_PATH 4096
+#  endif
+#endif
 
 typedef struct {
     uint64_t start_key;
@@ -57,38 +65,38 @@ typedef struct BruteforceEngine {
     BruteforceConfig cfg;
     const PayloadSet *payloads;
 
-    HANDLE *thread_handles;
-    void *workers;
-    HANDLE pause_event;
+    plat_thread_t *thread_handles;
+    void          *workers;
+    plat_event_t   pause_event;
 
-    CRITICAL_SECTION lock;
-    volatile LONG running;
-    volatile LONG paused;
-    volatile LONG stop_requested;
-    volatile LONG finished_threads;
-    volatile LONG search_completed;
-    volatile LONG64 keys_tested;
-    volatile LONG64 gpu_keys_tested; /* Keys tested by CUDA GPU only */
+    plat_mutex_t    lock;
+    plat_atomic32_t running;
+    plat_atomic32_t paused;
+    plat_atomic32_t stop_requested;
+    plat_atomic32_t finished_threads;
+    plat_atomic32_t search_completed;
+    plat_atomic64_t keys_tested;
+    plat_atomic64_t gpu_keys_tested; /* Keys tested by CUDA/HIP GPU only */
 
     uint64_t best_key;
-    double best_score;
+    double   best_score;
 
-    LARGE_INTEGER qpc_start;
-    LARGE_INTEGER qpc_freq;
+    plat_hrtimer_t qpc_start;
+    plat_hrfreq_t  qpc_freq;
 
-    char cuda_error[256];  /* Last CUDA error message, empty if OK */
-    char cuda_device_name[128]; /* Active CUDA device name if running on GPU */
-    char progress_path[MAX_PATH]; /* Path to .progress sidecar file, empty if not used */
-    volatile LONG cuda_active;  /* 1 when CUDA backend is active */
-    volatile LONG cuda_stage;   /* 0=init, 1=autotune, 2=scanning, 3=done */
-    volatile LONG cuda_profile_cached; /* 1 if profile loaded from disk */
-    volatile LONG cuda_tpb;
-    volatile LONG cuda_bpsm;
-    volatile LONG cuda_chunk_mult;
-    volatile LONG cuda_sm_count;
-    volatile LONG cuda_compute_major;
-    volatile LONG cuda_compute_minor;
-    volatile LONG64 cuda_last_update_ms;
+    char cuda_error[256];              /* Last GPU error message, empty if OK */
+    char cuda_device_name[128];        /* Active GPU device name */
+    char progress_path[PLAT_MAX_PATH]; /* Path to .progress sidecar file, empty if unused */
+    plat_atomic32_t cuda_active;       /* 1 when GPU backend is running */
+    plat_atomic32_t cuda_stage;        /* 0=init, 1=autotune, 2=scanning, 3=done */
+    plat_atomic32_t cuda_profile_cached;
+    plat_atomic32_t cuda_tpb;
+    plat_atomic32_t cuda_bpsm;
+    plat_atomic32_t cuda_chunk_mult;
+    plat_atomic32_t cuda_sm_count;
+    plat_atomic32_t cuda_compute_major;
+    plat_atomic32_t cuda_compute_minor;
+    plat_atomic64_t cuda_last_update_ms;
 } BruteforceEngine;
 
 #ifdef __cplusplus

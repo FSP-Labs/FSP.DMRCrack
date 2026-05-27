@@ -1426,9 +1426,9 @@ static void refresh_snapshot_and_ui(void)
     bruteforce_get_snapshot(&g_app.engine, &g_app.snapshot);
 
     /* Compute instantaneous rates from delta between ticks */
-    if (g_app.last_snap_time.QuadPart > 0 && g_app.engine.qpc_freq.QuadPart > 0) {
+    if (g_app.last_snap_time.QuadPart > 0 && g_app.engine.qpc_freq.val.QuadPart > 0) {
         double dt = (double)(now.QuadPart - g_app.last_snap_time.QuadPart)
-                  / (double)g_app.engine.qpc_freq.QuadPart;
+                  / (double)g_app.engine.qpc_freq.val.QuadPart;
         if (dt > 0.05) {  /* ignore sub-50ms ticks (spurious repaints) */
             uint64_t dk  = g_app.snapshot.keys_tested     - g_app.last_snap_keys;
             uint64_t dgk = g_app.snapshot.gpu_keys_tested - g_app.last_snap_gpu_keys;
