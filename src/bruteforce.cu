@@ -282,7 +282,6 @@ __device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
         unsigned char t = ctx->S[i];
         ctx->S[i] = ctx->S[j];
         ctx->S[j] = t;
-        // Removed unnecessary S-box read
     }
     ctx->i = i;
     ctx->j = j;
@@ -1125,12 +1124,12 @@ void bruteforce_kernel(
         unsigned char key[5];
         key_to_5bytes_dev(current_key, key);
         float score = -3.402823e38f;
-        // CORRECT PIPELINE PATH (mode_policy >= 2: payloads have MI+RC4)
+        // KMI9 path: payloads carry MI + RC4 algid, scored per-superframe
         if (mode_policy >= 2) {
             float total_score = 0.0f;
             int processed_bursts = 0;
             int pruned = 0;
-            /* Bit-frequency accumulators (Mejora.md §8.1) */
+            /* Bit-frequency accumulators: how often each of the 24 AMBE bits is 1 across all frames */
             int bcnt[24];
             #pragma unroll
             for (int b = 0; b < 24; b++) bcnt[b] = 0;
@@ -2102,11 +2101,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMemcpyToSymbol(cipher_packs): %s", cudaGetErrorString(cu_err));
         goto cleanup;
     }
-// DOCUMENTATION: burst_pos alignment issue
-// Note: The kernel assumes the first payload in the .bin corresponds to burst_pos=0 of a superframe.
-// If the file is not aligned, the drop value will be incorrect and the score will not be valid.
-// For maximum robustness, it is recommended to validate alignment on the host and/or add a burst_pos_start field to PayloadItem.
-
+    /* NOTE: the kernel assumes payload[0] is burst_pos=0 of a superframe. A misaligned
+     * .bin file will produce wrong drop values and garbage scores. Validating alignment
+     * on the host (or adding a burst_pos_start field to PayloadItem) would fix this. */
     cu_err = cudaMemcpyToSymbol(d_const_mi, host_mi, sizeof(host_mi));
     if (cu_err != cudaSuccess) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMemcpyToSymbol(mi): %s", cudaGetErrorString(cu_err));
@@ -2123,7 +2120,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         goto cleanup;
     }
 
-    /* Precompute absolute screening thresholds (Change 1: hashcat-style early reject) */
+    /* Precompute absolute screening thresholds (hashcat-style early reject) */
     {
         float host_abs_floor[MAX_CONST_LINES + 1];
         host_abs_floor[0] = -FLT_MAX;
@@ -2198,9 +2195,9 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaStreamCreate query: %s", cudaGetErrorString(cu_err));
         goto cleanup;
     }
-    /* Second compute stream for double-buffered dispatch (Change 6) */
+    /* Second compute stream for double-buffered dispatch */
     CUDA_CHECK(cudaStreamCreateWithFlags(&compute_stream2, cudaStreamNonBlocking), "cudaStreamCreate compute2");
-    /* Pinned host buffer for truly async D2H transfers (Change 5) */
+    /* Pinned host buffer for async D2H transfers in the polling loop */
     if (cudaHostAlloc(&h_poll, sizeof(*h_poll), cudaHostAllocDefault) != cudaSuccess) {
         h_poll = NULL;  /* fallback to stack vars in polling loop */
     }
@@ -2443,7 +2440,7 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         last_gpu_kt = 0;
     }
 
-    /* === Double-buffer multi-stream dispatch (Change 6) + pinned polling (Change 5) === */
+    /* === Double-buffer multi-stream dispatch + pinned async polling === */
     {
         cudaStream_t streams[2] = { compute_stream, compute_stream2 };
         int active = 0;
@@ -3308,7 +3305,7 @@ static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t
  *
  * out_sf0_bits24: if non-NULL, receives the 24 decrypted AMBE bits (C0+C1)
  * from sub-frame 0. Used by score_candidate_host for bit-frequency chi² scoring
- * (Mejora.md §8.1 / §9.2 — Bit-frequency primary metric, Z≈335 with 126 payloads).
+ * Bit-frequency chi² is the primary metric: Z≈335 with 126 payloads.
  */
 static double score_burst_correct_host(
     const unsigned char *payload33,
@@ -3424,11 +3421,9 @@ static double score_candidate_host(
         }
     }
 
-    /* Correct pipeline for mode_policy >= 2.
-     * Dual metric (Mejora.md §8.1):
+    /* KMI9 path (mode_policy >= 2): two metrics in a single pass —
      *   1. Inter-frame Hamming on C0+C1 (24 bits), Z≈38 with 126 payloads.
-     *   2. Bit-frequency chi-squared across all frames, Z≈335 with 126 payloads.
-     * Both are computed in a single pass through the payloads. */
+     *   2. Bit-frequency chi² across all frames, Z≈335 with 126 payloads. */
     if (mode_policy >= 2) {
         long bit_counts[24];
         int n_freq = 0, b;

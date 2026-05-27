@@ -67,7 +67,6 @@
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
 
-/* --- Dark theme colors --- */
 /* --- Dark theme colors (Operator Dashboard) --- */
 #define CLR_HEADER       RGB(20,  20,  21)
 #define CLR_BG           RGB(26,  26,  27)
