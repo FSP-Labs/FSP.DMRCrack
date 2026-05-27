@@ -1543,6 +1543,10 @@ typedef struct {
     int chunk_mult;
 } CudaLaunchProfile;
 
+/* Bump this when the kernel changes enough to invalidate old tuning profiles.
+ * Stale .cfg files (different VER) are deleted automatically on load. */
+#define CUDA_PROFILE_VERSION 1
+
 static void build_tune_profile_path(const cudaDeviceProp *prop, int strict_mode, char *out_path, size_t out_len)
 {
     /* Include SM count so GPUs of the same compute capability but different
@@ -1565,6 +1569,14 @@ static int load_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode,
     fp = fopen(path, "rt");
     if (fp == NULL) return 0;
 
+    {
+        int ver = 0;
+        if (fscanf(fp, "VER=%d\n", &ver) != 1 || ver != CUDA_PROFILE_VERSION) {
+            fclose(fp);
+            DeleteFileA(path); /* stale profile — delete so autotune re-runs */
+            return 0;
+        }
+    }
     if (fscanf(fp, "TPB=%d\nBPSM=%d\nCHUNK=%d\n", &tpb, &bpsm, &chunk) != 3) {
         fclose(fp);
         return 0;
@@ -1592,7 +1604,8 @@ static void save_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode
     fp = fopen(path, "wt");
     if (fp == NULL) return;
 
-    fprintf(fp, "TPB=%d\nBPSM=%d\nCHUNK=%d\n",
+    fprintf(fp, "VER=%d\nTPB=%d\nBPSM=%d\nCHUNK=%d\n",
+            CUDA_PROFILE_VERSION,
             profile->threads_per_block,
             profile->blocks_per_sm,
             profile->chunk_mult);
@@ -2435,6 +2448,8 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
         cudaStream_t streams[2] = { compute_stream, compute_stream2 };
         int active = 0;
         int have_pending = 0;
+        const int stop_sig = 1;             /* #6: hoisted — stable address for async memcpy */
+        DWORD last_checkpoint_ticks = GetTickCount(); /* #34: periodic checkpoint timer */
 
         /* Helper: poll GPU results into engine using pinned memory */
         #define POLL_GPU_RESULTS() do { \
@@ -2499,7 +2514,6 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) break;
             }
             if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
-                int stop_sig = 1;
                 cudaMemcpyAsync(d_stop_requested, &stop_sig, sizeof(int), cudaMemcpyHostToDevice, query_stream);
                 cudaStreamSynchronize(query_stream);
                 break;
@@ -2521,7 +2535,6 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
                 int other = 1 - active;
                 while (cudaStreamQuery(streams[other]) == cudaErrorNotReady) {
                     if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) != 0) {
-                        int stop_sig = 1;
                         cudaMemcpyAsync(d_stop_requested, &stop_sig, sizeof(int), cudaMemcpyHostToDevice, query_stream);
                         cudaStreamSynchronize(query_stream);
                     }
@@ -2532,6 +2545,21 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
             have_pending = 1;
             active = 1 - active;
+
+            /* #34: write checkpoint every 30 s so the search can be resumed */
+            if (engine->progress_path[0] != '\0') {
+                DWORD now_ticks = GetTickCount();
+                if ((DWORD)(now_ticks - last_checkpoint_ticks) >= 30000U) {
+                    FILE *fp_ckpt = fopen(engine->progress_path, "wt");
+                    if (fp_ckpt) {
+                        fprintf(fp_ckpt, "offset=%llu\nend=%llu\n",
+                                (unsigned long long)(engine->cfg.start_key + offset),
+                                (unsigned long long)(engine->cfg.start_key + total_keys - 1ULL));
+                        fclose(fp_ckpt);
+                    }
+                    last_checkpoint_ticks = now_ticks;
+                }
+            }
         }
 
         /* Wait for last chunk(s), then read final GPU key/score counters.
@@ -2570,6 +2598,11 @@ static unsigned __stdcall cuda_launcher_thread(void *arg)
 
     if (InterlockedCompareExchange(&engine->stop_requested, 0, 0) == 0) {
         InterlockedExchange(&engine->search_completed, 1);
+        /* #34: search finished cleanly — delete the progress file */
+        if (engine->progress_path[0] != '\0') {
+            DeleteFileA(engine->progress_path);
+            engine->progress_path[0] = '\0';
+        }
     }
 
 cleanup:

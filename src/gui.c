@@ -1562,6 +1562,33 @@ static int start_bruteforce(HWND hwnd)
       cfg.sample_bytes = (ml >= 33) ? 33 : 27;
     }
 
+    /* #34: checkpoint/resume — check for a .progress sidecar file */
+    {
+        char progress_path[MAX_PATH];
+        snprintf(progress_path, sizeof(progress_path), "%s.progress", g_app.loaded_file);
+        FILE *fp_ck = fopen(progress_path, "rt");
+        if (fp_ck) {
+            unsigned long long saved_offset = 0, saved_end = 0;
+            int ok = (fscanf(fp_ck, "offset=%llu\nend=%llu\n", &saved_offset, &saved_end) == 2);
+            fclose(fp_ck);
+            if (ok
+                && saved_end  == (unsigned long long)cfg.end_key
+                && saved_offset > (unsigned long long)cfg.start_key
+                && saved_offset < (unsigned long long)cfg.end_key) {
+                char resume_msg[320];
+                snprintf(resume_msg, sizeof(resume_msg),
+                         "A previous search was interrupted at key %010llX.\n"
+                         "Resume from that point? (\"No\" restarts from the beginning)",
+                         saved_offset);
+                if (MessageBoxA(hwnd, resume_msg, APP_TITLE, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                    cfg.start_key = (uint64_t)saved_offset;
+                }
+            }
+        }
+        /* Give the CUDA thread the path so it can write periodic checkpoints */
+        strcpy_s(g_app.engine.progress_path, sizeof(g_app.engine.progress_path), progress_path);
+    }
+
     if (!bruteforce_start(&g_app.engine, &cfg, &g_app.payloads, err, sizeof(err))) {
         MessageBoxA(hwnd, err, APP_TITLE, MB_ICONERROR);
         return 0;

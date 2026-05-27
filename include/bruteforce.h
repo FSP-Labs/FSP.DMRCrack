@@ -78,6 +78,7 @@ typedef struct BruteforceEngine {
 
     char cuda_error[256];  /* Last CUDA error message, empty if OK */
     char cuda_device_name[128]; /* Active CUDA device name if running on GPU */
+    char progress_path[MAX_PATH]; /* Path to .progress sidecar file, empty if not used */
     volatile LONG cuda_active;  /* 1 when CUDA backend is active */
     volatile LONG cuda_stage;   /* 0=init, 1=autotune, 2=scanning, 3=done */
     volatile LONG cuda_profile_cached; /* 1 if profile loaded from disk */
