@@ -83,9 +83,8 @@ else()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    # Disable CMake's automatic arch-flag generation; we manage --generate-code
-    # flags explicitly below, gated on the detected CUDA compiler version to
-    # avoid passing unsupported SM targets to older nvcc installs.
+    # Disable CMake's automatic arch-flag generation; we supply all -gencode
+    # flags explicitly below, gated on the CUDA version.
     set(CMAKE_CUDA_ARCHITECTURES OFF)
 
     add_executable(dmrcrack ${SOURCES_COMMON})
@@ -95,51 +94,46 @@ else()
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
     )
 
-    # sm_75 (Turing) and sm_86 (Ampere) — supported since CUDA 10.0 / 11.1
+    # Use -gencode=arch=...,code=... (single token, no space) so CMake does not
+    # inadvertently quote the flag as one shell word when generating Makefiles
+    # on Linux, which would make nvcc reject it with "single input file" error.
+
+    # sm_75 (Turing) and sm_86 (Ampere) — always included
     target_compile_options(dmrcrack PRIVATE
-        $<$<COMPILE_LANGUAGE:CUDA>:
-            -O3
-            --generate-code arch=compute_75,code=sm_75
-            --generate-code arch=compute_86,code=sm_86
-        >
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_75,code=sm_75>
+        $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_86,code=sm_86>
     )
 
     # sm_89 (Ada Lovelace, RTX 4xxx) — requires CUDA 11.8+
     if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:
-                --generate-code arch=compute_89,code=sm_89
-            >
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_89,code=sm_89>
         )
     endif()
 
     # sm_100 (Blackwell) — requires CUDA 12.8+
     if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:
-                --generate-code arch=compute_100,code=sm_100
-            >
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_100,code=sm_100>
         )
     endif()
 
-    # PTX fallback for future GPUs via JIT (highest supported arch)
+    # PTX fallback: JIT-compile for future GPU generations
     if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_100,code=compute_100>)
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_100,code=compute_100>)
     elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_89,code=compute_89>)
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_89,code=compute_89>)
     else()
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:--generate-code arch=compute_86,code=compute_86>)
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_86,code=compute_86>)
     endif()
 
-    # Windows-only MSVC host-compiler flags — gated explicitly to avoid passing
-    # MSVC-style /flags to gcc/clang on Linux builds.
+    # Windows-only MSVC host-compiler flags — gated to avoid breaking gcc on Linux
     target_compile_options(dmrcrack PRIVATE
-        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${WIN32}>>:
-            -Xcompiler /W4,/D_CRT_SECURE_NO_WARNINGS,/DWIN32,/D_WINDOWS
-        >
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${WIN32}>>:-Xcompiler /W4,/D_CRT_SECURE_NO_WARNINGS,/DWIN32,/D_WINDOWS>
     )
 
     target_link_libraries(dmrcrack PRIVATE CUDA::cudart_static)

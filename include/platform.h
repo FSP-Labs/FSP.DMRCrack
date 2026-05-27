@@ -187,6 +187,11 @@ static inline void plat_delete_file(const char *path) { DeleteFileA(path); }
 
 #else  /* ── POSIX (Linux, macOS) ────────────────────────────────────── */
 
+/* Required for cpu_set_t, CPU_ZERO/SET, pthread_setaffinity_np on Linux */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
