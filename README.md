@@ -11,6 +11,8 @@ FSP.DMRCrack performs exhaustive 40-bit RC4 key search against captured DMR Enha
 
 > **[Download the latest installer →](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)**
 
+> **Use on systems you own or have explicit written permission to test. Unauthorized interception of radio communications is illegal in most jurisdictions.**
+
 ---
 
 ## Use case
