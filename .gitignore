@@ -46,6 +46,14 @@ env/
 # Test data (may contain captured radio traffic — do not publish)
 test/
 
+# Claude Code
+.claude/settings.local.json
+
+# Temporary build scripts and logs
+run_build.ps1
+build_output.txt
+_build_tmp.bat
+
 # Editor / IDE
 .vs/
 *.suo
