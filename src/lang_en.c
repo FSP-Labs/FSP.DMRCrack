@@ -41,6 +41,10 @@ const Lang g_lang_en = {
     .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
     .tile_score_fmt           = "Score  %.2f",
     .tile_progress_meta_fmt   = "%s keys   \xb7   ETA  %s   \xb7   elapsed  %s",
+    .empty_hint               = "Load a .bin or capture live, then press Start",
+    .status_idle              = "Idle",
+    .status_searching         = "Searching...",
+    .graph_waiting            = "waiting for data",
     /* KPA badge */
     .kpa_silence_fmt          = "KPA: %u silence frames",
     /* Status strip */
@@ -90,6 +94,32 @@ const Lang g_lang_en = {
     .lbl_empty_log_no_output   = "(empty log \x97 dsd-fme produced no output)",
     .err_py_script_missing     = "Error: missing tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error loading generated BIN file",
+
+    /* ---- Listen: decrypt recovered audio to WAV ---- */
+    .btn_listen                 = "Listen",
+    .status_decrypting          = "Decrypting audio with DSD-FME...",
+    .err_listen_already_running = "Decryption already in progress",
+    .err_listen_thread          = "Error creating decryption thread",
+    .err_listen_no_source       = "Select the source WAV (audio field) to play decrypted audio",
+    .err_listen_no_key          = "No recovered key yet - run a search first",
+    .msg_listen_ok_fmt          = "Decrypted audio: %s",
+
+    /* ---- Live capture (RTL-SDR, unattended supervised) ---- */
+    .btn_capture_start          = "Live capture",
+    .btn_capture_stop           = "Stop capture",
+    .err_capture_no_spec        = "Enter an RTL-SDR spec in the Audio field, e.g. rtl:0:451.2M:22",
+    .err_capture_launch         = "Could not start live capture (check DSD-FME / RTL-SDR)",
+    .cap_sync_ok                = "signal OK",
+    .cap_sync_none              = "no signal",
+    .cap_status_fmt             = "Live capture | %s | %zu encrypted frames | %s",
+    .cap_target_fmt             = "Target reached (%zu frames) - starting crack",
+    .cap_dlg_title              = "Live capture - RTL-SDR",
+    .cap_lbl_freq               = "Frequency (e.g. 451.2M) - or .wav path to dry-run:",
+    .cap_lbl_dev                = "Device index:",
+    .cap_lbl_gain               = "Gain (0 = AGC):",
+    .cap_lbl_ppm                = "PPM correction:",
+    .cap_btn_ok                 = "Start",
+    .cap_btn_cancel             = "Cancel",
 
     /* ---- Brute-force validation errors ---- */
     .err_no_bin_selected  = "Select a .bin payload file first",
@@ -163,9 +193,9 @@ const Lang g_lang_en = {
 
     /* ---- Help dialog ---- */
     .btn_help  = "Help",
-    .help_title = "DMRCrack — Quick-Start Guide",
+    .help_title = "DMRCrack - Quick-Start Guide",
     .help_content =
-"STEP 1 — CAPTURE AUDIO WITH SDR#\r\n"
+"STEP 1 - CAPTURE AUDIO WITH SDR#\r\n"
 "=================================\r\n"
 "\r\n"
 "  1. Open SDR# and connect to your SDR device.\r\n"
@@ -187,7 +217,7 @@ const Lang g_lang_en = {
 "    SDR++: De-emphasis = NONE.  GQRX: 'No de-emphasis'.\r\n"
 "\r\n"
 "\r\n"
-"STEP 2 — DEMODULATE\r\n"
+"STEP 2 - DEMODULATE\r\n"
 "====================\r\n"
 "\r\n"
 "  1. Click 'Browse WAV...' and select the .wav file.\r\n"
@@ -196,7 +226,7 @@ const Lang g_lang_en = {
 "  4. (Optional) Click 'Export' to save the .bin file.\r\n"
 "\r\n"
 "\r\n"
-"STEP 3 — BRUTE-FORCE\r\n"
+"STEP 3 - BRUTE-FORCE\r\n"
 "=====================\r\n"
 "\r\n"
 "  1. Set Start = 0000000000, End = FFFFFFFFFF.\r\n"

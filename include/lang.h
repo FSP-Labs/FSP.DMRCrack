@@ -45,6 +45,12 @@ typedef struct {
     const char *tile_score_fmt;           /* "Score  %.2f" / "Puntuación  %.2f" */
     const char *tile_progress_meta_fmt;   /* "%s keys   ·   ETA  %s   ·   elapsed  %s" */
 
+    /* ---- Empty / idle states ---- */
+    const char *empty_hint;               /* "Load a .bin or capture live, then Start" */
+    const char *status_idle;              /* "Idle" */
+    const char *status_searching;         /* "Searching..." */
+    const char *graph_waiting;            /* "waiting for data" */
+
     /* ---- KPA silence badge ---- */
     const char *kpa_silence_fmt;     /* "KPA: %u silence frames" / "KPA: %u frames de silencio" */
 
@@ -92,6 +98,33 @@ typedef struct {
     const char *lbl_empty_log_no_output;      /* "(empty log — dsd-fme produced no output)" */
     const char *err_py_script_missing;        /* "Error: missing tools\dsdfme_dsp_to_bin.py"  */
     const char *err_bin_load;                 /* "Error loading generated BIN"                */
+
+    /* ---- Listen: decrypt recovered audio to WAV (DSD-FME -1 <key> -w) ---- */
+    const char *btn_listen;                   /* "Listen" / "Escuchar"                        */
+    const char *status_decrypting;            /* "Decrypting audio with DSD-FME..."           */
+    const char *err_listen_already_running;   /* "Decryption already in progress"             */
+    const char *err_listen_thread;            /* "Error creating decryption thread"           */
+    const char *err_listen_no_source;         /* "Select the source WAV to play decrypted audio" */
+    const char *err_listen_no_key;            /* "No recovered key yet"                       */
+    const char *msg_listen_ok_fmt;            /* "Decrypted audio: %s" */
+
+    /* ---- Live capture (RTL-SDR, unattended supervised) ---- */
+    const char *btn_capture_start;            /* "Live capture"                               */
+    const char *btn_capture_stop;             /* "Stop capture"                               */
+    const char *err_capture_no_spec;          /* "Enter an RTL-SDR spec in the Audio field..." */
+    const char *err_capture_launch;           /* "Could not start live capture"               */
+    const char *cap_sync_ok;                  /* "signal OK"                                  */
+    const char *cap_sync_none;                /* "no signal"                                  */
+    const char *cap_status_fmt;               /* "Live capture | %s | %zu encrypted | %s"     */
+    const char *cap_target_fmt;               /* "Target reached (%zu) — starting crack"      */
+    /* RTL-SDR config dialog */
+    const char *cap_dlg_title;                /* "Live capture — RTL-SDR"                     */
+    const char *cap_lbl_freq;                 /* "Frequency (e.g. 451.2M) — or .wav path"     */
+    const char *cap_lbl_dev;                  /* "Device index"                               */
+    const char *cap_lbl_gain;                 /* "Gain (0 = AGC)"                             */
+    const char *cap_lbl_ppm;                  /* "PPM correction"                             */
+    const char *cap_btn_ok;                   /* "Start"                                      */
+    const char *cap_btn_cancel;               /* "Cancel"                                     */
 
     /* ---- Brute-force validation errors ---- */
     const char *err_no_bin_selected;

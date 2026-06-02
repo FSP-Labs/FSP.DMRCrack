@@ -15,9 +15,9 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * lang_es.c - Tabla de cadenas en español
+ * lang_es.c - Tabla de cadenas en espanol
  *
- * Para compilar en español, enlazar lang_es.c en lugar de lang_en.c.
+ * Para compilar en espanol, enlazar lang_es.c en lugar de lang_en.c.
  */
 #include "../include/lang.h"
 
@@ -40,6 +40,10 @@ const Lang g_lang_es = {
     .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
     .tile_score_fmt           = "Puntuaci\xf3n  %.2f",
     .tile_progress_meta_fmt   = "%s claves   \xb7   ETA  %s   \xb7   transcurrido  %s",
+    .empty_hint               = "Carga un .bin o captura en vivo, luego pulsa Start",
+    .status_idle              = "En reposo",
+    .status_searching         = "Buscando...",
+    .graph_waiting            = "esperando datos",
     /* Badge KPA */
     .kpa_silence_fmt          = "KPA: %u tramas de silencio",
     /* Barra de estado */
@@ -89,6 +93,32 @@ const Lang g_lang_es = {
     .lbl_empty_log_no_output   = "(log vac\xedo \x97 dsd-fme no produjo salida)",
     .err_py_script_missing     = "Error: falta tools\\dsdfme_dsp_to_bin.py",
     .err_bin_load              = "Error al cargar el archivo BIN generado",
+
+    /* ---- Escucha: desencriptar audio recuperado a WAV ---- */
+    .btn_listen                 = "Escuchar",
+    .status_decrypting          = "Desencriptando audio con DSD-FME...",
+    .err_listen_already_running = "Desencriptado ya en curso",
+    .err_listen_thread          = "Error al crear el hilo de desencriptado",
+    .err_listen_no_source       = "Selecciona el WAV de origen (campo de audio) para reproducir el audio desencriptado",
+    .err_listen_no_key          = "Aun no hay clave recuperada - ejecuta una busqueda primero",
+    .msg_listen_ok_fmt          = "Audio desencriptado: %s",
+
+    /* ---- Captura en vivo (RTL-SDR, supervisada desatendida) ---- */
+    .btn_capture_start          = "Captura en vivo",
+    .btn_capture_stop           = "Detener captura",
+    .err_capture_no_spec        = "Indica un spec RTL-SDR en el campo Audio, p.ej. rtl:0:451.2M:22",
+    .err_capture_launch         = "No se pudo iniciar la captura en vivo (revisa DSD-FME / RTL-SDR)",
+    .cap_sync_ok                = "senal OK",
+    .cap_sync_none              = "sin senal",
+    .cap_status_fmt             = "Captura en vivo | %s | %zu tramas cifradas | %s",
+    .cap_target_fmt             = "Objetivo alcanzado (%zu tramas) - iniciando crackeo",
+    .cap_dlg_title              = "Captura en vivo - RTL-SDR",
+    .cap_lbl_freq               = "Frecuencia (ej. 451.2M) - o ruta .wav para prueba:",
+    .cap_lbl_dev                = "Indice de dispositivo:",
+    .cap_lbl_gain               = "Ganancia (0 = AGC):",
+    .cap_lbl_ppm                = "Correccion PPM:",
+    .cap_btn_ok                 = "Iniciar",
+    .cap_btn_cancel             = "Cancelar",
 
     /* ---- Errores de validacion de fuerza bruta ---- */
     .err_no_bin_selected   = "Selecciona un archivo .bin de payloads primero",
@@ -162,9 +192,9 @@ const Lang g_lang_es = {
 
     /* ---- Dialogo de ayuda ---- */
     .btn_help  = "Ayuda",
-    .help_title = "DMRCrack — Guia rapida",
+    .help_title = "DMRCrack - Guia rapida",
     .help_content =
-"PASO 1 — CAPTURAR AUDIO CON SDR#\r\n"
+"PASO 1 - CAPTURAR AUDIO CON SDR#\r\n"
 "==================================\r\n"
 "\r\n"
 "  1. Abre SDR# y conecta tu dispositivo SDR.\r\n"
@@ -180,13 +210,13 @@ const Lang g_lang_es = {
 "     Baseband graba IQ crudo que DSD-FME no puede leer.\r\n"
 "  8. Graba al menos 30-60 segundos de voz cifrada.\r\n"
 "     Cuanto mas, mejor: se recomiendan 60+ payloads.\r\n"
-"  9. Detén la grabacion y anota la ruta del archivo .wav.\r\n"
+"  9. Deten la grabacion y anota la ruta del archivo .wav.\r\n"
 "\r\n"
 "  Otros programas SDR: usa NFM con de-enfasis DESACTIVADO.\r\n"
 "    SDR++: De-emphasis = NONE.  GQRX: 'No de-emphasis'.\r\n"
 "\r\n"
 "\r\n"
-"PASO 2 — DEMODULAR\r\n"
+"PASO 2 - DEMODULAR\r\n"
 "===================\r\n"
 "\r\n"
 "  1. Pulsa 'Examinar WAV...' y selecciona el archivo .wav.\r\n"
@@ -195,7 +225,7 @@ const Lang g_lang_es = {
 "  4. (Opcional) Pulsa 'Exportar' para guardar el .bin.\r\n"
 "\r\n"
 "\r\n"
-"PASO 3 — FUERZA BRUTA\r\n"
+"PASO 3 - FUERZA BRUTA\r\n"
 "======================\r\n"
 "\r\n"
 "  1. Pon Inicio = 0000000000, Fin = FFFFFFFFFF.\r\n"

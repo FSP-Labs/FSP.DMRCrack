@@ -22,6 +22,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <shellapi.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,41 +62,58 @@
 #define ID_PAYLOAD_LABEL 1016
 #define ID_BTN_HELP     1017
 #define ID_BTN_LANG     1018
+#define ID_BTN_LISTEN   1019
+#define ID_BTN_CAPTURE  1020
+
+/* Posted by the capture monitor thread to the main thread when an unattended
+ * capture has accumulated enough encrypted voice frames and the .bin is ready. */
+#define WM_APP_CAPTURE_READY (WM_APP + 2)
+
+/* Unattended live-capture: stop capturing and auto-crack once this many
+ * encrypted voice frames (ALG+MI present) have accumulated. ~10 superframes,
+ * far above the >7 sigma detection threshold. */
+#define LIVE_CAPTURE_TARGET_FRAMES 60
+/* How often the monitor samples the growing DSP/log (ms). */
+#define LIVE_CAPTURE_POLL_MS       1500
 #define ID_EDIT_GPU_PCT  1028
 #define ID_SPIN_GPU      1029
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
 
-/* --- Dark theme colors (Operator Dashboard) --- */
-#define CLR_HEADER       RGB(20,  20,  21)
-#define CLR_BG           RGB(26,  26,  27)
-#define CLR_PANEL        RGB(37,  37,  38)
-#define CLR_TILE         RGB(45,  45,  48)
-#define CLR_INPUT        RGB(51,  51,  51)
-#define CLR_INPUT_BORDER RGB(62,  62,  66)
-#define CLR_TEXT         RGB(204, 204, 204)
-#define CLR_BRIGHT       RGB(255, 255, 255)
-#define CLR_DIM          RGB(100, 100, 100)
-#define CLR_ACCENT       RGB(0,   122, 204)
-#define CLR_ACCENT_HOV   RGB(28,  145, 235)
-#define CLR_ACCENT_PRESS RGB(0,   84,  153)
-#define CLR_METRIC       RGB(255, 255, 255)
-#define CLR_METRIC_LABEL RGB(156, 220, 254)
-#define CLR_RUNNING      RGB(78,  201, 176)
-#define CLR_PAUSED       RGB(206, 145, 120)
-#define CLR_STOPPED      RGB(106, 106, 106)
-#define CLR_WARN         RGB(244, 71,  71)
-#define CLR_GREEN        RGB(78,  201, 176)
-#define CLR_ORANGE       RGB(206, 145, 120)
-#define CLR_RED          RGB(244, 71,  71)
-#define CLR_GRAPH_BG     RGB(37,  37,  38)
-#define CLR_GRAPH_AXIS   RGB(80,  80,  80)
-#define CLR_GRAPH_LINE1  RGB(86,  156, 214)
-#define CLR_GRAPH_LINE2  RGB(215, 186, 125)
-#define CLR_GRAPH_THRESH RGB(78,  201, 176)
-#define CLR_PROGRESS_BG  RGB(45,  45,  48)
-#define CLR_SECTION      RGB(0,   122, 204)
+/* --- Dark theme colors (Signal Operator) ---
+ * Cool-tinted neutrals (never pure gray/white/black). Two-color semantics:
+ *   cyan  = process  (running, throughput, progress, keys graph)
+ *   amber = result   (recovered key candidate, score graph) -- CLR_LOCK */
+#define CLR_HEADER       RGB(15,  18,  22)
+#define CLR_BG           RGB(19,  23,  27)
+#define CLR_PANEL        RGB(27,  32,  37)
+#define CLR_TILE         RGB(33,  39,  45)
+#define CLR_INPUT        RGB(38,  45,  52)
+#define CLR_INPUT_BORDER RGB(52,  61,  70)
+#define CLR_TEXT         RGB(202, 211, 218)
+#define CLR_BRIGHT       RGB(236, 243, 247)
+#define CLR_DIM          RGB(104, 116, 127)
+#define CLR_ACCENT       RGB(44,  194, 220)   /* cyan signal (process) */
+#define CLR_ACCENT_HOV   RGB(84,  212, 234)
+#define CLR_ACCENT_PRESS RGB(28,  150, 176)
+#define CLR_METRIC       RGB(236, 243, 247)
+#define CLR_METRIC_LABEL RGB(122, 196, 212)
+#define CLR_RUNNING      RGB(64,  204, 184)
+#define CLR_PAUSED       RGB(224, 168, 92)
+#define CLR_STOPPED      RGB(104, 116, 127)
+#define CLR_WARN         RGB(240, 96,  88)
+#define CLR_GREEN        RGB(64,  204, 184)
+#define CLR_ORANGE       RGB(224, 168, 92)
+#define CLR_RED          RGB(240, 96,  88)
+#define CLR_GRAPH_BG     RGB(27,  32,  37)
+#define CLR_GRAPH_AXIS   RGB(56,  66,  76)
+#define CLR_GRAPH_LINE1  RGB(44,  194, 220)   /* keys/s = cyan (process) */
+#define CLR_GRAPH_LINE2  RGB(245, 184, 74)    /* score = amber (result) */
+#define CLR_GRAPH_THRESH RGB(64,  204, 184)
+#define CLR_PROGRESS_BG  RGB(38,  45,  52)
+#define CLR_SECTION      RGB(44,  194, 220)
+#define CLR_LOCK         RGB(245, 184, 74)    /* success: recovered key / score */
 
 #define HEADER_H    38   /* header bar height in pixels */
 
@@ -116,6 +134,8 @@ typedef struct {
     HWND btn_export;
     HWND demod_label;
     HWND btn_copy_key;
+    HWND btn_listen;
+    HWND btn_capture;
     HWND payload_label;
     HWND btn_help;
     HWND hwnd_help;
@@ -166,6 +186,19 @@ typedef struct {
 
     volatile LONG demod_running;
     HANDLE demod_thread;
+    volatile LONG listen_running;
+    HANDLE listen_thread;
+
+    /* Live capture (RTL-SDR, unattended supervised) */
+    volatile LONG capture_running;     /* 1 while the monitor/capture is active */
+    volatile LONG capture_stop_flag;   /* set to request the monitor to stop */
+    HANDLE capture_monitor_thread;
+    HANDLE capture_proc;               /* dsd-fme process handle */
+    HANDLE capture_job;                /* Job Object owning the dsd-fme tree */
+    int    capture_auto_mode;          /* 1 = auto crack+listen pipeline engaged */
+    char   capture_session_dir[MAX_PATH];
+    char   capture_raw_wav[MAX_PATH];  /* -6 re-playable 48k recording */
+    char   capture_bin[MAX_PATH];      /* finalized payload .bin */
 
     HFONT ui_font;
     HFONT ui_font_bold;
@@ -283,12 +316,13 @@ static void layout_controls(int cw, int ch)
     /* === Capture row === */
     y = HEADER_H + 18;
     {
-        /* Layout: [WAV: lbl][edit........][..][Demodulate][Export] */
-        int demod_w = 110, export_w = 80, browse_w = 30;
-        int btns_w = demod_w + 6 + export_w;
+        /* Layout: [WAV: lbl][edit........][..][Demodulate][Export][Live capture] */
+        int demod_w = 110, export_w = 80, cap_w = 120, browse_w = 30;
+        int btns_w = demod_w + 6 + export_w + 6 + cap_w;
         int browse_x = R - btns_w - 6 - browse_w;
         int demod_x = R - btns_w;
         int export_x = demod_x + demod_w + 6;
+        int cap_x = export_x + export_w + 6;
         int wav_label_w = 42;
         int wav_edit_w = browse_x - (L + wav_label_w + 4) - 4;
 
@@ -297,6 +331,7 @@ static void layout_controls(int cw, int ch)
         if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, browse_x,           y,     browse_w,    24, TRUE);
         if (g_app.btn_demod)      MoveWindow(g_app.btn_demod,      demod_x,            y,     demod_w,     24, TRUE);
         if (g_app.btn_export)     MoveWindow(g_app.btn_export,     export_x,           y,     export_w,    24, TRUE);
+        if (g_app.btn_capture)    MoveWindow(g_app.btn_capture,    cap_x,              y,     cap_w,       24, TRUE);
     }
     y += 28;
     if (g_app.demod_label) MoveWindow(g_app.demod_label, L, y, W, 16, TRUE);
@@ -323,9 +358,9 @@ static void layout_controls(int cw, int ch)
         if (g_app.lbl_start)    MoveWindow(g_app.lbl_start,    x,        y + 2, 36, 18, TRUE);
         if (g_app.edit_start)   MoveWindow(g_app.edit_start,   x + 38,   y,     110, 24, TRUE);
         x += 152;
-        if (g_app.lbl_end)      MoveWindow(g_app.lbl_end,      x,        y + 2, 18, 18, TRUE);
-        if (g_app.edit_end)     MoveWindow(g_app.edit_end,     x + 22,   y,     110, 24, TRUE);
-        x += 138;
+        if (g_app.lbl_end)      MoveWindow(g_app.lbl_end,      x,        y + 2, 30, 18, TRUE);
+        if (g_app.edit_end)     MoveWindow(g_app.edit_end,     x + 34,   y,     110, 24, TRUE);
+        x += 150;
         if (g_app.lbl_gpu_pct)  MoveWindow(g_app.lbl_gpu_pct,  x,        y + 2, 50, 18, TRUE);
         if (g_app.edit_gpu_pct) MoveWindow(g_app.edit_gpu_pct, x + 52,   y,     50, 24, TRUE);
         if (g_app.spin_gpu_split) SendMessageA(g_app.spin_gpu_split, UDM_SETBUDDY, (WPARAM)g_app.edit_gpu_pct, 0);
@@ -342,25 +377,27 @@ static void layout_controls(int cw, int ch)
     if (g_app.btn_start)    MoveWindow(g_app.btn_start,    L,         y, 100, 32, TRUE);
     if (g_app.btn_pause)    MoveWindow(g_app.btn_pause,    L + 108,   y, 100, 32, TRUE);
     if (g_app.btn_stop)     MoveWindow(g_app.btn_stop,     L + 216,   y, 100, 32, TRUE);
+    if (g_app.btn_listen)   MoveWindow(g_app.btn_listen,   R - 206,   y, 110, 32, TRUE);
     if (g_app.btn_copy_key) MoveWindow(g_app.btn_copy_key, R - 90,    y, 90,  32, TRUE);
     y += 32 + 16;
 
-    /* === Tile row 1: THROUGHPUT (dominant, 58%) + CANDIDATE (42%) === */
+    /* === Tile row 1: RECOVERED KEY (dominant, left) + THROUGHPUT (right) ===
+     * The recovered key is the deliverable, so it leads and gets the big font. */
     {
         int tile_y = y;
-        int tile_h = 104;
+        int tile_h = 116;
         int gap = 12;
-        int throughput_w = (W * 58) / 100;
+        int cand_w = (W * 56) / 100;
 
-        g_app.tile_throughput_rect.left   = L;
-        g_app.tile_throughput_rect.top    = tile_y;
-        g_app.tile_throughput_rect.right  = L + throughput_w;
-        g_app.tile_throughput_rect.bottom = tile_y + tile_h;
-
-        g_app.tile_candidate_rect.left   = L + throughput_w + gap;
+        g_app.tile_candidate_rect.left   = L;
         g_app.tile_candidate_rect.top    = tile_y;
-        g_app.tile_candidate_rect.right  = R;
+        g_app.tile_candidate_rect.right  = L + cand_w;
         g_app.tile_candidate_rect.bottom = tile_y + tile_h;
+
+        g_app.tile_throughput_rect.left   = L + cand_w + gap;
+        g_app.tile_throughput_rect.top    = tile_y;
+        g_app.tile_throughput_rect.right  = R;
+        g_app.tile_throughput_rect.bottom = tile_y + tile_h;
 
         y = tile_y + tile_h + 10;
     }
@@ -517,21 +554,19 @@ static void draw_header(HDC hdc, int cw)
 
 /* --- Drawing: metric tile with title + primary metric + optional sub-lines.
  *      `big_metric` selects the dominant 22pt font for THROUGHPUT. --- */
-static void draw_tile(HDC hdc, const RECT *r, int big_metric,
+static void draw_tile(HDC hdc, const RECT *r, int big_metric, int result_tile,
                       const char *title, const char *primary,
                       const char *line2,  const char *line3)
 {
+    /* result_tile colors the title + metric amber (the recovered-key family);
+     * process tiles use cyan. No repeated accent stripe: the family-colored
+     * title carries the identity. */
+    COLORREF metric_clr = result_tile ? CLR_LOCK : CLR_METRIC;
+    COLORREF label_clr  = result_tile ? CLR_LOCK : CLR_METRIC_LABEL;
+
     HBRUSH bg = CreateSolidBrush(CLR_TILE);
     FillRect(hdc, r, bg);
     DeleteObject(bg);
-
-    /* Top accent stripe */
-    { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
-      HPEN old = (HPEN)SelectObject(hdc, pen);
-      MoveToEx(hdc, r->left, r->top + 1, NULL);
-      LineTo(hdc, r->right, r->top + 1);
-      SelectObject(hdc, old);
-      DeleteObject(pen); }
 
     SetBkMode(hdc, TRANSPARENT);
     int pad = 18;
@@ -539,7 +574,7 @@ static void draw_tile(HDC hdc, const RECT *r, int big_metric,
 
     /* Title */
     { HFONT old = (HFONT)SelectObject(hdc, g_app.font_tile_label);
-      SetTextColor(hdc, CLR_METRIC_LABEL);
+      SetTextColor(hdc, label_clr);
       RECT tr = { x, r->top + 12, x + w, r->top + 26 };
       DrawTextA(hdc, title, -1, &tr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
       SelectObject(hdc, old); }
@@ -548,7 +583,7 @@ static void draw_tile(HDC hdc, const RECT *r, int big_metric,
     {
         HFONT metric = big_metric ? g_app.font_tile_metric_big : g_app.font_tile_metric;
         HFONT old = (HFONT)SelectObject(hdc, metric);
-        SetTextColor(hdc, CLR_METRIC);
+        SetTextColor(hdc, metric_clr);
         int top = r->top + (big_metric ? 32 : 30);
         int bot = r->top + (big_metric ? 74 : 60);
         RECT tr = { x, top, x + w, bot };
@@ -579,14 +614,6 @@ static void draw_progress_tile(HDC hdc, const RECT *r,
     HBRUSH bg = CreateSolidBrush(CLR_TILE);
     FillRect(hdc, r, bg);
     DeleteObject(bg);
-
-    /* Top accent stripe */
-    { HPEN pen = CreatePen(PS_SOLID, 2, CLR_ACCENT);
-      HPEN old = (HPEN)SelectObject(hdc, pen);
-      MoveToEx(hdc, r->left, r->top + 1, NULL);
-      LineTo(hdc, r->right, r->top + 1);
-      SelectObject(hdc, old);
-      DeleteObject(pen); }
 
     SetBkMode(hdc, TRANSPARENT);
     int pad = 18;
@@ -634,8 +661,12 @@ static void draw_all_tiles(HDC hdc)
 {
     char primary[64], line2[80], line3[80];
     double pct = 0.0;
+    int running = g_app.snapshot.running;
+    int has_run = running || g_app.snapshot.finished || g_app.snapshot.keys_tested > 0;
+    int idle    = !has_run;
+    int has_payloads = g_app.payloads.count > 0;
 
-    /* === THROUGHPUT (dominant, left) === */
+    /* === THROUGHPUT (compact, right) === */
     {
         double total_kps = g_app.inst_total_kps;
         double gpu_kps   = g_app.engine.cuda_active ? g_app.inst_gpu_kps : 0.0;
@@ -646,7 +677,9 @@ static void draw_all_tiles(HDC hdc)
         else if (total_kps >= 1e3) snprintf(primary, sizeof(primary), "%.0f K/s", total_kps/1e3);
         else                       snprintf(primary, sizeof(primary), "%.0f /s",  total_kps);
 
-        if (g_app.engine.cuda_active) {
+        if (idle) {
+            snprintf(line2, sizeof(line2), "%s", g_lang.status_idle);
+        } else if (g_app.engine.cuda_active) {
             char g[32], c[32];
             if (gpu_kps >= 1e6) snprintf(g, sizeof(g), "%.1f M/s", gpu_kps/1e6);
             else                snprintf(g, sizeof(g), "%.0f K/s", gpu_kps/1e3);
@@ -658,15 +691,26 @@ static void draw_all_tiles(HDC hdc)
             snprintf(line2, sizeof(line2), "%s", g_lang.tile_cpu_only);
         }
         line3[0] = '\0';
-        draw_tile(hdc, &g_app.tile_throughput_rect, /*big*/1,
+        draw_tile(hdc, &g_app.tile_throughput_rect, /*big*/0, /*result*/0,
                   g_lang.tile_throughput, primary, line2, line3);
     }
 
-    /* === CANDIDATE (right) === */
+    /* === RECOVERED KEY (dominant, left) === */
     {
-        if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
-            strcpy_s(primary, sizeof(primary), "---- ---- --");
-            line2[0] = '\0';
+        /* A real candidate exists only once the engine has set a non-zero key;
+         * best_score initializes to 0 (finite), so gate on the key itself. */
+        int has_cand = (isfinite(g_app.snapshot.best_score) &&
+                        g_app.snapshot.best_score > -1e30 &&
+                        (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) ? 1 : 0;
+        if (!has_cand) {
+            strcpy_s(primary, sizeof(primary), "----  ----  --");
+            /* Empty / first-run guidance instead of dead zeros */
+            if (running)
+                snprintf(line2, sizeof(line2), "%s", g_lang.status_searching);
+            else if (!has_payloads)
+                snprintf(line2, sizeof(line2), "%s", g_lang.empty_hint);
+            else
+                line2[0] = '\0';
         } else {
             unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
             snprintf(primary, sizeof(primary), "%04llX %04llX %02llX",
@@ -674,7 +718,7 @@ static void draw_all_tiles(HDC hdc)
             snprintf(line2, sizeof(line2), g_lang.tile_score_fmt, g_app.snapshot.best_score);
         }
         line3[0] = '\0';
-        draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/0,
+        draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/1, /*result*/has_cand,
                   g_lang.tile_candidate, primary, line2, line3);
     }
 
@@ -694,7 +738,13 @@ static void draw_all_tiles(HDC hdc)
         else
             snprintf(keys_str, sizeof(keys_str), "%.1fM / %.1fM", kk/1e6, tk/1e6);
 
-        fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
+        /* elapsed is only meaningful once a search has actually started;
+         * otherwise the engine timer reads time-since-boot. */
+        if (g_app.snapshot.running || g_app.snapshot.finished ||
+            g_app.snapshot.keys_tested > 0)
+            fmt_hhmmss(g_app.snapshot.elapsed_seconds, elapsed_str, sizeof(elapsed_str));
+        else
+            snprintf(elapsed_str, sizeof(elapsed_str), "--:--:--");
         fmt_hhmmss(g_app.snapshot.eta_seconds, eta_str, sizeof(eta_str));
         snprintf(meta, sizeof(meta), g_lang.tile_progress_meta_fmt,
                  keys_str, eta_str, elapsed_str);
@@ -857,6 +907,13 @@ static void draw_graph(HDC hdc, const RECT *rect)
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_GRAPH_LINE1);
     TextOutA(hdc, rect->left + 35, rect->top + 6, g_lang.graph_keys_title, (int)strlen(g_lang.graph_keys_title));
+    if (!g_app.snapshot.running && g_app.snapshot.keys_tested == 0) {
+        HFONT of = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+        RECT cr = { rect->left + 30, rect->top + 10, rect->right - 10, rect->bottom - 25 };
+        SetTextColor(hdc, CLR_DIM);
+        DrawTextA(hdc, g_lang.graph_waiting, -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, of);
+    }
     /* Current value top-right */
     if (g_app.hist_count > 0) {
         char val[32];
@@ -954,6 +1011,13 @@ static void draw_score_graph(HDC hdc, const RECT *rect)
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, CLR_GRAPH_LINE2);
     TextOutA(hdc, rect->left + 35, rect->top + 6, g_lang.graph_score_title, (int)strlen(g_lang.graph_score_title));
+    if (!g_app.snapshot.running && g_app.snapshot.keys_tested == 0) {
+        HFONT of = (HFONT)SelectObject(hdc, g_app.font_tile_label);
+        RECT cr = { rect->left + 30, rect->top + 10, rect->right - 10, rect->bottom - 25 };
+        SetTextColor(hdc, CLR_DIM);
+        DrawTextA(hdc, g_lang.graph_waiting, -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, of);
+    }
     /* Current value */
     if (g_app.score_hist_count > 0) {
         char val[32];
@@ -1371,6 +1435,368 @@ static void start_demod(HWND hwnd)
     }
 }
 
+/* Re-runs dsd-fme.exe on the source WAV with the recovered RC4 key (-1 <hex>),
+ * decrypting the Enhanced Privacy voice to a plain .wav (-w), then opens it in
+ * the system default player. Mirrors demod_thread_proc's process plumbing. */
+static DWORD WINAPI listen_thread_proc(LPVOID param)
+{
+    char wav_path[MAX_PATH], dsd_path[MAX_PATH], wav_dir[MAX_PATH];
+    char out_wav[MAX_PATH], logfile[MAX_PATH], cmdline[4096];
+    char drive[_MAX_DRIVE], dir[_MAX_DIR], fname[_MAX_FNAME], ext[_MAX_EXT];
+    char key_hex[16];
+    DWORD proc_exit = 1;
+    (void)param;
+
+    /* Recovered key: require a finished/valid candidate */
+    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_listen_no_key);
+        goto done;
+    }
+    snprintf(key_hex, sizeof(key_hex), "%010llX",
+             (unsigned long long)(g_app.snapshot.best_key & 0xFFFFFFFFFFull));
+
+    /* Source audio: the WAV currently in the audio field (same input we demodulated) */
+    GetWindowTextA(g_app.edit_wav, wav_path, MAX_PATH);
+    if (wav_path[0] == '\0') {
+        SetWindowTextA(g_app.demod_label, g_lang.err_listen_no_source);
+        goto done;
+    }
+    if (!file_exists(wav_path)) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_audio_not_found);
+        goto done;
+    }
+    if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path, sizeof(dsd_path))) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
+        MessageBoxA(g_app.hwnd, g_lang.err_dsd_missing_detail, APP_TITLE, MB_ICONERROR);
+        goto done;
+    }
+
+    _splitpath_s(wav_path, drive, sizeof(drive), dir, sizeof(dir),
+                 fname, sizeof(fname), ext, sizeof(ext));
+    snprintf(out_wav, sizeof(out_wav), "%s%s%s.decrypted.wav", drive, dir, fname);
+    snprintf(logfile, sizeof(logfile), "%s%s%s.listenlog.txt", drive, dir, fname);
+    snprintf(wav_dir, sizeof(wav_dir), "%s%s", drive, dir);
+    { size_t wdl = strlen(wav_dir); if (wdl > 1 && wav_dir[wdl-1] == '\\') wav_dir[wdl-1] = '\0'; }
+
+    /* Paths are embedded in a quoted command line; '"' would break quoting. */
+    if (strchr(dsd_path, '"') || strchr(wav_path, '"') ||
+        strchr(out_wav,  '"') || strchr(logfile,  '"')) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_path_has_quotes);
+        goto done;
+    }
+
+    /* Pre-flight: Cygwin runtime must be bundled next to dsd-fme.exe */
+    {
+        char dll_path[MAX_PATH];
+        char *last_sep = strrchr(dsd_path, '\\');
+        if (last_sep) {
+            size_t dir_len = (size_t)(last_sep - dsd_path);
+            if (dir_len + 1 + 12 < sizeof(dll_path)) {
+                memcpy(dll_path, dsd_path, dir_len);
+                memcpy(dll_path + dir_len, "\\cygwin1.dll", 13);
+                if (!file_exists(dll_path)) {
+                    SetWindowTextA(g_app.demod_label, g_lang.err_cygwin_dlls_missing);
+                    goto done;
+                }
+            }
+        }
+    }
+
+    /* -w APPENDS to the output file, so remove any previous decrypted WAV first */
+    DeleteFileA(out_wav);
+    DeleteFileA(logfile);
+
+    SetWindowTextA(g_app.demod_label, g_lang.status_decrypting);
+    snprintf(cmdline, sizeof(cmdline),
+             "\"%s\" -fs -i \"%s\" -1 %s -w \"%s\" -V 3",
+             dsd_path, wav_path, key_hex, out_wav);
+    if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
+        if (proc_exit == 0xC0000135u || proc_exit == 0xC0000139u) {
+            SetWindowTextA(g_app.demod_label, g_lang.err_dll_not_found_exit);
+        } else {
+            char tail[512], detail[1024];
+            read_log_tail(logfile, tail, sizeof(tail));
+            snprintf(detail, sizeof(detail), g_lang.err_dsd_detail_fmt,
+                     g_lang.err_dsd_failed, (unsigned long)proc_exit, logfile,
+                     tail[0] ? tail : g_lang.lbl_empty_log);
+            SetWindowTextA(g_app.demod_label, g_lang.err_dsd_failed);
+            MessageBoxA(g_app.hwnd, detail, APP_TITLE, MB_ICONERROR);
+        }
+        goto done;
+    }
+
+    if (!file_exists(out_wav)) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_dsd_failed);
+        goto done;
+    }
+
+    {
+        char msg[MAX_PATH + 64];
+        snprintf(msg, sizeof(msg), g_lang.msg_listen_ok_fmt, out_wav);
+        SetWindowTextA(g_app.demod_label, msg);
+    }
+    /* Open the decrypted WAV in the system default audio player */
+    ShellExecuteA(g_app.hwnd, "open", out_wav, NULL, NULL, SW_SHOWNORMAL);
+
+done:
+    InterlockedExchange(&g_app.listen_running, 0);
+    return 0;
+}
+
+static void start_listen(HWND hwnd)
+{
+    if (InterlockedCompareExchange(&g_app.listen_running, 1, 0) != 0) {
+        MessageBoxA(hwnd, g_lang.err_listen_already_running, APP_TITLE, MB_ICONINFORMATION);
+        return;
+    }
+    if (g_app.listen_thread) { CloseHandle(g_app.listen_thread); g_app.listen_thread = NULL; }
+    g_app.listen_thread = CreateThread(NULL, 0, listen_thread_proc, NULL, 0, NULL);
+    if (!g_app.listen_thread) {
+        InterlockedExchange(&g_app.listen_running, 0);
+        MessageBoxA(hwnd, g_lang.err_listen_thread, APP_TITLE, MB_ICONERROR);
+    }
+}
+
+/* ===================== Live capture (RTL-SDR, unattended) =====================
+ *
+ * dsd-fme runs continuously on the RTL-SDR (a long-lived process), writing the
+ * structured -Q DSP output + a re-playable -6 recording. A monitor thread tails
+ * those outputs; once enough encrypted voice frames accumulate it stops the
+ * capture, finalizes the .bin and triggers the crack on the main thread.
+ *
+ * VALIDATION NOTE (no RTL-SDR available at build time): the -i rtl:... input
+ * and the assumption that the -6 WAV is re-feedable to -i for the decrypt step
+ * must be verified on real hardware. The orchestration/monitoring is hardware
+ * independent. */
+
+/* Launch a long-lived process, stdout+stderr → log, inside a Job Object so the
+ * whole (Cygwin) process tree dies when we terminate the job. Non-blocking. */
+static int launch_capture_process(const char *cmdline, const char *log_path,
+                                   const char *working_dir,
+                                   HANDLE *out_proc, HANDLE *out_job)
+{
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    SECURITY_ATTRIBUTES sa;
+    HANDLE hLog = INVALID_HANDLE_VALUE, hJob = NULL;
+    char cmd[4096];
+
+    *out_proc = NULL;
+    *out_job  = NULL;
+
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = NULL;
+    sa.bInheritHandle = TRUE;
+
+    ZeroMemory(&si, sizeof(si));
+    ZeroMemory(&pi, sizeof(pi));
+    si.cb = sizeof(si);
+
+    if (log_path && log_path[0]) {
+        hLog = CreateFileA(log_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hLog != INVALID_HANDLE_VALUE) {
+            si.hStdError  = hLog;
+            si.hStdOutput = hLog;
+            si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+            si.dwFlags |= STARTF_USESTDHANDLES;
+        }
+    }
+
+    hJob = CreateJobObjectA(NULL, NULL);
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
+        ZeroMemory(&jeli, sizeof(jeli));
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
+                                &jeli, sizeof(jeli));
+    }
+
+    snprintf(cmd, sizeof(cmd), "%s", cmdline);
+    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
+                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
+                        NULL, (working_dir && working_dir[0]) ? working_dir : NULL,
+                        &si, &pi)) {
+        if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+        if (hJob) CloseHandle(hJob);
+        return 0;
+    }
+    if (hJob) AssignProcessToJobObject(hJob, pi.hProcess);
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
+
+    *out_proc = pi.hProcess;
+    *out_job  = hJob;
+    return 1;
+}
+
+/* dsd-fme writes the -Q file either under <dir>\DSP\<name> or <dir>\<name>. */
+static int find_capture_dsp(const char *base_dir, const char *qname,
+                            char *out, size_t out_len)
+{
+    char cand[MAX_PATH];
+    snprintf(cand, sizeof(cand), "%s\\DSP\\%s", base_dir, qname);
+    if (file_exists(cand)) { snprintf(out, out_len, "%s", cand); return 1; }
+    snprintf(cand, sizeof(cand), "%s\\%s", base_dir, qname);
+    if (file_exists(cand)) { snprintf(out, out_len, "%s", cand); return 1; }
+    return 0;
+}
+
+/* Count payload lines carrying both ALG id and MI (i.e. usable encrypted voice). */
+static size_t count_encrypted_frames(const char *bin_path)
+{
+    PayloadSet tmp;
+    char e[256] = {0};
+    size_t enc = 0;
+    payload_set_init(&tmp);
+    if (load_payload_file(bin_path, 0, &tmp, e, sizeof(e))) {
+        for (size_t i = 0; i < tmp.count; ++i)
+            if (tmp.items[i].has_mi && tmp.items[i].has_algid) enc++;
+    }
+    payload_set_free(&tmp);
+    return enc;
+}
+
+static DWORD WINAPI capture_monitor_proc(LPVOID param)
+{
+    char dsp[MAX_PATH], snap_dsp[MAX_PATH], snap_bin[MAX_PATH];
+    char logfile[MAX_PATH], tail[512], status[400], elapsed[32];
+    DWORD t0 = GetTickCount();
+    (void)param;
+
+    snprintf(logfile,  sizeof(logfile),  "%s\\live.log",      g_app.capture_session_dir);
+    snprintf(snap_dsp, sizeof(snap_dsp), "%s\\snapshot.dsp",  g_app.capture_session_dir);
+    snprintf(snap_bin, sizeof(snap_bin), "%s\\snapshot.bin",  g_app.capture_session_dir);
+
+    while (!g_app.capture_stop_flag) {
+        Sleep(LIVE_CAPTURE_POLL_MS);
+        if (g_app.capture_stop_flag) break;
+
+        size_t enc = 0;
+        if (find_capture_dsp(g_app.capture_session_dir, "live.dsp", dsp, sizeof(dsp))) {
+            /* Snapshot the (still-growing) DSP so a partial tail line can't break parsing. */
+            if (CopyFileA(dsp, snap_dsp, FALSE)) {
+                char cerr[256] = {0};
+                if (dsp_convert_to_bin(snap_dsp, snap_bin, logfile, cerr, sizeof(cerr)))
+                    enc = count_encrypted_frames(snap_bin);
+            }
+        }
+
+        /* Signal presence from the log tail */
+        tail[0] = '\0';
+        read_log_tail(logfile, tail, sizeof(tail));
+        const char *sync = (strstr(tail, "Sync: +") != NULL)
+                         ? g_lang.cap_sync_ok : g_lang.cap_sync_none;
+
+        DWORD secs = (GetTickCount() - t0) / 1000;
+        snprintf(elapsed, sizeof(elapsed), "%02lu:%02lu:%02lu",
+                 (secs / 3600), (secs % 3600) / 60, secs % 60);
+        snprintf(status, sizeof(status), g_lang.cap_status_fmt, sync, enc, elapsed);
+        SetWindowTextA(g_app.demod_label, status);
+
+        if (enc >= LIVE_CAPTURE_TARGET_FRAMES) {
+            /* Good capture: stop dsd-fme, finalize the .bin, hand off to main thread. */
+            char fin_dsp[MAX_PATH], cerr[256] = {0};
+            snprintf(status, sizeof(status), g_lang.cap_target_fmt, enc);
+            SetWindowTextA(g_app.demod_label, status);
+
+            if (g_app.capture_job) { TerminateJobObject(g_app.capture_job, 0); Sleep(300); }
+            if (find_capture_dsp(g_app.capture_session_dir, "live.dsp", fin_dsp, sizeof(fin_dsp)))
+                dsp_convert_to_bin(fin_dsp, g_app.capture_bin, logfile, cerr, sizeof(cerr));
+
+            PostMessageA(g_app.hwnd, WM_APP_CAPTURE_READY, 0, 0);
+            break;
+        }
+    }
+
+    InterlockedExchange(&g_app.capture_running, 0);
+    return 0;
+}
+
+static void stop_capture(HWND hwnd)
+{
+    (void)hwnd;
+    InterlockedExchange(&g_app.capture_stop_flag, 1);
+    if (g_app.capture_job) TerminateJobObject(g_app.capture_job, 0);
+    if (g_app.capture_monitor_thread) {
+        WaitForSingleObject(g_app.capture_monitor_thread, 5000);
+        CloseHandle(g_app.capture_monitor_thread);
+        g_app.capture_monitor_thread = NULL;
+    }
+    if (g_app.capture_proc) { CloseHandle(g_app.capture_proc); g_app.capture_proc = NULL; }
+    if (g_app.capture_job)  { CloseHandle(g_app.capture_job);  g_app.capture_job  = NULL; }
+    InterlockedExchange(&g_app.capture_running, 0);
+    SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_start);
+}
+
+static void start_capture(HWND hwnd)
+{
+    char spec[512], dsd_path[MAX_PATH], cmdline[4096], logfile[MAX_PATH];
+    char cwd[MAX_PATH];
+    SYSTEMTIME st;
+
+    if (g_app.capture_running) { stop_capture(hwnd); return; }   /* toggle off */
+
+    /* Collect tuning parameters via the dialog and build the rtl:... spec. */
+    if (!prompt_rtl_config(hwnd, spec, sizeof(spec)))
+        return;   /* cancelled */
+    if (spec[0] == '\0') {
+        SetWindowTextA(g_app.demod_label, g_lang.err_capture_no_spec);
+        return;
+    }
+    if (strchr(spec, '"')) { SetWindowTextA(g_app.demod_label, g_lang.err_path_has_quotes); return; }
+
+    if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path, sizeof(dsd_path))) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
+        MessageBoxA(hwnd, g_lang.err_dsd_missing_detail, APP_TITLE, MB_ICONERROR);
+        return;
+    }
+
+    /* Build a per-session folder: <cwd>\captures\session_YYYYMMDD_HHMMSS\ */
+    if (GetCurrentDirectoryA(sizeof(cwd), cwd) == 0) { cwd[0] = '.'; cwd[1] = '\0'; }
+    GetLocalTime(&st);
+    {
+        char captures[MAX_PATH];
+        snprintf(captures, sizeof(captures), "%s\\captures", cwd);
+        CreateDirectoryA(captures, NULL);
+        snprintf(g_app.capture_session_dir, sizeof(g_app.capture_session_dir),
+                 "%s\\session_%04u%02u%02u_%02u%02u%02u", captures,
+                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        if (!CreateDirectoryA(g_app.capture_session_dir, NULL) &&
+            GetLastError() != ERROR_ALREADY_EXISTS) {
+            SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
+            return;
+        }
+    }
+    snprintf(g_app.capture_raw_wav, sizeof(g_app.capture_raw_wav),
+             "%s\\session_raw.wav", g_app.capture_session_dir);
+    snprintf(g_app.capture_bin, sizeof(g_app.capture_bin),
+             "%s\\session.bin", g_app.capture_session_dir);
+    snprintf(logfile, sizeof(logfile), "%s\\live.log", g_app.capture_session_dir);
+
+    /* Continuous capture: -Q structured frames, -6 re-playable 48k recording. */
+    snprintf(cmdline, sizeof(cmdline),
+             "\"%s\" -fs -i \"%s\" -Q live.dsp -Z -V 3 -6 \"%s\"",
+             dsd_path, spec, g_app.capture_raw_wav);
+
+    InterlockedExchange(&g_app.capture_stop_flag, 0);
+    if (!launch_capture_process(cmdline, logfile, g_app.capture_session_dir,
+                                &g_app.capture_proc, &g_app.capture_job)) {
+        SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
+        return;
+    }
+
+    InterlockedExchange(&g_app.capture_running, 1);
+    g_app.capture_monitor_thread = CreateThread(NULL, 0, capture_monitor_proc, NULL, 0, NULL);
+    if (!g_app.capture_monitor_thread) {
+        stop_capture(hwnd);
+        SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
+        return;
+    }
+    SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_stop);
+}
+
 static void export_bin_file(HWND owner)
 {
     OPENFILENAMEA ofn;
@@ -1463,6 +1889,13 @@ static void refresh_snapshot_and_ui(void)
     else
         SetWindowTextA(g_app.btn_pause, g_lang.btn_pause);
 
+    /* Enable "Listen" once a valid candidate key exists (decrypt source WAV to audio) */
+    if (g_app.btn_listen) {
+        BOOL have_key = (isfinite(g_app.snapshot.best_score) &&
+                         g_app.snapshot.best_score > -1e30) ? TRUE : FALSE;
+        EnableWindow(g_app.btn_listen, have_key);
+    }
+
     /* Key-found notification: flash taskbar when search completes with a result */
     if (g_app.snapshot.finished && !g_app.notified_completion) {
         g_app.notified_completion = 1;
@@ -1475,6 +1908,11 @@ static void refresh_snapshot_and_ui(void)
             fwi.dwTimeout = 0;
             FlashWindowEx(&fwi);
             MessageBeep(MB_ICONINFORMATION);
+            /* Unattended pipeline: decrypt the recording to audio automatically */
+            if (g_app.capture_auto_mode) {
+                g_app.capture_auto_mode = 0;
+                start_listen(g_app.hwnd);
+            }
         }
     }
 
@@ -1576,23 +2014,40 @@ static int start_bruteforce(HWND hwnd)
         FILE *fp_ck = fopen(progress_path, "rt");
         if (fp_ck) {
             unsigned long long saved_offset = 0, saved_end = 0;
+            unsigned long long saved_best_key = 0;
+            double saved_best_score = -1e308;
+            unsigned long long saved_original_start = 0;
             int ok = (fscanf(fp_ck, "offset=%llu\nend=%llu\n", &saved_offset, &saved_end) == 2);
+            if (ok) {
+                fscanf(fp_ck, "best_key=%llX\nbest_score=%lf\n", &saved_best_key, &saved_best_score);
+                fscanf(fp_ck, "original_start=%llu\n", &saved_original_start);
+            }
             fclose(fp_ck);
             if (ok
                 && saved_end  == (unsigned long long)cfg.end_key
                 && saved_offset > (unsigned long long)cfg.start_key
                 && saved_offset < (unsigned long long)cfg.end_key) {
-                char resume_msg[320];
+                char best_line[96] = "";
+                if (saved_best_score > -1e307 && saved_best_key != 0)
+                    snprintf(best_line, sizeof(best_line),
+                             "\nBest candidate so far: %010llX (score %.2f)",
+                             saved_best_key, saved_best_score);
+                char resume_msg[416];
                 snprintf(resume_msg, sizeof(resume_msg),
-                         "A previous search was interrupted at key %010llX.\n"
+                         "A previous search was interrupted at key %010llX.%s\n\n"
                          "Resume from that point? (\"No\" restarts from the beginning)",
-                         saved_offset);
+                         saved_offset, best_line);
                 if (MessageBoxA(hwnd, resume_msg, APP_TITLE, MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                    cfg.start_key = (uint64_t)saved_offset;
+                    cfg.start_key          = (uint64_t)saved_offset;
+                    cfg.has_seed_best      = (saved_best_score > -1e307 && saved_best_key != 0) ? 1 : 0;
+                    cfg.seed_best_key      = (uint64_t)saved_best_key;
+                    cfg.seed_best_score    = saved_best_score;
+                    cfg.has_resume_context = (saved_original_start > 0 || saved_offset == 0) ? 1 : 0;
+                    cfg.original_start_key = cfg.has_resume_context ? (uint64_t)saved_original_start : (uint64_t)saved_offset;
                 }
             }
         }
-        /* Give the CUDA thread the path so it can write periodic checkpoints */
+        /* Give the engine the path so it can write periodic checkpoints */
         strcpy_s(g_app.engine.progress_path, sizeof(g_app.engine.progress_path), progress_path);
     }
 
@@ -1647,20 +2102,27 @@ static void draw_button(DRAWITEMSTRUCT *dis)
     char text[64];
     RECT r = dis->rcItem;
 
+    int is_primary = (dis->CtlID == ID_BTN_START || dis->CtlID == IDOK);
+    int is_danger  = (dis->CtlID == ID_BTN_STOP);
+    int sel = (dis->itemState & ODS_SELECTED) != 0;
+    int ghost = 0;
+
+    /* Visual hierarchy: exactly one filled primary action (Start), Stop as
+     * danger, everything else as a quieter ghost button so the primary reads
+     * first. */
     if (dis->itemState & ODS_DISABLED) {
-        bg_clr = RGB(60, 60, 60);
+        bg_clr = RGB(48, 48, 50);
         txt_clr = CLR_DIM;
-    } else if (dis->itemState & ODS_SELECTED) {
-        bg_clr = CLR_ACCENT_PRESS;
+    } else if (is_primary) {
+        bg_clr = sel ? CLR_ACCENT_PRESS : CLR_ACCENT;
+        txt_clr = CLR_BRIGHT;
+    } else if (is_danger) {
+        bg_clr = sel ? RGB(180, 40, 40) : RGB(200, 55, 55);
         txt_clr = CLR_BRIGHT;
     } else {
-        bg_clr = CLR_ACCENT;
-        txt_clr = CLR_BRIGHT;
-    }
-
-    /* Special colors for Stop button */
-    if (dis->CtlID == ID_BTN_STOP && !(dis->itemState & ODS_DISABLED)) {
-        bg_clr = (dis->itemState & ODS_SELECTED) ? RGB(180, 40, 40) : RGB(200, 55, 55);
+        bg_clr = sel ? CLR_TILE : CLR_PANEL;
+        txt_clr = sel ? CLR_BRIGHT : CLR_TEXT;
+        ghost = 1;
     }
 
     /* Rounded button with 4px corner radius */
@@ -1678,6 +2140,18 @@ static void draw_button(DRAWITEMSTRUCT *dis)
         DrawTextA(dis->hDC, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         SelectClipRgn(dis->hDC, NULL);
+
+        /* Ghost (secondary) buttons get a hairline border to read as a control */
+        if (ghost) {
+            HPEN pen = CreatePen(PS_SOLID, 1, CLR_INPUT_BORDER);
+            HPEN old_p = (HPEN)SelectObject(dis->hDC, pen);
+            HBRUSH null_br = (HBRUSH)GetStockObject(NULL_BRUSH);
+            HBRUSH old_br = (HBRUSH)SelectObject(dis->hDC, null_br);
+            RoundRect(dis->hDC, r.left, r.top, r.right, r.bottom, 8, 8);
+            SelectObject(dis->hDC, old_p);
+            SelectObject(dis->hDC, old_br);
+            DeleteObject(pen);
+        }
 
         if (dis->itemState & ODS_FOCUS) {
             HPEN pen = CreatePen(PS_SOLID, 1, CLR_BRIGHT);
@@ -1741,6 +2215,9 @@ static void apply_language(void)
     SetWindowTextA(g_app.btn_start,    g_lang.btn_start);
     SetWindowTextA(g_app.btn_stop,     g_lang.btn_stop);
     SetWindowTextA(g_app.btn_copy_key, g_lang.btn_copy_key);
+    SetWindowTextA(g_app.btn_listen,   g_lang.btn_listen);
+    SetWindowTextA(g_app.btn_capture,
+                   g_app.capture_running ? g_lang.btn_capture_stop : g_lang.btn_capture_start);
     SetWindowTextA(g_app.btn_lang,
         (g_lang_ptr == &g_lang_es) ? "EN" : "ES");
     {
@@ -1821,6 +2298,158 @@ static LRESULT CALLBACK help_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
     }
     }
     return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* ===================== RTL-SDR capture config dialog =====================
+ * A small modal popup that collects the tuning parameters and builds the
+ * dsd-fme `-i rtl:dev:freq:gain:ppm:bw` spec, so the user never types it by
+ * hand. Only the frequency is required; everything else defaults. Entering a
+ * .wav path (or an explicit rtl:... spec) passes through verbatim for dry-run
+ * testing without a dongle. */
+#define RTLDLG_CLASS_NAME "FSPDMRRtlDlg"
+#define IDC_RTL_FREQ 101
+#define IDC_RTL_DEV  102
+#define IDC_RTL_GAIN 103
+#define IDC_RTL_PPM  104
+
+static struct {
+    HWND ed_freq, ed_dev, ed_gain, ed_ppm;
+    HWND lbl_freq;
+    int  done, accepted;
+} g_rtldlg;
+
+static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    switch (msg) {
+    case WM_CREATE:
+    {
+        HFONT f = g_app.ui_font ? g_app.ui_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        int lx = 14, ex = 200, ew = 130, y = 14, rowh = 30;
+        struct { const char *lbl; int id; const char *def; HWND *out; } rows[] = {
+            { g_lang.cap_lbl_freq, IDC_RTL_FREQ, "451.2M", &g_rtldlg.ed_freq },
+            { g_lang.cap_lbl_dev,  IDC_RTL_DEV,  "0",      &g_rtldlg.ed_dev  },
+            { g_lang.cap_lbl_gain, IDC_RTL_GAIN, "0",      &g_rtldlg.ed_gain },
+            { g_lang.cap_lbl_ppm,  IDC_RTL_PPM,  "0",      &g_rtldlg.ed_ppm  },
+        };
+        for (int i = 0; i < 4; ++i) {
+            HWND st = CreateWindowExA(0, "STATIC", rows[i].lbl, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                lx, y + 4, ex - lx - 6, 20, hwnd, NULL, GetModuleHandleA(NULL), NULL);
+            HWND ed = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", rows[i].def,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                (i == 0) ? lx : ex, (i == 0) ? y + 26 : y, (i == 0) ? 366 : ew, 24,
+                hwnd, (HMENU)(INT_PTR)rows[i].id, GetModuleHandleA(NULL), NULL);
+            SendMessageA(st, WM_SETFONT, (WPARAM)f, FALSE);
+            SendMessageA(ed, WM_SETFONT, (WPARAM)f, FALSE);
+            *rows[i].out = ed;
+            if (i == 0) g_rtldlg.lbl_freq = st;   /* highlighted: the required field */
+            y += (i == 0) ? rowh + 24 : rowh;
+        }
+        {
+            HWND ok = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_ok,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+                200, y + 8, 90, 28, hwnd, (HMENU)(INT_PTR)IDOK, GetModuleHandleA(NULL), NULL);
+            HWND cancel = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_cancel,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                300, y + 8, 90, 28, hwnd, (HMENU)(INT_PTR)IDCANCEL, GetModuleHandleA(NULL), NULL);
+            SendMessageA(ok, WM_SETFONT, (WPARAM)f, FALSE);
+            SendMessageA(cancel, WM_SETFONT, (WPARAM)f, FALSE);
+        }
+        return 0;
+    }
+    case WM_CTLCOLOREDIT:
+    {
+        HDC hdc = (HDC)wparam;
+        SetTextColor(hdc, CLR_TEXT);
+        SetBkColor(hdc, CLR_INPUT);
+        return (LRESULT)g_app.br_input;
+    }
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC hdc = (HDC)wparam;
+        /* The frequency label leads (required); the optional fields recede. */
+        SetTextColor(hdc, ((HWND)lparam == g_rtldlg.lbl_freq) ? CLR_BRIGHT : CLR_DIM);
+        SetBkColor(hdc, CLR_BG);
+        return (LRESULT)g_app.br_bg;
+    }
+    case WM_ERASEBKGND:
+    {
+        RECT rc; GetClientRect(hwnd, &rc);
+        FillRect((HDC)wparam, &rc, g_app.br_bg);
+        return 1;
+    }
+    case WM_DRAWITEM:
+    {
+        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lparam;
+        if (dis->CtlType == ODT_BUTTON) { draw_button(dis); return TRUE; }
+        break;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case IDOK:     g_rtldlg.accepted = 1; g_rtldlg.done = 1; return 0;
+        case IDCANCEL: g_rtldlg.accepted = 0; g_rtldlg.done = 1; return 0;
+        }
+        break;
+    case WM_CLOSE:
+        g_rtldlg.accepted = 0; g_rtldlg.done = 1;
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* Returns 1 and fills out_spec with the dsd-fme -i argument, or 0 if cancelled. */
+static int prompt_rtl_config(HWND parent, char *out_spec, size_t out_len)
+{
+    RECT pr;
+    HWND hdlg;
+    MSG m;
+    char freq[256] = {0}, dev[32] = {0}, gain[32] = {0}, ppm[32] = {0};
+    int ok;
+
+    ZeroMemory(&g_rtldlg, sizeof(g_rtldlg));
+    GetWindowRect(parent, &pr);
+
+    hdlg = CreateWindowExA(WS_EX_DLGMODALFRAME, RTLDLG_CLASS_NAME, g_lang.cap_dlg_title,
+        WS_POPUP | WS_CAPTION | WS_SYSMENU,
+        pr.left + 120, pr.top + 120, 410, 260,
+        parent, NULL, GetModuleHandleA(NULL), NULL);
+    if (!hdlg) return 0;
+    { BOOL dark = TRUE; DwmSetWindowAttribute(hdlg, 20, &dark, sizeof(dark)); }
+
+    EnableWindow(parent, FALSE);
+    ShowWindow(hdlg, SW_SHOW);
+    UpdateWindow(hdlg);
+    SetFocus(g_rtldlg.ed_freq);
+
+    while (!g_rtldlg.done && GetMessageA(&m, NULL, 0, 0) > 0) {
+        if (!IsDialogMessageA(hdlg, &m)) {
+            TranslateMessage(&m);
+            DispatchMessageA(&m);
+        }
+    }
+
+    ok = g_rtldlg.accepted;
+    if (ok) {
+        GetWindowTextA(g_rtldlg.ed_freq, freq, sizeof(freq));
+        GetWindowTextA(g_rtldlg.ed_dev,  dev,  sizeof(dev));
+        GetWindowTextA(g_rtldlg.ed_gain, gain, sizeof(gain));
+        GetWindowTextA(g_rtldlg.ed_ppm,  ppm,  sizeof(ppm));
+    }
+    EnableWindow(parent, TRUE);
+    DestroyWindow(hdlg);
+    SetForegroundWindow(parent);
+
+    if (!ok || freq[0] == '\0') return 0;
+
+    /* Dry-run / advanced: a .wav path or explicit rtl: spec is used verbatim. */
+    if (strstr(freq, ".wav") || strstr(freq, ".WAV") || strncmp(freq, "rtl", 3) == 0) {
+        snprintf(out_spec, out_len, "%s", freq);
+    } else {
+        if (dev[0]  == '\0') strcpy(dev,  "0");
+        if (gain[0] == '\0') strcpy(gain, "0");
+        if (ppm[0]  == '\0') strcpy(ppm,  "0");
+        snprintf(out_spec, out_len, "rtl:%s:%s:%s:%s:12", dev, freq, gain, ppm);
+    }
+    return 1;
 }
 
 static void show_help_dialog(HWND parent)
@@ -1928,6 +2557,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.btn_export = CreateWindowA("BUTTON", g_lang.btn_export,
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW,
             730, y, 60, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
+        g_app.btn_capture = CreateWindowA("BUTTON", g_lang.btn_capture_start,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            792, y, 120, 24, hwnd, (HMENU)ID_BTN_CAPTURE, NULL, NULL);
         g_app.btn_help = CreateWindowA("BUTTON", g_lang.btn_help,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             800, y, 55, 24, hwnd, (HMENU)ID_BTN_HELP, NULL, NULL);
@@ -2012,6 +2644,9 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.btn_stop = CreateWindowA("BUTTON", g_lang.btn_stop,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             335, y, 110, 30, hwnd, (HMENU)ID_BTN_STOP, NULL, NULL);
+        g_app.btn_listen = CreateWindowA("BUTTON", g_lang.btn_listen,
+            WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW,
+            540, y, 110, 30, hwnd, (HMENU)ID_BTN_LISTEN, NULL, NULL);
         g_app.btn_copy_key = CreateWindowA("BUTTON", g_lang.btn_copy_key,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             460, y, 70, 30, hwnd, (HMENU)ID_BTN_COPY_KEY, NULL, NULL);
@@ -2089,6 +2724,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         break;
     }
 
+    case WM_APP_CAPTURE_READY:
+        /* Unattended capture hit its target: clean up the capture, point the
+         * brute-force at the freshly written .bin and the recording, then start
+         * the crack. capture_auto_mode makes the completion handler auto-listen. */
+        stop_capture(hwnd);
+        SetWindowTextA(g_app.edit_file, g_app.capture_bin);
+        SetWindowTextA(g_app.edit_wav,  g_app.capture_raw_wav);
+        SetWindowTextA(g_app.edit_start, "0000000000");
+        SetWindowTextA(g_app.edit_end,   "FFFFFFFFFF");
+        g_app.capture_auto_mode  = 1;
+        g_app.notified_completion = 0;
+        PostMessageA(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_START, 0), 0);
+        return 0;
+
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case ID_BTN_BROWSE:     choose_file(hwnd); return 0;
@@ -2099,6 +2748,8 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case ID_BTN_PAUSE:      on_pause_resume(); return 0;
         case ID_BTN_STOP:       on_stop(); return 0;
         case ID_BTN_COPY_KEY:   copy_key_to_clipboard(hwnd); return 0;
+        case ID_BTN_LISTEN:     start_listen(hwnd); return 0;
+        case ID_BTN_CAPTURE:    start_capture(hwnd); return 0;
         case ID_BTN_HELP:       show_help_dialog(hwnd); return 0;
         case ID_BTN_LANG:
             g_lang_ptr = (g_lang_ptr == &g_lang_es) ? &g_lang_en : &g_lang_es;
@@ -2216,6 +2867,13 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             CloseHandle(g_app.demod_thread);
             g_app.demod_thread = NULL;
         }
+        if (g_app.listen_thread) {
+            WaitForSingleObject(g_app.listen_thread, 5000);
+            CloseHandle(g_app.listen_thread);
+            g_app.listen_thread = NULL;
+        }
+        if (g_app.capture_running || g_app.capture_monitor_thread)
+            stop_capture(hwnd);
         updater_cleanup();
         PostQuitMessage(0);
         return 0;
@@ -2252,6 +2910,15 @@ int run_gui(HINSTANCE instance, int cmd_show)
     wc.lpfnWndProc = help_wnd_proc;
     wc.hInstance = instance;
     wc.lpszClassName = HELP_CLASS_NAME;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = NULL;
+    RegisterClassA(&wc);
+
+    /* Register RTL-SDR capture config dialog class */
+    ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc = rtl_dlg_wnd_proc;
+    wc.hInstance = instance;
+    wc.lpszClassName = RTLDLG_CLASS_NAME;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = NULL;
     RegisterClassA(&wc);
