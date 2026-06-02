@@ -46,6 +46,9 @@ env/
 # Test data (may contain captured radio traffic — do not publish)
 test/
 
+# Paper / research write-up (kept private — do not publish)
+paper/
+
 # Claude Code
 .claude/settings.local.json
 
@@ -88,3 +91,13 @@ eddsa_priv.key
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Project website (not hosted on GitHub)
+web/
+
+# Build output directories (compiled artifacts, not tracked)
+bin/Release/
+build_cl/
+
+# Local preview / launch config (per-machine dev tooling)
+.claude/launch.json
