@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that is hard or impossible today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would like to see. Sketches, flags, or UI ideas welcome.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - GPU engine / performance
+        - New platform or GPU back-end (e.g. AMD, Intel, Apple)
+        - GUI
+        - CLI / scripting
+        - Capture / DSD-FME pipeline
+        - Packaging / distribution
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        Out of scope by design: non-RC4 ciphers (AES, etc.) and anything aimed at
+        targeting third-party systems. See "What this does NOT do" in the README.

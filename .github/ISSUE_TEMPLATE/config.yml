@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & discussion
+    url: https://github.com/FSP-Labs/FSP.DMRCrack/discussions
+    about: Usage questions, ideas, hardware/benchmark reports, show-and-tell.
+  - name: Report a security vulnerability
+    url: https://github.com/FSP-Labs/FSP.DMRCrack/security/advisories/new
+    about: Privately report a vulnerability in the tool. See SECURITY.md.
+  - name: Legal & responsible use
+    url: https://github.com/FSP-Labs/FSP.DMRCrack#legal--responsible-use
+    about: This tool is for authorized testing only. Read before using.

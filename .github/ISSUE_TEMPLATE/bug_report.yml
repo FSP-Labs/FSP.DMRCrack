@@ -1,0 +1,59 @@
+name: Bug report
+description: Something crashes, builds wrong, or behaves unexpectedly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve FSP.DMRCrack. Please do not paste captured
+        radio traffic or keys from systems you are not authorized to test.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected vs what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Input file (or how it was generated), command line or GUI actions.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: GPU back-end
+      options:
+        - CUDA (NVIDIA)
+        - HIP / ROCm (AMD)
+        - OpenCL (portable)
+        - CPU only
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, GPU model, driver/toolkit version, dmrcrack version.
+      placeholder: "Windows 11 / RTX 3060 / CUDA 12.4 / v0.3.3"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Crash output, stack trace, or relevant .dslog.txt lines (redact anything sensitive).
+      render: shell
+  - type: checkboxes
+    id: authorized
+    attributes:
+      label: Authorized use
+      options:
+        - label: This report does not include data from systems I am not authorized to test.
+          required: true
