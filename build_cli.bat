@@ -1,10 +1,16 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
-if errorlevel 1 (echo ERROR: vcvars64 failed & exit /b 1)
+cd /d "%~dp0"
+
+call "%~dp0_vsenv.bat"
+if errorlevel 1 exit /b %errorlevel%
+
+if not exist bin mkdir bin
+
 nvcc -O3 ^
   -gencode arch=compute_75,code=sm_75 ^
   -gencode arch=compute_86,code=sm_86 ^
   -gencode arch=compute_89,code=sm_89 ^
+  -gencode arch=compute_89,code=compute_89 ^
   -cudart static -Iinclude ^
   -DNO_GUI ^
   -Xcompiler "/W4 /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS" ^

@@ -1,26 +1,10 @@
 @echo off
 cd /d "%~dp0"
 
-REM Auto-detect Visual Studio installation using vswhere
-set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-if not exist "%VSWHERE%" set "VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe"
-if not exist "%VSWHERE%" (
-    echo ERROR: vswhere.exe not found. Install Visual Studio 2017 or later.
-    exit /b 1
-)
-for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath`) do set "VSINSTALL=%%i"
-if not defined VSINSTALL (
-    echo ERROR: No suitable Visual Studio installation found.
-    exit /b 1
-)
-call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64
+call "%~dp0_vsenv.bat"
 if errorlevel 1 exit /b %errorlevel%
 
-REM Ensure CUDA paths are available after vcvarsall resets the environment
-if defined CUDA_PATH (
-    set "PATH=%CUDA_PATH%\bin;%PATH%"
-    set "INCLUDE=%CUDA_PATH%\include;%INCLUDE%"
-)
+if not exist bin mkdir bin
 
 echo Building FSP.DMRCrack...
 REM Multi-arch: native SASS for sm_75/86/89; PTX fallback covers sm_100+ via JIT
