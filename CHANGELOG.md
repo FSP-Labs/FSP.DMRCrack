@@ -9,14 +9,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **In-app listen (decrypt to audio)** — after a key is recovered, the GUI can
+  re-run DSD-FME with `-1 <key5>` to decrypt the source capture to a plain WAV
+  and open it in the system player, closing the capture -> crack -> listen loop.
+  Verified end to end on real data.
+- **Live RTL-SDR capture (experimental)** — a supervised, unattended capture mode:
+  a frequency dialog builds the `rtl:dev:freq:gain:ppm:bw` spec, DSD-FME runs in a
+  Job Object, a monitor thread watches for encrypted voice and auto-starts the
+  crack once enough frames accumulate. Not yet validated on hardware.
+- **CLI: dictionary, potfile, JSON and benchmark modes** —
+  `--wordlist <file>` scores a list of candidate hex keys (one per line; `#`
+  comments and blanks ignored) before any brute-force; `--potfile <file>` appends
+  recovered keys in a `basename:key:score` potfile; `--json` prints the final
+  result as a JSON object (works in single-key, wordlist and full-search modes);
+  `--benchmark` measures sustained throughput on the current machine over ~5 s and
+  exits. Added a bash-completion script (`completions/dmrcrack.bash`, installed to
+  `bash-completion/completions/dmrcrack` on UNIX) and a `Dockerfile` (multi-stage
+  OpenCL build on a Debian/Kali base).
+- **Portable OpenCL GPU back-end** (`-DUSE_OPENCL=ON`) — vendor-neutral kernel
+  that runs on NVIDIA, AMD and Intel OpenCL drivers, with free build deps
+  (`opencl-headers` + an ICD loader). This is the back-end the Debian/Kali
+  package now builds. `src/dmrcrack.cl` ports the proven CUDA kernels 1:1
+  (`bruteforce_kernel_strict → kernel_strict`, `bruteforce_kernel_hytera →
+  kernel_hytera`) — identical KMI9 / Hytera EP scoring, abs-floor / relative /
+  chi²-floor pruning, and packed 64-bit `atomicMax` best-candidate selection
+  (emulated via `cl_khr_int64_base_atomics` `atom_cmpxchg`). `src/bruteforce_cl.cpp`
+  is the self-contained OpenCL host engine; it falls back to the multi-threaded
+  CPU scorer when no OpenCL device is present (common on Kali VMs) and for legacy
+  statistical modes (0/1). The kernel source is embedded at build time, so there
+  is no runtime `.cl` file dependency. A compile + smoke-run OpenCL CI job
+  validates the back-end on every push.
+- **Hytera Enhanced Privacy support** (ALG=0x02) — new `bruteforce_kernel_hytera`
+  for Hytera EP captures. Auto-detected when ≥ 90 % of loaded lines carry
+  `ALG=02` + MI (`mode_policy=4`). Key schedule: RC4 KSA with `key5` (no MI in
+  KSA), 21-byte keystream XOR'd with `kiv[i%5]` where `kiv[0]=key5[0]`,
+  `kiv[1..4]=key5[1..4]^MI_bytes[0..3]` (big-endian). All 6 bursts per superframe
+  share the same 21-byte keystream. Separate kernel avoids any overhead on
+  MOTOTRBO paths; CPU 4-way worker also handles Hytera EP.
+- **KPA silence-frame filter upgraded** — `kpa_silence_check_dev` upgraded from a
+  1-bit check to a 24-bit check (first 3 bytes of the first sub-frame must all be
+  `0x00` after decryption), reducing the false-positive rate from 1/2 to 1/2²⁴.
+  The `cudaMemcpyToSymbol` calls that upload silence-frame indices to constant
+  memory are now correctly placed after `use_ilp2` is determined, so the filter
+  only activates on non-ILP-2 paths where the cost tradeoff is acceptable.
+- **Checkpoint / resume — best candidate preserved** (#34 extension) — the
+  `.progress` sidecar now saves `best_key` and `best_score` in addition to the
+  key offset. On resume both fields are restored, so a candidate found before the
+  interruption is not lost.
+- **Checkpoint / resume — overall progress preserved** — the `.progress` sidecar
+  now also saves `original_start` (the key range start before any resume). On
+  resume the progress bar and ETA reflect the cumulative percentage since the very
+  first run, not just the current session (e.g. a session interrupted at 63 %
+  resumes showing 63 %, not 0 %).
+- **Checkpoint / resume — CPU-only path** — when no CUDA GPU is available the
+  CPU worker (thread 0) now writes the same `.progress` checkpoint every 30 s,
+  and deletes it on clean completion.
 - **Linux / AMD ROCm port** — engine compiles and runs on Linux without code changes;
   Windows-only paths are gated behind `platform.h` wrappers:
   - **Platform HAL** (`include/platform.h`) — portable wrappers for threading,
     mutexes, manual-reset events, 32/64-bit atomics, `plat_sleep_ms`, high-resolution
     timing, CPU count, mkdir, and file deletion for Win32 and POSIX.
   - **HIP/ROCm backend** (`include/gpu_compat.h`) — aliases `cudaXxx → hipXxx` when
-    `-DUSE_HIP=ON`; zero-overhead pass-through on NVIDIA builds. GPU targets configurable
-    via `GPU_TARGETS` CMake variable (default: gfx1030, gfx1100, gfx906, …).
+    `-DUSE_HIP=ON`; zero-overhead pass-through on NVIDIA builds. Uses first-class
+    CMake HIP language support (`enable_language(HIP)`); GPU targets configurable
+    via `CMAKE_HIP_ARCHITECTURES` (default: gfx906/908/90a, gfx10xx, gfx11xx).
+    A compile-only ROCm CI job validates the HIP back-end on every push.
   - **CMake build system** (`CMakeLists.txt`) — replaces the Windows-only `build.bat`
     for source builds; `USE_HIP=ON` for AMD, `NO_GUI=ON` forced on Linux, CUDA
     sm_75/86/89 with version-gated sm_100 and PTX fallback, `BUILD_TESTS` option.
@@ -39,7 +96,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   launched from a terminal with `--help` or `--version` it prints to stdout and exits
   without opening a window (Windows only).
 
+### Changed
+- **GUI redesign ("Signal Operator")** — cool-tinted dark palette with two-color
+  semantics (cyan = process, amber = recovered key), a single primary action with
+  ghost secondary buttons, recovered-key tile given top billing, empty/idle states,
+  and a coherent owner-drawn RTL-SDR capture dialog. All user-facing strings kept
+  ASCII to avoid CP-1252 mojibake under the Win32 ANSI APIs.
+
 ### Fixed
+- **Checkpoint `end` field written as GPU share instead of full keyspace** — when
+  CPU assist workers were spawned (mode_policy ≥ 2), `total_keys` was recut to
+  `gpu_range` (80 % of keyspace) before the checkpoint write. The `.progress` file
+  then stored `end = start + gpu_range − 1`, which never matched `cfg.end_key`.
+  Result: the resume dialog never appeared for KMI9 / Hytera EP captures. Fixed:
+  checkpoint always writes `engine->cfg.end_key` as the `end` field.
 - **`stop_sig` use-after-scope in double-buffer dispatch** (#6) — `stop_sig` was a
   stack `int` whose address was passed to `cudaMemcpyAsync`; both async copies now
   reference a single `const int` at stable block scope.
