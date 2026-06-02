@@ -31,16 +31,16 @@ jobs:
           languages: ${{ matrix.language }}
           queries: security-extended
 
-      # C/C++ requires a traced build.  We use build_test.bat (MSVC only, no
-      # CUDA) which compiles the core C sources and is available on any runner
-      # that has Visual Studio — no CUDA Toolkit installation needed.
+      # C/C++ requires a traced build.  build_analysis.bat (MSVC only, no CUDA)
+      # compile-only builds the product's real C sources — GUI, CLI, updater,
+      # payload/RC4 logic — so the scanner covers the actual application instead
+      # of a test harness.  No test utilities or sample keys are built in CI.
       # Python is interpreted; CodeQL scans it without a build step.
       - name: Build C sources for analysis
         if: matrix.language == 'c-cpp'
         shell: cmd
         run: |
-          if not exist bin mkdir bin
-          call build_test.bat
+          call build_analysis.bat
           if errorlevel 1 exit /b 1
 
       - name: Perform CodeQL analysis

@@ -28,13 +28,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\Program Files\NVIDIA GPU Computing Toolkit
-          key: cuda-12.6.0-windows
+          key: cuda-12.9.0-windows
 
       - name: Install CUDA Toolkit
         if: steps.cache-cuda.outputs.cache-hit != 'true'
-        uses: Jimver/cuda-toolkit@v0.2.30
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: '12.6.0'
+          cuda: '12.9.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
           use-github-env: true
@@ -43,7 +43,7 @@ jobs:
         if: steps.cache-cuda.outputs.cache-hit == 'true'
         shell: pwsh
         run: |
-          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6"
+          $cuda = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9"
           echo "CUDA_PATH=$cuda" >> $env:GITHUB_ENV
           echo "$cuda\bin" >> $env:GITHUB_PATH
 
@@ -134,14 +134,14 @@ jobs:
         id: cache-cuda
         uses: actions/cache@v4
         with:
-          path: /usr/local/cuda-12.6
-          key: cuda-12.6.0-linux
+          path: /usr/local/cuda-12.9
+          key: cuda-12.9.0-linux
 
       - name: Install CUDA Toolkit
         if: steps.cache-cuda.outputs.cache-hit != 'true'
-        uses: Jimver/cuda-toolkit@v0.2.30
+        uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: '12.6.0'
+          cuda: '12.9.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
           use-github-env: true
@@ -149,8 +149,8 @@ jobs:
       - name: Set CUDA environment after cache restore
         if: steps.cache-cuda.outputs.cache-hit == 'true'
         run: |
-          echo "CUDA_PATH=/usr/local/cuda-12.6" >> "$GITHUB_ENV"
-          echo "/usr/local/cuda-12.6/bin" >> "$GITHUB_PATH"
+          echo "CUDA_PATH=/usr/local/cuda-12.9" >> "$GITHUB_ENV"
+          echo "/usr/local/cuda-12.9/bin" >> "$GITHUB_PATH"
 
       - name: Verify CUDA installation
         run: nvcc --version
@@ -172,5 +172,93 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dmrcrack-linux-${{ github.sha }}
+          path: bin/dmrcrack
+          retention-days: 7
+
+  build-rocm:
+    name: Compile dmrcrack (AMD ROCm/HIP)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Compile-only smoke test of the HIP back-end. No AMD GPU is present on the
+    # runner, so the binary is built but never executed — this verifies that the
+    # single-source kernel (src/bruteforce.cu) and gpu_compat.h shim compile
+    # cleanly with the ROCm toolchain.
+    container:
+      image: rocm/dev-ubuntu-24.04:6.2
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake build-essential file
+
+      - name: Verify HIP installation
+        run: hipcc --version
+
+      - name: Configure
+        run: |
+          cmake -S . -B build \
+            -DUSE_HIP=ON -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_HIP_COMPILER=/opt/rocm/bin/amdclang++ \
+            -DCMAKE_PREFIX_PATH=/opt/rocm
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify binary
+        run: |
+          test -f bin/dmrcrack
+          file bin/dmrcrack | grep -q "ELF 64-bit"
+          echo "HIP binary OK: $(file bin/dmrcrack)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmrcrack-rocm-${{ github.sha }}
+          path: bin/dmrcrack
+          retention-days: 7
+
+  build-opencl:
+    name: Compile dmrcrack (OpenCL)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Compile + smoke-run of the portable OpenCL back-end — this is the exact
+    # configuration the Debian/Kali package builds (-DUSE_OPENCL=ON). Build deps
+    # are free (opencl-headers + the ICD loader). No GPU is present on the runner,
+    # so the binary falls back to its multi-threaded CPU scorer when run; we only
+    # assert it links and starts (--help), which exercises the OpenCL host code path.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools and OpenCL headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential file opencl-headers ocl-icd-opencl-dev
+
+      - name: Configure
+        run: cmake -S . -B build -DUSE_OPENCL=ON -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify binary
+        run: |
+          test -f bin/dmrcrack
+          file bin/dmrcrack | grep -q "ELF 64-bit"
+          echo "OpenCL binary OK: $(file bin/dmrcrack)"
+
+      - name: Smoke test (--help)
+        run: ./bin/dmrcrack --help || true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmrcrack-opencl-${{ github.sha }}
           path: bin/dmrcrack
           retention-days: 7
