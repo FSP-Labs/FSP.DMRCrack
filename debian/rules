@@ -5,10 +5,19 @@ export DH_VERBOSE = 1
 %:
 	dh $@ --buildsystem=cmake
 
+# Build the portable OpenCL engine: runs on any vendor's OpenCL driver
+# (NVIDIA/AMD/Intel) and falls back to the multi-threaded CPU engine when no
+# GPU is present. Only opencl-headers + ocl-icd-opencl-dev are needed at build
+# time, so the package builds on Debian/Kali autobuilders without proprietary
+# dependencies.
 override_dh_auto_configure:
 	dh_auto_configure -- \
+		-DUSE_OPENCL=ON \
+		-DUSE_CUDA=OFF \
+		-DUSE_HIP=OFF \
 		-DNO_GUI=ON \
 		-DCMAKE_BUILD_TYPE=Release
 
 override_dh_auto_test:
-	# Tests require a CUDA-capable GPU; skip in package build
+	# No test suite is run at package build time (the strict-score test needs
+	# captured sample data that is not shipped in the source package).

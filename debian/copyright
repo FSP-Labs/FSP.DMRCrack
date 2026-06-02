@@ -2,6 +2,7 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: dmrcrack
 Upstream-Contact: Felix Sasian Pacheco <sasianfelix@gmail.com>
 Source: https://github.com/FSP-Labs/FSP.DMRCrack
+Files-Excluded: vendor/winsparkle/*
 
 Files: *
 Copyright: 2026 FSP-Labs

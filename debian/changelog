@@ -1,5 +1,9 @@
-dmrcrack (0.3.3-1) unstable; urgency=medium
+dmrcrack (0.3.3+dfsg-1) unstable; urgency=medium
 
   * Initial Debian package.
+  * Build the portable CPU-only engine (no CUDA/HIP build dependency) so the
+    package builds with a free toolchain on the Debian/Kali autobuilders.
+  * Repack the upstream tarball (+dfsg) to drop the prebuilt Windows-only
+    WinSparkle binaries (see debian/copyright Files-Excluded).
 
- -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Wed, 27 May 2026 00:00:00 +0000
+ -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Mon, 01 Jun 2026 00:00:00 +0000

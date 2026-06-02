@@ -17,8 +17,11 @@ format (produced by DSD\-FME with
 DSP output mode) and exhaustively searches the 40\-bit keyspace
 (up to 1,099,511,627,775 candidates).
 .PP
-When an NVIDIA CUDA\-capable GPU is available, the search is offloaded to the
-GPU with a configurable CPU assist.
+When a compatible GPU is available, the search is offloaded to the GPU with a
+configurable CPU assist.
+The Debian package is built with the portable OpenCL back\-end, which runs on any
+vendor's OpenCL driver (NVIDIA, AMD or Intel); NVIDIA CUDA and AMD ROCm/HIP
+back\-ends are available when building from source.
 If no compatible GPU is detected,
 .B dmrcrack
 falls back to a multi\-threaded CPU search automatically.
@@ -56,7 +59,7 @@ Number of CPU worker threads.
 Default: number of logical CPUs minus one.
 .TP
 .BI \-\-gpu\-pct " 50\-95"
-Percentage of the keyspace assigned to the GPU when CUDA is available.
+Percentage of the keyspace assigned to the GPU when a GPU is available.
 The remaining fraction is searched in parallel by CPU workers.
 Default:
 .B 80
@@ -87,9 +90,13 @@ Error (missing arguments, unreadable payload file, engine failure).
 .SH FILES
 .TP
 .IB payload.bin .progress
-Checkpoint file written periodically during a search, in the same directory
+Checkpoint file written every 30 seconds during a search, in the same directory
 as the payload file.
-Contains the last tested key so the search can be resumed.
+Stores the next key to test, the full keyspace end, the best candidate found so
+far (key + score), and the original start key from the first session.
+On the next run, if this file is found and the keyspace end matches, the search
+resumes from the saved offset with the progress bar reflecting cumulative progress
+across all sessions.
 Deleted automatically when the search completes successfully.
 .SH EXAMPLES
 Full keyspace search using a captured payload:
@@ -126,6 +133,18 @@ Search a subrange on 8 CPU threads, GPU takes 50% of keyspace:
 dmrcrack \-\-bin capture.bin \-\-start 0000000000 \-\-end 000FFFFFFF \-\-threads 8 \-\-gpu\-pct 50
 .EE
 .RE
+.SH SECURITY AND LEGAL NOTICE
+.B dmrcrack
+is a security\-auditing and research tool.
+Use it
+.B only
+against radio communications you own or are explicitly authorized in writing to
+test.
+Unauthorized interception, decryption, or disclosure of radio communications is
+illegal in most jurisdictions and may carry serious criminal and civil penalties.
+All responsibility and liability for use of this tool rests entirely with the
+user; the authors accept no liability for misuse.
+The software is provided "as is", without warranty of any kind.
 .SH SEE ALSO
 The project repository and documentation are available at:
 .UR https://github.com/FSP\-Labs/FSP.DMRCrack

@@ -3,29 +3,39 @@ Section: net
 Priority: optional
 Maintainer: Felix Sasian Pacheco <sasianfelix@gmail.com>
 Build-Depends: debhelper-compat (= 13),
-               cmake (>= 3.18),
-               nvidia-cuda-toolkit [amd64]
-Standards-Version: 4.6.2
+               cmake (>= 3.21),
+               opencl-headers,
+               ocl-icd-opencl-dev
+Standards-Version: 4.7.0
 Homepage: https://github.com/FSP-Labs/FSP.DMRCrack
 Vcs-Git: https://github.com/FSP-Labs/FSP.DMRCrack.git
 Vcs-Browser: https://github.com/FSP-Labs/FSP.DMRCrack
 Rules-Requires-Root: no
 
 Package: dmrcrack
-Architecture: amd64
+Architecture: any
 Depends: ${misc:Depends}, ${shlibs:Depends}
-Description: GPU-accelerated RC4 key recovery for DMR Enhanced Privacy
+Recommends: ocl-icd-libopencl1
+Suggests: dsd-fme, python3, mesa-opencl-icd, nvidia-opencl-icd
+Description: RC4 key recovery for DMR Enhanced Privacy voice
  dmrcrack brute-forces the 5-byte (40-bit) RC4 key used in DMR Enhanced
  Privacy encrypted voice transmissions. It takes demodulated voice frame
  payloads in .bin format (produced by DSD-FME with -Q DSP output) and
  exhaustively searches the 40-bit keyspace (up to ~1.1 trillion candidates).
  .
- When an NVIDIA CUDA-capable GPU is available the search is offloaded to the
- GPU; a multi-threaded CPU fallback is used automatically otherwise. GPU/CPU
- work split, search range, and thread count are configurable. Progress is
- periodically checkpointed so an interrupted search can be resumed.
+ The Debian package builds the portable OpenCL GPU back-end, which runs on
+ any vendor's OpenCL driver (NVIDIA, AMD or Intel) and falls back to a
+ multi-threaded CPU engine when no GPU is available. It has no proprietary
+ build dependencies. Optional NVIDIA CUDA and AMD ROCm/HIP back-ends are
+ available when building from source (-DUSE_CUDA=ON or -DUSE_HIP=ON).
+ GPU/CPU work split, search range, and thread count are configurable, and
+ progress is periodically checkpointed so an interrupted search can be
+ resumed.
  .
  Typical workflow: capture an encrypted DMR session with a software-defined
  radio, demodulate it with DSD-FME using -Q DSP output mode, convert the
  output to .bin format with the included dsdfme_dsp_to_bin.py script, then
  run dmrcrack against the resulting payload file.
+ .
+ This is a security research and auditing tool. Use it only on
+ transmissions you are authorised to analyse.
