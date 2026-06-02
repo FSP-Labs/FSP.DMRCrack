@@ -26,7 +26,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <immintrin.h>   /* AVX2 intrinsics for 4-way CPU worker S-box init */
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#  include <immintrin.h>   /* AVX2 intrinsics for 4-way CPU worker S-box init */
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -169,8 +171,50 @@ __device__ __forceinline__ void compose_kmi9_dev(const unsigned char key5[5], ui
     out9[8] = (unsigned char)(mi & 0xFFu);
 }
 
-/* KPA 1-bit pre-filter: MSB of plaintext[0] == 0 for unvoiced/silence AMBE.
- * Returns 1 if key passes all silence checks, 0 if definitely wrong.
+__device__ __forceinline__ void rc4_init_dev(RC4_CTX_DEV *ctx, const unsigned char *key)
+{
+    rc4_ksa5_dev(ctx, key);
+}
+
+__device__ __forceinline__ void rc4_crypt_dev(RC4_CTX_DEV *ctx, const unsigned char *in, unsigned char *out, int len)
+{
+    unsigned char i = ctx->i;
+    unsigned char j = ctx->j;
+
+    for (int k = 0; k < len; k++) {
+        i = (i + 1) & 0xFF;
+        j = (j + ctx->S[i]) & 0xFF;
+        unsigned char t = ctx->S[i];
+        ctx->S[i] = ctx->S[j];
+        ctx->S[j] = t;
+
+        unsigned char K = ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];
+        out[k] = in[k] ^ K;
+    }
+
+    ctx->i = i;
+    ctx->j = j;
+}
+
+__device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
+{
+    unsigned char i = ctx->i;
+    unsigned char j = ctx->j;
+    for (int k = 0; k < nbytes; ++k) {
+        i = (i + 1) & 0xFF;
+        j = (j + ctx->S[i]) & 0xFF;
+        unsigned char t = ctx->S[i];
+        ctx->S[i] = ctx->S[j];
+        ctx->S[j] = t;
+    }
+    ctx->i = i;
+    ctx->j = j;
+}
+
+/* KPA 24-bit pre-filter for silence frames: decrypt 3 bytes (C0+C1) and verify
+ * they equal the AMBE silence pattern (all zeros = unvoiced, zero pitch, all bands
+ * unvoiced).  A wrong key passes by chance with probability 2^-24 ≈ 60 ppb —
+ * ~16 million times stronger than the old single-bit check.
  * burst_drop = 256 + (silence_idx % 6) * 21 */
 __device__ __forceinline__ int kpa_silence_check_dev(
     const unsigned char key5[5],
@@ -183,27 +227,43 @@ __device__ __forceinline__ int kpa_silence_check_dev(
 
     RC4_CTX_DEV rc4;
     rc4_ksa9_dev(&rc4, kmi9);
+    rc4_discard_dev(&rc4, burst_drop);
 
-    /* Discard burst_drop bytes using the same PRGA idiom as rc4_discard_dev */
-    unsigned char ri = rc4.i;
-    unsigned char rj = rc4.j;
-    for (uint32_t d = 0; d < burst_drop; d++) {
-        ri = (ri + 1) & 0xFF;
-        rj = (rj + rc4.S[ri]) & 0xFF;
-        unsigned char t = rc4.S[ri];
-        rc4.S[ri] = rc4.S[rj];
-        rc4.S[rj] = t;
+    /* Decrypt 3 bytes of the silence frame's cipher pack (covers C0+C1 = 24 bits).
+     * For AMBE silence: C0=0 (unvoiced, zero pitch), C1=0 (all bands unvoiced). */
+    const unsigned char *cp = d_const_cipher_packs + (int)silence_idx * DMR_CIPHER_PACK_BYTES;
+    unsigned char plain3[3];
+    rc4_crypt_dev(&rc4, cp, plain3, 3);
+
+    return (plain3[0] == 0 && plain3[1] == 0 && plain3[2] == 0) ? 1 : 0;
+}
+
+/* Hytera Enhanced Privacy (ALG=0x02) keystream generation.
+ * RC4 KSA with key5 (drop=0), then kiv-XOR: ks[i] = rc4[i] ^ kiv[i%5].
+ * kiv[0]=key5[0], kiv[1..4]=key5[1..4]^MI_bytes[0..3] (big-endian MI).
+ * All 6 bursts in a superframe share the same 21-byte keystream. */
+__device__ __forceinline__ void compute_hytera_ks_dev(
+    const unsigned char key5[5], uint32_t mi,
+    unsigned char ks_out[21])
+{
+    unsigned char kiv[5];
+    kiv[0] = key5[0];
+    kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
+    kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
+    kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
+    kiv[4] = key5[4] ^ (unsigned char)( mi        & 0xFFu);
+
+    RC4_CTX_DEV rc4;
+    rc4_ksa5_dev(&rc4, key5);  /* KSA with key5, drop=0 */
+
+    unsigned char ri = 0, rj = 0;
+    #pragma unroll
+    for (int idx = 0; idx < 21; idx++) {
+        ri++;
+        rj = (unsigned char)(rj + rc4.S[ri]);
+        unsigned char t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
+        ks_out[idx] = kiv[idx % 5] ^ rc4.S[(unsigned char)(rc4.S[ri] + rc4.S[rj])];
     }
-    /* Read one keystream byte */
-    ri = (ri + 1) & 0xFF;
-    rj = (rj + rc4.S[ri]) & 0xFF;
-    unsigned char t2 = rc4.S[ri];
-    rc4.S[ri] = rc4.S[rj];
-    rc4.S[rj] = t2;
-    unsigned char ks0 = rc4.S[(rc4.S[ri] + rc4.S[rj]) & 0xFF];
-
-    unsigned char c0 = d_const_cipher_packs[silence_idx * DMR_CIPHER_PACK_BYTES];
-    return ((ks0 >> 7) == (c0 >> 7)) ? 1 : 0;
 }
 
 /* KPA pre-filter macros — used inside kernel loops.
@@ -243,45 +303,6 @@ __device__ __forceinline__ int kpa_silence_check_dev(
         }                                                                         \
     }
 
-__device__ __forceinline__ void rc4_init_dev(RC4_CTX_DEV *ctx, const unsigned char *key)
-{
-    rc4_ksa5_dev(ctx, key);
-}
-
-__device__ __forceinline__ void rc4_crypt_dev(RC4_CTX_DEV *ctx, const unsigned char *in, unsigned char *out, int len)
-{
-    unsigned char i = ctx->i;
-    unsigned char j = ctx->j;
-    
-    for (int k = 0; k < len; k++) {
-        i = (i + 1) & 0xFF;
-        j = (j + ctx->S[i]) & 0xFF;
-        unsigned char t = ctx->S[i];
-        ctx->S[i] = ctx->S[j];
-        ctx->S[j] = t;
-        
-        unsigned char K = ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];
-        out[k] = in[k] ^ K;
-    }
-    
-    ctx->i = i;
-    ctx->j = j;
-}
-
-__device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
-{
-    unsigned char i = ctx->i;
-    unsigned char j = ctx->j;
-    for (int k = 0; k < nbytes; ++k) {
-        i = (i + 1) & 0xFF;
-        j = (j + ctx->S[i]) & 0xFF;
-        unsigned char t = ctx->S[i];
-        ctx->S[i] = ctx->S[j];
-        ctx->S[j] = t;
-    }
-    ctx->i = i;
-    ctx->j = j;
-}
 
 /* Process 7 bytes of RC4 keystream but only output the first 3.
  * Split into two separate loops to eliminate the inner branch and avoid
@@ -1091,6 +1112,134 @@ void bruteforce_kernel_strict_ilp2(
         atomicAdd(dev_keys_tested, (unsigned long long)local_keys);
 }
 
+/* =========================================================================
+ * HYTERA EP KERNEL — Hytera Enhanced Privacy (ALG=0x02, mode_policy=4)
+ * Same scoring structure as bruteforce_kernel_strict but uses a fixed
+ * 21-byte keystream per superframe instead of KMI9 RC4.
+ * Kept in a separate kernel so the MOTOTRBO kernels carry zero overhead.
+ * ========================================================================= */
+__global__ __launch_bounds__(256, 2)
+void bruteforce_kernel_hytera(
+    uint64_t start_key,
+    uint64_t total_keys,
+    int payload_count,
+    uint32_t global_mi,
+    unsigned long long* __restrict__ dev_keys_tested,
+    unsigned long long* __restrict__ dev_best_packed,
+    int* __restrict__ dev_stop_requested)
+{
+    uint64_t tid = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
+    uint64_t stride = (uint64_t)gridDim.x * blockDim.x;
+    const int enable_prune = (total_keys > (1ULL << 20)) ? 1 : 0;
+    int local_keys = 0;
+
+    for (uint64_t i = tid; i < total_keys; i += stride) {
+        if ((i & STOP_POLL_MASK) == 0 && dev_stop_requested[0]) return;
+
+        uint64_t current_key = start_key + i;
+        unsigned char key[5];
+        key_to_5bytes_dev(current_key, key);
+
+        float total_score = 0.0f;
+        int processed_bursts = 0;
+
+        unsigned int bcnt_p[12];
+        #pragma unroll
+        for (int k = 0; k < 12; k++) bcnt_p[k] = 0u;
+
+#define HBCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
+#define HBCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
+
+        for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
+            uint32_t line_mi = global_mi;
+            if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u))
+                line_mi = d_const_mi[sf_base];
+
+            unsigned char ks[21];
+            compute_hytera_ks_dev(key, line_mi, ks);
+
+            for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
+                int p = sf_base + burst_pos;
+                if (p >= payload_count) break;
+
+                const unsigned char *cp = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
+                unsigned char p0[3], p1[3], p2[3];
+                p0[0]=cp[0]^ks[0];  p0[1]=cp[1]^ks[1];  p0[2]=cp[2]^ks[2];
+                p1[0]=cp[7]^ks[7];  p1[1]=cp[8]^ks[8];  p1[2]=cp[9]^ks[9];
+                p2[0]=cp[14]^ks[14];p2[1]=cp[15]^ks[15];p2[2]=cp[16]^ks[16];
+
+                int h01 = __popc((unsigned int)(p0[0]^p1[0]))
+                        + __popc((unsigned int)(p0[1]^p1[1]))
+                        + __popc((unsigned int)(p0[2]^p1[2]));
+                int h12 = __popc((unsigned int)(p1[0]^p2[0]))
+                        + __popc((unsigned int)(p1[1]^p2[1]))
+                        + __popc((unsigned int)(p1[2]^p2[2]));
+
+                total_score += (float)(48 - h01 - h12);
+                processed_bursts++;
+
+                #pragma unroll
+                for (int b = 0; b < 8; b++) HBCNT_ADD(b,    (p0[0] >> (7-b)) & 1);
+                #pragma unroll
+                for (int b = 0; b < 8; b++) HBCNT_ADD(8+b,  (p0[1] >> (7-b)) & 1);
+                #pragma unroll
+                for (int b = 0; b < 8; b++) HBCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
+
+                if (enable_prune && processed_bursts >= 1 &&
+                    total_score < d_abs_floor[processed_bursts]) {
+                    goto hytera_next_key;
+                }
+            }
+
+            if (enable_prune && processed_bursts >= 6) {
+                float best_now = unpack_score_dev(__ldg(dev_best_packed));
+                float max_possible = total_score + (float)(payload_count - processed_bursts) * 48.0f;
+                if (max_possible <= best_now) break;
+            }
+
+            if (enable_prune && processed_bursts >= 12) {
+                float half_n = (float)processed_bursts * 0.5f;
+                float chi2_mid = 0.0f;
+                #pragma unroll
+                for (int b = 0; b < 24; b++) {
+                    float dev = HBCNT_GET(b) - half_n;
+                    chi2_mid += dev * dev;
+                }
+                float chi2_floor = 6.0f * (float)processed_bursts
+                                 - 3.0f * __fsqrt_rn(48.0f * (float)processed_bursts);
+                if (chi2_mid < chi2_floor) goto hytera_next_key;
+            }
+        }
+
+        if (processed_bursts == payload_count) {
+            if (processed_bursts >= 6) {
+                float half_n = (float)processed_bursts * 0.5f;
+                float chi2 = 0.0f;
+                #pragma unroll
+                for (int b = 0; b < 24; b++) {
+                    float dev = HBCNT_GET(b) - half_n;
+                    chi2 += dev * dev;
+                }
+                total_score += chi2 / (float)processed_bursts;
+            }
+            update_best_packed(total_score, current_key, dev_best_packed);
+        }
+
+#undef HBCNT_ADD
+#undef HBCNT_GET
+
+        hytera_next_key:
+        local_keys++;
+        if (local_keys >= LOCAL_KEYS_FLUSH) {
+            atomicAdd((unsigned long long int*)dev_keys_tested, LOCAL_KEYS_FLUSH);
+            local_keys = 0;
+        }
+    }
+
+    if (local_keys > 0)
+        atomicAdd((unsigned long long int*)dev_keys_tested, (unsigned long long)local_keys);
+}
+
 __global__ __launch_bounds__(256, 4)
 void bruteforce_kernel(
     uint64_t start_key,
@@ -1531,6 +1680,8 @@ void bruteforce_kernel(
 
 static int infer_line_mi_host(const PayloadSet *payloads, int line_idx, uint32_t *out_mi);
 static int is_rc4_alg_host(uint8_t alg);
+static int is_hytera_ep_alg_host(uint8_t alg);
+static void compute_hytera_ks_cpu(const unsigned char key5[5], uint32_t mi, unsigned char ks_out[21]);
 
 typedef struct {
     int threads_per_block;
@@ -1619,6 +1770,7 @@ typedef struct {
     const unsigned char *cipher_packs; /* [payload_count*21], precomputed key-independent data */
     int payload_count;
     int mode_policy;
+    volatile uint64_t current_k; /* updated every ~4K iterations for CPU-path checkpointing */
 } CpuWorkerCtx;
 
 static void key_to_5bytes_cpu(uint64_t key, unsigned char out[5]);
@@ -1770,12 +1922,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
             sf_base = 0;
             while (sf_base < pcount && !all_pruned_cpu) {
                 int n_bursts = pcount - sf_base;
-                unsigned char kmi9[4][9];
                 unsigned char Sa[RC4_SBOX_SIZE], Sb[RC4_SBOX_SIZE], Sc[RC4_SBOX_SIZE], Sd[RC4_SBOX_SIZE];
                 unsigned ia, ja, ib, jb, ic, jc, id, jd;
                 unsigned char _t;
                 int n, burst, sf;
                 uint32_t mi;
+                unsigned char hytera_ks[4][21];
 
                 if (n_bursts > 6) n_bursts = 6;
 
@@ -1784,36 +1936,38 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                      ? engine->payloads->items[sf_base].mi
                      : engine->payloads->global_mi;
 
-                /* Build KMI9 = key5 || MI[4 bytes] for each of the 4 keys */
-                for (b = 0; b < 4; b++) {
-                    kmi9[b][0] = key5[b][0]; kmi9[b][1] = key5[b][1];
-                    kmi9[b][2] = key5[b][2]; kmi9[b][3] = key5[b][3];
-                    kmi9[b][4] = key5[b][4];
-                    kmi9[b][5] = (unsigned char)((mi >> 24) & 0xFFu);
-                    kmi9[b][6] = (unsigned char)((mi >> 16) & 0xFFu);
-                    kmi9[b][7] = (unsigned char)((mi >>  8) & 0xFFu);
-                    kmi9[b][8] = (unsigned char)( mi        & 0xFFu);
+                if (ctx->mode_policy == 4) {
+                    /* Hytera EP: pre-compute 21-byte keystream for each of the 4 keys */
+                    for (b = 0; b < 4; b++)
+                        compute_hytera_ks_cpu(key5[b], mi, hytera_ks[b]);
+                    ia = ja = ib = jb = ic = jc = id = jd = 0u; /* unused */
+                } else {
+                    /* KMI9 path: one 4-way KSA + discard per superframe */
+                    unsigned char kmi9[4][9];
+                    for (b = 0; b < 4; b++) {
+                        kmi9[b][0] = key5[b][0]; kmi9[b][1] = key5[b][1];
+                        kmi9[b][2] = key5[b][2]; kmi9[b][3] = key5[b][3];
+                        kmi9[b][4] = key5[b][4];
+                        kmi9[b][5] = (unsigned char)((mi >> 24) & 0xFFu);
+                        kmi9[b][6] = (unsigned char)((mi >> 16) & 0xFFu);
+                        kmi9[b][7] = (unsigned char)((mi >>  8) & 0xFFu);
+                        kmi9[b][8] = (unsigned char)( mi        & 0xFFu);
+                    }
+                    rc4_ksa9_4way(Sa, Sb, Sc, Sd, kmi9[0], kmi9[1], kmi9[2], kmi9[3]);
+                    ia = ja = ib = jb = ic = jc = id = jd = 0u;
+                    for (n = 0; n < RC4_DISCARD_BYTES; n++) {
+                        ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
+                        _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
+                        ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
+                        _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
+                        ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
+                        _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
+                        id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
+                        _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
+                    }
                 }
 
-                /* One 4-way KSA for the whole superframe */
-                rc4_ksa9_4way(Sa, Sb, Sc, Sd, kmi9[0], kmi9[1], kmi9[2], kmi9[3]);
-
-                /* PRGA state (post-KSA: ci=0, cj=0 for all 4) */
-                ia = ja = ib = jb = ic = jc = id = jd = 0u;
-
-                /* Discard 256 bytes (4-way) — positions 1..256 of keystream */
-                for (n = 0; n < RC4_DISCARD_BYTES; n++) {
-                    ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
-                    _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
-                    ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
-                    _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
-                    ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
-                    _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
-                    id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
-                    _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
-                }
-
-                /* Continuous PRGA across all bursts in the superframe.
+                /* Continuous PRGA across all bursts in the superframe (MOTOTRBO path).
                  * Burst b uses keystream positions 257+b*21 .. 277+b*21,
                  * identical to rc4_init(kmi9) + rc4_discard(256+b*21) per burst. */
                 for (burst = 0; burst < n_bursts; burst++) {
@@ -1826,23 +1980,33 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         unsigned char pa[7], pb[7], pc[7], pd[7];
                         int i;
 
-                        /* 7 bytes of keystream (4-way interleaved PRGA) */
-                        for (n = 0; n < 7; n++) {
-                            ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
-                            _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
-                            pa[n] = cp[n] ^ Sa[(Sa[ia]+Sa[ja])&0xFFu];
+                        if (ctx->mode_policy == 4) {
+                            /* Hytera EP: XOR cipher with precomputed keystream (same for all bursts) */
+                            for (n = 0; n < 7; n++) {
+                                pa[n] = cp[n] ^ hytera_ks[0][sf*7+n];
+                                pb[n] = cp[n] ^ hytera_ks[1][sf*7+n];
+                                pc[n] = cp[n] ^ hytera_ks[2][sf*7+n];
+                                pd[n] = cp[n] ^ hytera_ks[3][sf*7+n];
+                            }
+                        } else {
+                            /* MOTOTRBO: 7 bytes of keystream per sub-frame (4-way PRGA) */
+                            for (n = 0; n < 7; n++) {
+                                ia=(ia+1u)&0xFFu; ja=(ja+Sa[ia])&0xFFu;
+                                _t=Sa[ia]; Sa[ia]=Sa[ja]; Sa[ja]=_t;
+                                pa[n] = cp[n] ^ Sa[(Sa[ia]+Sa[ja])&0xFFu];
 
-                            ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
-                            _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
-                            pb[n] = cp[n] ^ Sb[(Sb[ib]+Sb[jb])&0xFFu];
+                                ib=(ib+1u)&0xFFu; jb=(jb+Sb[ib])&0xFFu;
+                                _t=Sb[ib]; Sb[ib]=Sb[jb]; Sb[jb]=_t;
+                                pb[n] = cp[n] ^ Sb[(Sb[ib]+Sb[jb])&0xFFu];
 
-                            ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
-                            _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
-                            pc[n] = cp[n] ^ Sc[(Sc[ic]+Sc[jc])&0xFFu];
+                                ic=(ic+1u)&0xFFu; jc=(jc+Sc[ic])&0xFFu;
+                                _t=Sc[ic]; Sc[ic]=Sc[jc]; Sc[jc]=_t;
+                                pc[n] = cp[n] ^ Sc[(Sc[ic]+Sc[jc])&0xFFu];
 
-                            id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
-                            _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
-                            pd[n] = cp[n] ^ Sd[(Sd[id]+Sd[jd])&0xFFu];
+                                id=(id+1u)&0xFFu; jd=(jd+Sd[id])&0xFFu;
+                                _t=Sd[id]; Sd[id]=Sd[jd]; Sd[jd]=_t;
+                                pd[n] = cp[n] ^ Sd[(Sd[id]+Sd[jd])&0xFFu];
+                            }
                         }
 
                         /* Unpack first 24 bits of each 7-byte plaintext block */
@@ -2047,14 +2211,17 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     }
 
     {
-        int mi_rc4_lines = 0;
+        int mi_rc4_lines = 0, mi_hytera_lines = 0;
         for (int i = 0; i < payload_limit; ++i) {
             int has_mi = (host_meta_flags[i] & 0x1u) != 0;
             uint8_t alg = (host_meta_flags[i] & 0x2u) ? host_algid[i] : global_algid;
-            int rc4 = is_rc4_alg_host(alg);
-            if (has_mi && rc4) mi_rc4_lines++;
+            if (has_mi && is_rc4_alg_host(alg))    mi_rc4_lines++;
+            if (has_mi && is_hytera_ep_alg_host(alg)) mi_hytera_lines++;
         }
-        if (payload_limit > 0 && mi_rc4_lines * 10 >= payload_limit * 9) {
+        /* Hytera EP takes priority: if ≥90% of payloads have MI + ALG=0x02, use mode 4 */
+        if (payload_limit > 0 && mi_hytera_lines * 10 >= payload_limit * 9) {
+            mode_policy = 4;
+        } else if (payload_limit > 0 && mi_rc4_lines * 10 >= payload_limit * 9) {
             mode_policy = 3;
         } else if (payload_limit > 0 && mi_rc4_lines * 3 >= payload_limit) {
             mode_policy = 2;
@@ -2172,10 +2339,38 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
      * ILP-2: safe on all Turing+ (sm_75+); the double S-box concern was for
      * legacy mode. KMI9 path (mode_policy>=2) uses one S-box per thread. */
     cuda_sm = prop.major * 10 + prop.minor;
-    use_ilp2 = (mode_policy >= 2) && (cuda_sm >= 75);
+    /* ILP-2 only for MOTOTRBO (mode 2/3): Hytera EP has its own kernel (no smem S-box needed) */
+    use_ilp2 = (mode_policy >= 2 && mode_policy != 4) && (cuda_sm >= 75);
     if (use_ilp2) {
         cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
             cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+    }
+
+    /* KPA silence pre-filter activation — must come after use_ilp2 is set.
+     * Disabled for ILP-2: its main loop uses shared-memory RC4 (~10-20x faster than
+     * local memory), so the KPA's local-memory KSA9 costs more than abs-floor saves.
+     * Disabled for Hytera EP (mode_policy==4): KPA uses KMI9 algorithm. */
+    {
+        int n_sil = (!use_ilp2 && mode_policy != 4) ? (int)engine->payloads->n_silence : 0;
+        uint16_t host_sil_idx[64];
+        int n_sil_valid = 0;
+        for (int k = 0; k < n_sil && k < 64; k++) {
+            if (engine->payloads->silence_indices[k] < (uint16_t)payload_limit)
+                host_sil_idx[n_sil_valid++] = engine->payloads->silence_indices[k];
+        }
+        cu_err = cudaMemcpyToSymbol(d_const_silence_idx, host_sil_idx,
+                                    (size_t)n_sil_valid * sizeof(uint16_t));
+        if (cu_err != cudaSuccess) {
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "cudaMemcpyToSymbol(silence_idx): %s", cudaGetErrorString(cu_err));
+            goto cleanup;
+        }
+        cu_err = cudaMemcpyToSymbol(d_const_n_silence, &n_sil_valid, sizeof(int));
+        if (cu_err != cudaSuccess) {
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "cudaMemcpyToSymbol(n_silence): %s", cudaGetErrorString(cu_err));
+            goto cleanup;
+        }
     }
 
     cu_err = cudaStreamCreateWithFlags(&compute_stream, cudaStreamNonBlocking);
@@ -2275,7 +2470,17 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                             uint64_t cur = cand_chunk;
                             if (tuned + cur > tune_keys) cur = tune_keys - tuned;
 
-                            if (use_ilp2) {
+                            if (mode_policy == 4) {
+                                bruteforce_kernel_hytera<<<blocks, tpb, 0, compute_stream>>>(
+                                    engine->cfg.start_key + tuned,
+                                    cur,
+                                    payload_limit,
+                                    global_mi,
+                                    d_keys_tested,
+                                    d_best_packed,
+                                    d_stop_requested
+                                );
+                            } else if (use_ilp2) {
                                 bruteforce_kernel_strict_ilp2<<<blocks, 128, 0, compute_stream>>>(
                                     engine->cfg.start_key + tuned,
                                     cur,
@@ -2478,7 +2683,11 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
          * __launch_bounds__(128,4).  Launching with more causes a silent deferred
          * cudaErrorInvalidConfiguration on WDDM (the kernel never runs). */
         #define LAUNCH_CHUNK(stream_idx, off, cnt) do { \
-            if (use_ilp2) { \
+            if (mode_policy == 4) { \
+                bruteforce_kernel_hytera<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
+                    engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
+                    d_keys_tested, d_best_packed, d_stop_requested); \
+            } else if (use_ilp2) { \
                 bruteforce_kernel_strict_ilp2<<<blocksPerGrid, 128, 65536, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
                     d_keys_tested, d_best_packed, d_stop_requested); \
@@ -2538,11 +2747,21 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             if (engine->progress_path[0] != '\0') {
                 uint64_t now_ms = plat_ticks_ms();
                 if (now_ms - last_checkpoint_ms >= 30000ULL) {
+                    plat_mutex_lock(&engine->lock);
+                    uint64_t ck_bk = engine->best_key;
+                    double   ck_bs = engine->best_score;
+                    plat_mutex_unlock(&engine->lock);
                     FILE *fp_ckpt = fopen(engine->progress_path, "wt");
                     if (fp_ckpt) {
-                        fprintf(fp_ckpt, "offset=%llu\nend=%llu\n",
+                        uint64_t orig = engine->cfg.has_resume_context
+                            ? engine->cfg.original_start_key : engine->cfg.start_key;
+                        fprintf(fp_ckpt,
+                                "offset=%llu\nend=%llu\nbest_key=%010llX\nbest_score=%.6f\noriginal_start=%llu\n",
                                 (unsigned long long)(engine->cfg.start_key + offset),
-                                (unsigned long long)(engine->cfg.start_key + total_keys - 1ULL));
+                                (unsigned long long)engine->cfg.end_key,
+                                (unsigned long long)ck_bk,
+                                ck_bs,
+                                (unsigned long long)orig);
                         fclose(fp_ckpt);
                     }
                     last_checkpoint_ms = now_ms;
@@ -2642,6 +2861,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_worker_proc(void *arg)
     uint64_t k;
     uint64_t local_count = 0;
     double local_best_score = -DBL_MAX;
+    uint64_t last_checkpoint_ms = (ctx->worker_index == 0) ? plat_ticks_ms() : 0;
 
     plat_thread_set_ideal_processor(ctx->worker_index);
 
@@ -2654,6 +2874,37 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_worker_proc(void *arg)
             if (plat_atomic32_load(&engine->paused) != 0) {
                 plat_event_wait(&engine->pause_event);
                 if (plat_atomic32_load(&engine->stop_requested) != 0) break;
+            }
+            /* Worker 0 writes periodic checkpoints for CPU-only path */
+            ctx->current_k = k;
+            if (ctx->worker_index == 0 && engine->progress_path[0] != '\0') {
+                uint64_t now_ms = plat_ticks_ms();
+                if (now_ms - last_checkpoint_ms >= 30000ULL) {
+                    CpuWorkerCtx *all = (CpuWorkerCtx *)engine->workers;
+                    uint64_t min_k = k;
+                    for (int w = 1; w < engine->cfg.thread_count; w++) {
+                        uint64_t wk = all[w].current_k;
+                        if (wk < min_k) min_k = wk;
+                    }
+                    plat_mutex_lock(&engine->lock);
+                    uint64_t ck_bk = engine->best_key;
+                    double   ck_bs = engine->best_score;
+                    plat_mutex_unlock(&engine->lock);
+                    FILE *fp_ckpt = fopen(engine->progress_path, "wt");
+                    if (fp_ckpt) {
+                        uint64_t orig = engine->cfg.has_resume_context
+                            ? engine->cfg.original_start_key : engine->cfg.start_key;
+                        fprintf(fp_ckpt,
+                                "offset=%llu\nend=%llu\nbest_key=%010llX\nbest_score=%.6f\noriginal_start=%llu\n",
+                                (unsigned long long)min_k,
+                                (unsigned long long)engine->cfg.end_key,
+                                (unsigned long long)ck_bk,
+                                ck_bs,
+                                (unsigned long long)orig);
+                        fclose(fp_ckpt);
+                    }
+                    last_checkpoint_ms = now_ms;
+                }
             }
         }
 
@@ -2686,6 +2937,10 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_worker_proc(void *arg)
     if (plat_atomic32_inc(&engine->finished_threads) == engine->cfg.thread_count) {
         if (plat_atomic32_load(&engine->stop_requested) == 0) {
             plat_atomic32_store(&engine->search_completed, 1);
+            if (engine->progress_path[0] != '\0') {
+                plat_delete_file(engine->progress_path);
+                engine->progress_path[0] = '\0';
+            }
         }
         plat_atomic32_store(&engine->running, 0);
         plat_event_set(&engine->pause_event);
@@ -2751,17 +3006,33 @@ int bruteforce_start(
         engine->cuda_device_name[0] = '\0';
         if (cu_err != cudaSuccess)
             snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+#if defined(USE_HIP)
+                     "hipGetDeviceCount failed: %s (error %d). "
+                     "This binary was built with HIP %d.%d -- "
+                     "rebuild from source with the ROCm toolkit that matches your driver.",
+#else
                      "cudaGetDeviceCount failed: %s (error %d). "
                      "This binary was built with CUDA %d.%d -- "
                      "rebuild from source with the CUDA toolkit that matches your driver.",
+#endif
                      cudaGetErrorString(cu_err), (int)cu_err,
                      CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
         else
             snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+#if defined(USE_HIP)
+                     "No ROCm-capable GPU detected (hipGetDeviceCount returned 0). "
+                     "This binary was built with HIP %d.%d. "
+                     "Verify the ROCm driver is installed (run: rocm-smi).",
+#else
                      "No CUDA-capable GPU detected (cudaGetDeviceCount returned 0). "
                      "This binary was built with CUDA %d.%d. "
                      "Verify the NVIDIA driver is installed and the GPU is not in TCC mode "
+#  if defined(_WIN32)
                      "(run: nvidia-smi -q | findstr \"Compute Mode\").",
+#  else
+                     "(run: nvidia-smi -q | grep 'Compute Mode').",
+#  endif
+#endif
                      CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
 
     cpu_fallback:
@@ -2802,8 +3073,8 @@ int bruteforce_start(
             plat_atomic32_store(&engine->paused, 0);
             plat_atomic32_store(&engine->finished_threads, 0);
             plat_atomic32_store(&engine->search_completed, 0);
-            engine->best_key = cfg->start_key;
-            engine->best_score = -DBL_MAX;
+            engine->best_key   = cfg->has_seed_best ? cfg->seed_best_key   : cfg->start_key;
+            engine->best_score = cfg->has_seed_best ? cfg->seed_best_score : -DBL_MAX;
             plat_hrtimer_now(&engine->qpc_start);
             plat_atomic32_store(&engine->running, 1);
 
@@ -2816,6 +3087,7 @@ int bruteforce_start(
                 workers[t].start_key    = start;
                 workers[t].end_key      = start + this_count - 1ull;
                 workers[t].worker_index = t;
+                workers[t].current_k    = start;
                 start += this_count;
 
                 if (plat_thread_create(&engine->thread_handles[t], cpu_worker_proc, &workers[t]) != 0) {
@@ -2855,10 +3127,16 @@ int bruteforce_start(
             engine->cuda_active = 0;
             engine->cuda_device_name[0] = '\0';
             snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+#if defined(USE_HIP)
+                     "GPU context init failed: %s (error %d). "
+                     "Built with HIP %d.%d. "
+                     "Check: ROCm driver installed, GPU supported (run: rocm-smi).",
+#else
                      "GPU context init failed: %s (error %d). "
                      "Built with CUDA %d.%d. "
                      "Check: driver installed, GPU not in TCC/exclusive mode, "
                      "NvOptimusEnablement exported (laptop users).",
+#endif
                      cudaGetErrorString(cu_err), (int)cu_err,
                      CUDART_VERSION / 1000, (CUDART_VERSION % 1000) / 10);
             goto cpu_fallback;
@@ -2898,8 +3176,8 @@ int bruteforce_start(
     plat_atomic32_store(&engine->stop_requested, 0);
     plat_atomic32_store(&engine->paused, 0);
     plat_atomic32_store(&engine->search_completed, 0);
-    engine->best_key = engine->cfg.start_key;
-    engine->best_score = -DBL_MAX;
+    engine->best_key   = cfg->has_seed_best ? cfg->seed_best_key   : cfg->start_key;
+    engine->best_score = cfg->has_seed_best ? cfg->seed_best_score : -DBL_MAX;
     plat_atomic32_store(&engine->cuda_stage, 0);
     plat_atomic32_store(&engine->cuda_profile_cached, 0);
     plat_atomic32_store(&engine->cuda_tpb, 0);
@@ -2999,7 +3277,15 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
 
     keys = (uint64_t)plat_atomic64_load((plat_atomic64_t *)&engine->keys_tested);
     total = 0;
-    if (engine->cfg.end_key >= engine->cfg.start_key) {
+    if (engine->cfg.has_resume_context) {
+        /* Show overall progress spanning original start → end */
+        uint64_t orig = engine->cfg.original_start_key;
+        if (engine->cfg.end_key >= orig)
+            total = (engine->cfg.end_key - orig) + 1ull;
+        /* Add keys already done in prior sessions */
+        if (engine->cfg.start_key > orig)
+            keys += engine->cfg.start_key - orig;
+    } else if (engine->cfg.end_key >= engine->cfg.start_key) {
         total = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
     }
 
@@ -3236,6 +3522,32 @@ static int is_rc4_alg_host(uint8_t alg)
     return alg == 0x21 || alg == 0x01 || ((alg & 0x07u) == 0x01u);
 }
 
+static int is_hytera_ep_alg_host(uint8_t alg)
+{
+    return alg == 0x02;
+}
+
+static void compute_hytera_ks_cpu(
+    const unsigned char key5[5], uint32_t mi,
+    unsigned char ks_out[21])
+{
+    unsigned char kiv[5];
+    kiv[0] = key5[0];
+    kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
+    kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
+    kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
+    kiv[4] = key5[4] ^ (unsigned char)( mi        & 0xFFu);
+
+    RC4_CTX rc4;
+    rc4_init(&rc4, key5, 5);  /* KSA with key5, drop=0 */
+
+    unsigned char zeros[21];
+    memset(zeros, 0, sizeof(zeros));
+    rc4_crypt(&rc4, zeros, ks_out, 21);
+
+    for (int i = 0; i < 21; i++) ks_out[i] ^= kiv[i % 5];
+}
+
 static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t mi)
 {
     unsigned char kmi[9];
@@ -3358,19 +3670,105 @@ static double score_candidate_host(
 
     /* Determine mode policy */
     {
-        int mi_rc4_lines = 0;
+        int mi_rc4_lines = 0, mi_hytera_lines = 0;
         for (size_t i = 0; i < line_count; ++i) {
             const PayloadLine *line = &payloads->items[i];
             uint8_t alg = line->has_algid ? line->algid : payloads->global_algid;
-            if (line->has_mi && is_rc4_alg_host(alg)) mi_rc4_lines++;
+            if (line->has_mi && is_rc4_alg_host(alg))    mi_rc4_lines++;
+            if (line->has_mi && is_hytera_ep_alg_host(alg)) mi_hytera_lines++;
         }
-        if (line_count > 0 && mi_rc4_lines * 10 >= (int)line_count * 9) {
+        if (line_count > 0 && mi_hytera_lines * 10 >= (int)line_count * 9) {
+            mode_policy = 4;
+        } else if (line_count > 0 && mi_rc4_lines * 10 >= (int)line_count * 9) {
             mode_policy = 3;
         } else if (line_count > 0 && mi_rc4_lines * 3 >= (int)line_count) {
             mode_policy = 2;
         } else if (!payloads->has_global_mi && mi_rc4_lines == 0) {
             mode_policy = 1;
         }
+    }
+
+    /* Hytera EP path (mode_policy == 4): Hamming + bit-frequency, same structure as KMI9 */
+    if (mode_policy == 4) {
+        long bit_counts[24];
+        int n_freq = 0, b;
+        memset(bit_counts, 0, sizeof(bit_counts));
+
+        for (size_t sf_base = 0; sf_base < line_count; sf_base += 6) {
+            uint32_t mi = payloads->items[sf_base].has_mi
+                          ? payloads->items[sf_base].mi
+                          : payloads->global_mi;
+            unsigned char ks[21];
+            compute_hytera_ks_cpu(key, mi, ks);
+
+            for (size_t p = sf_base; p < sf_base + 6 && p < line_count; ++p) {
+                const PayloadLine *line = &payloads->items[p];
+                if (line->len < 33) continue;
+
+                /* Precomputed cipher packs for this line would require precompute_cipher_packs_host.
+                 * Instead, re-use score_burst_correct_host but substitute Hytera ks for the RC4 output.
+                 * We do this by inlining the de-interleave+demodulate+pack step, then XOR with ks. */
+                unsigned char dec24[3][24];
+                for (int sf = 0; sf < 3; sf++) {
+                    unsigned char ambe_fr[4][24];
+                    memset(ambe_fr, 0, sizeof(ambe_fr));
+                    for (int i2 = 0; i2 < 36; ++i2) {
+                        int d = sf_dibit_idx_host[sf][i2];
+                        int byte_idx = d >> 2;
+                        int shift = (3 - (d & 3)) * 2;
+                        unsigned char dibit = (unsigned char)((line->data[byte_idx] >> shift) & 0x3u);
+                        ambe_fr[dmr_rW_host[i2]][dmr_rX_host[i2]] = (unsigned char)((dibit >> 1) & 1u);
+                        ambe_fr[dmr_rY_host[i2]][dmr_rZ_host[i2]] = (unsigned char)(dibit & 1u);
+                    }
+                    { /* mbe_demodulate */
+                        int foo = 0;
+                        for (int i2 = 23; i2 >= 12; --i2) foo = (foo << 1) | (int)ambe_fr[0][i2];
+                        int pr_val = 16 * foo;
+                        for (int j = 22; j >= 0; --j) {
+                            pr_val = (173 * pr_val + 13849) & 0xFFFF;
+                            ambe_fr[1][j] ^= (unsigned char)(pr_val >> 15);
+                        }
+                    }
+                    /* extract 49 bits → pack 7 bytes */
+                    unsigned char cipher7[7] = {0};
+                    {
+                        unsigned char bits49[49];
+                        int bi = 0;
+                        for (int j = 23; j >= 12; --j) bits49[bi++] = ambe_fr[0][j];
+                        for (int j = 22; j >= 11; --j) bits49[bi++] = ambe_fr[1][j];
+                        for (int j = 10; j >=  0; --j) bits49[bi++] = ambe_fr[2][j];
+                        for (int j = 13; j >=  0; --j) bits49[bi++] = ambe_fr[3][j];
+                        for (int i2 = 0; i2 < 49; ++i2)
+                            cipher7[i2 >> 3] |= (unsigned char)((bits49[i2] & 1u) << (7 - (i2 & 7)));
+                    }
+                    /* Hytera EP decrypt: XOR with ks[sf*7..sf*7+6] */
+                    unsigned char plain7[7];
+                    for (int j = 0; j < 7; j++) plain7[j] = cipher7[j] ^ ks[sf*7 + j];
+                    for (int i2 = 0; i2 < 24; ++i2)
+                        dec24[sf][i2] = (unsigned char)((plain7[i2 >> 3] >> (7 - (i2 & 7))) & 1u);
+                }
+
+                int h01 = 0, h12 = 0;
+                for (b = 0; b < 24; b++) {
+                    h01 += dec24[0][b] ^ dec24[1][b];
+                    h12 += dec24[1][b] ^ dec24[2][b];
+                }
+                score += (double)(48 - h01 - h12);
+                for (b = 0; b < 24; b++) bit_counts[b] += dec24[0][b];
+                n_freq++;
+            }
+        }
+
+        if (n_freq >= 6) {
+            double half_n = (double)n_freq * 0.5;
+            double chi2 = 0.0;
+            for (b = 0; b < 24; b++) {
+                double dev = (double)bit_counts[b] - half_n;
+                chi2 += dev * dev;
+            }
+            score += chi2 / (double)n_freq;
+        }
+        return score;
     }
 
     /* KMI9 path (mode_policy >= 2): two metrics in a single pass —

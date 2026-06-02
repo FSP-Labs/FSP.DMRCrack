@@ -40,9 +40,11 @@
 #define cudaGetLastError        hipGetLastError
 
 /* Device management */
-#define cudaDeviceProp          hipDeviceProp_t
-#define cudaGetDeviceProperties hipGetDeviceProperties
-#define cudaFuncSetAttribute    hipFuncSetAttribute
+#define cudaDeviceProp              hipDeviceProp_t
+#define cudaGetDeviceCount          hipGetDeviceCount
+#define cudaSetDevice               hipSetDevice
+#define cudaGetDeviceProperties     hipGetDeviceProperties
+#define cudaFuncSetAttribute        hipFuncSetAttribute
 #define cudaFuncAttributeMaxDynamicSharedMemorySize \
         hipFuncAttributeMaxDynamicSharedMemorySize
 
@@ -78,6 +80,12 @@
 
 /* Intrinsics available in both CUDA and HIP */
 /* __popc, __float_as_uint, __uint_as_float, __fsqrt_rn — already provided by HIP */
+
+/* __ldg: PTX read-only cache load — AMD has no equivalent; plain deref is correct */
+#define __ldg(ptr) (*(ptr))
+
+/* CUDART_VERSION: alias to HIP version encoding so existing code compiles unchanged */
+#define CUDART_VERSION (HIP_VERSION_MAJOR * 1000 + HIP_VERSION_MINOR * 10)
 
 #else  /* ── CUDA backend (default) ───────────────────────────────────── */
 

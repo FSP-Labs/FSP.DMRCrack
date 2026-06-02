@@ -44,7 +44,12 @@ typedef struct {
     int thread_count;
     int sample_lines;
     int sample_bytes;
-    int gpu_split_pct;  /* GPU share of keyspace [50..95], default 80 */
+    int gpu_split_pct;   /* GPU share of keyspace [50..95], default 80 */
+    int has_seed_best;       /* 1 = seed_best_key/score are valid (checkpoint resume) */
+    uint64_t seed_best_key;
+    double   seed_best_score;
+    int      has_resume_context;    /* 1 = original_start_key is valid */
+    uint64_t original_start_key;    /* start key before any resume; used for progress % */
 } BruteforceConfig;
 
 typedef struct {
