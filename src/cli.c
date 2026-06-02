@@ -57,6 +57,11 @@ static void print_banner(void)
         " v" DMRCRACK_VERSION "  |  RC4-40 key recovery for DMR Enhanced Privacy\n"
         " FSP-Labs  |  https://github.com/FSP-Labs/FSP.DMRCrack\n"
         "\n"
+        " LEGAL: Security-auditing tool. Use ONLY on radio systems you own or are\n"
+        "        explicitly authorized in writing to test. Unauthorized intercept\n"
+        "        or decryption of communications is illegal in most jurisdictions\n"
+        "        and is solely the user's responsibility. GPLv3, NO WARRANTY.\n"
+        "\n"
     );
 }
 
@@ -93,6 +98,38 @@ static void print_key(uint64_t key)
            (unsigned)( key        & 0xFF));
 }
 
+/* Last path component of a file path (for potfile/JSON labels). */
+static const char *path_basename(const char *p)
+{
+    const char *b = p;
+    for (const char *s = p; *s; ++s)
+        if (*s == '/' || *s == '\\') b = s + 1;
+    return b;
+}
+
+/* Potfile line: "<bin>:<KEY10HEX>:<score>". Appended, never overwritten, so
+ * multiple recoveries accumulate. */
+static void potfile_append(const char *potfile, const char *bin_path,
+                           uint64_t key, double score)
+{
+    if (!potfile) return;
+    FILE *fp = fopen(potfile, "at");
+    if (!fp) {
+        fprintf(stderr, "warning: cannot write potfile '%s'\n", potfile);
+        return;
+    }
+    fprintf(fp, "%s:%010llX:%.4f\n",
+            path_basename(bin_path), (unsigned long long)key, score);
+    fclose(fp);
+}
+
+/* Final result as a one-line JSON object on stdout. */
+static void print_json_result(const char *bin_path, uint64_t key, double score)
+{
+    printf("{\"bin\":\"%s\",\"key\":\"%010llX\",\"score\":%.4f}\n",
+           path_basename(bin_path), (unsigned long long)key, score);
+}
+
 static void print_usage(void)
 {
     printf(
@@ -105,6 +142,11 @@ static void print_usage(void)
         "  --gpu-pct <50-95>   GPU share of keyspace (default: 80)\n"
         "  --samples <n>       payload lines to sample per key (default: all)\n"
         "  --key   <hex>       score a single key and exit\n"
+        "  --wordlist <file>   try a list of candidate keys first (one hex key\n"
+        "                      per line; '#' comments and blanks ignored)\n"
+        "  --potfile <file>    append recovered keys to a potfile (bin:key:score)\n"
+        "  --json              print the final result as a JSON object\n"
+        "  --benchmark         measure throughput on this machine and exit\n"
         "  --no-resume         ignore any saved checkpoint\n"
         "\n");
 }
@@ -156,12 +198,16 @@ int main(int argc, char **argv)
 
     const char *bin_path   = NULL;
     const char *key_str    = NULL;
+    const char *wordlist   = NULL;
+    const char *potfile    = NULL;
     uint64_t    start_key  = 0x0000000000ULL;
     uint64_t    end_key    = 0xFFFFFFFFFFULL;
     int         threads    = 0;   /* 0 = auto */
     int         gpu_pct    = 80;
     int         samples    = 0;   /* 0 = all */
     int         no_resume  = 0;
+    int         json_out   = 0;
+    int         benchmark  = 0;
     char        err[256];
 
     /* ── Argument parsing ─────────────────────────────────────────────── */
@@ -179,6 +225,10 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--gpu-pct")   == 0 && i+1 < argc) { gpu_pct  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--samples")   == 0 && i+1 < argc) { samples  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--key")       == 0 && i+1 < argc) { key_str  = argv[++i]; }
+        else if (strcmp(argv[i], "--wordlist")  == 0 && i+1 < argc) { wordlist = argv[++i]; }
+        else if (strcmp(argv[i], "--potfile")   == 0 && i+1 < argc) { potfile  = argv[++i]; }
+        else if (strcmp(argv[i], "--json")      == 0)                { json_out  = 1; }
+        else if (strcmp(argv[i], "--benchmark") == 0)                { benchmark = 1; }
         else if (strcmp(argv[i], "--no-resume") == 0)                { no_resume = 1; }
         else if (strcmp(argv[i], "--help")      == 0 ||
                  strcmp(argv[i], "-h")          == 0) { print_usage(); return 0; }
@@ -227,6 +277,134 @@ int main(int argc, char **argv)
         printf("Key ");
         print_key(kv);
         printf("  score: %.4f\n", sc);
+        if (json_out) print_json_result(bin_path, kv, sc);
+        payload_set_free(&g_payloads);
+        return 0;
+    }
+
+    /* ── Dictionary / known-key mode ───────────────────────────────────── */
+    if (wordlist) {
+        FILE *wf = fopen(wordlist, "rt");
+        if (!wf) {
+            fprintf(stderr, "error: cannot open wordlist '%s'\n", wordlist);
+            payload_set_free(&g_payloads); return 1;
+        }
+        printf("Dictionary attack: %s\n\n", wordlist);
+
+        char     line[256];
+        uint64_t best_key = 0;
+        double   best_score = -1e308;
+        long     tried = 0, bad = 0;
+
+        while (fgets(line, sizeof(line), wf)) {
+            /* trim leading whitespace */
+            char *s = line;
+            while (*s == ' ' || *s == '\t') ++s;
+            /* skip comments and blank lines */
+            if (*s == '#' || *s == '\n' || *s == '\r' || *s == '\0') continue;
+            /* trim trailing whitespace/newline */
+            char *e = s + strlen(s);
+            while (e > s && (e[-1] == '\n' || e[-1] == '\r' ||
+                             e[-1] == ' '  || e[-1] == '\t')) --e;
+            *e = '\0';
+
+            uint64_t kv;
+            if (!parse_hex40(s, &kv)) { ++bad; continue; }
+            unsigned char kb[5] = {
+                (unsigned char)((kv >> 32) & 0xFF),
+                (unsigned char)((kv >> 24) & 0xFF),
+                (unsigned char)((kv >> 16) & 0xFF),
+                (unsigned char)((kv >>  8) & 0xFF),
+                (unsigned char)( kv        & 0xFF),
+            };
+            double sc = bruteforce_test_score(&g_payloads, 0, 0, kb);
+            ++tried;
+            printf("  ");
+            print_key(kv);
+            printf("  score: %.4f\n", sc);
+            if (sc > best_score) { best_score = sc; best_key = kv; }
+        }
+        fclose(wf);
+
+        printf("\nTried %ld key(s)", tried);
+        if (bad) printf(" (%ld malformed line(s) skipped)", bad);
+        printf(".\n");
+
+        if (tried == 0) {
+            fprintf(stderr, "error: no valid keys in wordlist\n");
+            payload_set_free(&g_payloads); return 1;
+        }
+
+        printf("Best candidate (highest score): ");
+        print_key(best_key);
+        printf("  (score %.4f)\n", best_score);
+
+        potfile_append(potfile, bin_path, best_key, best_score);
+        if (json_out) print_json_result(bin_path, best_key, best_score);
+
+        payload_set_free(&g_payloads);
+        return 0;
+    }
+
+    /* Determine sample_bytes from payload size (shared by benchmark + search) */
+    int sample_bytes;
+    {
+        size_t ml = 0;
+        for (size_t i = 0; i < g_payloads.count; ++i)
+            if (g_payloads.items[i].len > ml) ml = g_payloads.items[i].len;
+        sample_bytes = (ml >= 33) ? 33 : 27;
+    }
+
+    /* ── Benchmark mode ────────────────────────────────────────────────── */
+    if (benchmark) {
+        const double bench_seconds = 5.0;
+        printf("Benchmark: running ~%.0f s over the keyspace...\n\n",
+               bench_seconds);
+
+        bruteforce_engine_init(&g_engine);
+
+        BruteforceConfig bcfg;
+        memset(&bcfg, 0, sizeof(bcfg));
+        bcfg.start_key     = 0;
+        bcfg.end_key       = 0xFFFFFFFFFFULL; /* full 40-bit space */
+        bcfg.thread_count  = threads;
+        bcfg.sample_lines  = samples;
+        bcfg.gpu_split_pct = gpu_pct;
+        bcfg.sample_bytes  = sample_bytes;
+
+        if (!bruteforce_start(&g_engine, &bcfg, &g_payloads, err, sizeof(err))) {
+            fprintf(stderr, "error: %s\n", err);
+            bruteforce_engine_destroy(&g_engine);
+            payload_set_free(&g_payloads);
+            return 1;
+        }
+
+        BruteforceSnapshot bsnap;
+        double waited = 0.0;
+        do {
+            plat_sleep_ms(500);
+            waited += 0.5;
+            bruteforce_get_snapshot(&g_engine, &bsnap);
+            print_progress(&bsnap);
+        } while (bsnap.running && !g_interrupted && waited < bench_seconds);
+
+        bruteforce_stop(&g_engine);
+        bruteforce_get_snapshot(&g_engine, &bsnap);
+        printf("\n\n");
+
+        printf("Benchmark result:\n");
+        printf("  keys tested:  %llu\n",
+               (unsigned long long)bsnap.keys_tested);
+        printf("  elapsed:      %.2f s\n", bsnap.elapsed_seconds);
+        printf("  throughput:   %.2f M keys/s\n",
+               bsnap.keys_per_second / 1e6);
+        if (json_out)
+            printf("{\"keys_tested\":%llu,\"elapsed_s\":%.3f,"
+                   "\"keys_per_second\":%.0f}\n",
+                   (unsigned long long)bsnap.keys_tested,
+                   bsnap.elapsed_seconds, bsnap.keys_per_second);
+
+        bruteforce_engine_destroy(&g_engine);
         payload_set_free(&g_payloads);
         return 0;
     }
@@ -241,14 +419,7 @@ int main(int argc, char **argv)
     cfg.thread_count = threads;
     cfg.sample_lines = samples;
     cfg.gpu_split_pct = gpu_pct;
-
-    /* Determine sample_bytes from payload size */
-    {
-        size_t ml = 0;
-        for (size_t i = 0; i < g_payloads.count; ++i)
-            if (g_payloads.items[i].len > ml) ml = g_payloads.items[i].len;
-        cfg.sample_bytes = (ml >= 33) ? 33 : 27;
-    }
+    cfg.sample_bytes  = sample_bytes;
 
     /* ── Checkpoint resume ─────────────────────────────────────────────── */
     char progress_path[4096];
@@ -258,8 +429,22 @@ int main(int argc, char **argv)
         FILE *fp = fopen(progress_path, "rt");
         if (fp) {
             unsigned long long saved_offset = 0, saved_end = 0;
+            unsigned long long saved_best_key = 0;
+            double saved_best_score = -1e308;
+            unsigned long long saved_original_start = 0;
             int ok = (fscanf(fp, "offset=%llu\nend=%llu\n",
                              &saved_offset, &saved_end) == 2);
+            if (ok) {
+                /* These fields are optional; if the format differs the
+                 * defaults above (no seeded best, no resume context) stand. */
+                if (fscanf(fp, "best_key=%llX\nbest_score=%lf\n",
+                           &saved_best_key, &saved_best_score) != 2) {
+                    saved_best_key = 0;
+                    saved_best_score = -1e308;
+                }
+                if (fscanf(fp, "original_start=%llu\n", &saved_original_start) != 1)
+                    saved_original_start = 0;
+            }
             fclose(fp);
             if (ok
                 && saved_end    == (unsigned long long)cfg.end_key
@@ -267,7 +452,15 @@ int main(int argc, char **argv)
                 && saved_offset <  (unsigned long long)cfg.end_key) {
                 printf("Resuming from checkpoint at key %010llX\n",
                        (unsigned long long)saved_offset);
-                cfg.start_key = (uint64_t)saved_offset;
+                if (saved_best_score > -1e307 && saved_best_key != 0)
+                    printf("Restoring best candidate: %010llX (score %.2f)\n",
+                           (unsigned long long)saved_best_key, saved_best_score);
+                cfg.start_key          = (uint64_t)saved_offset;
+                cfg.has_seed_best      = (saved_best_score > -1e307 && saved_best_key != 0) ? 1 : 0;
+                cfg.seed_best_key      = (uint64_t)saved_best_key;
+                cfg.seed_best_score    = saved_best_score;
+                cfg.has_resume_context = (saved_original_start > 0 || saved_offset == 0) ? 1 : 0;
+                cfg.original_start_key = cfg.has_resume_context ? (uint64_t)saved_original_start : (uint64_t)saved_offset;
             }
         }
     }
@@ -307,11 +500,9 @@ int main(int argc, char **argv)
         printf("Best key:   ");
         print_key(snap.best_key);
         printf("\nBest score: %.4f\n", snap.best_score);
-        if (snap.best_score > 7.0) {
-            printf("  ✓ Score above threshold — likely the correct key.\n");
-        } else {
-            printf("  ✗ Score below threshold — key may be wrong or sample too small.\n");
-        }
+        printf("  (highest-scoring key over the searched range — the recovered key)\n");
+        potfile_append(potfile, bin_path, snap.best_key, snap.best_score);
+        if (json_out) print_json_result(bin_path, snap.best_key, snap.best_score);
     } else {
         printf("Search interrupted. Progress saved to %s\n", progress_path);
         printf("Best so far: ");
