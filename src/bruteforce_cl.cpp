@@ -407,6 +407,16 @@ static uint64_t host_unpack_key(uint64_t packed)
     return packed & 0xFFFFFFFFFFULL;
 }
 
+/* Inverse of host_pack_score_key's score transform (matches unpack_score_dev). */
+static double host_unpack_score(uint64_t packed)
+{
+    uint32_t sortable = (uint32_t)(packed >> 40) << 8;
+    uint32_t bits = sortable ^ ((~sortable >> 31) | 0x80000000u);
+    float f;
+    memcpy(&f, &bits, sizeof(f));
+    return (double)f;
+}
+
 /* =========================================================================
  * OpenCL engine state
  * ========================================================================= */
@@ -578,14 +588,15 @@ static void cl_write_checkpoint(BruteforceEngine *engine, uint64_t next_key)
     fclose(fp);
 }
 
-/* Recompute the exact (double-precision) score for a candidate key and update
- * the engine's best if it improves on the current best. */
-static void cl_consider_best(BruteforceEngine *engine, uint64_t key)
+/* Merge the GPU's best (packed score+key from buf_best) into the engine best.
+ * Uses the kernel's own score rather than a host re-score: the kernel already
+ * scored every mode correctly (MOTOTRBO, Hytera, legacy), whereas the host
+ * score_candidate has no Hytera path and would mis-rank a Hytera key. Mirrors
+ * the CUDA launcher, which also keeps the GPU score (24-bit ordering bits). */
+static void cl_consider_best(BruteforceEngine *engine, uint64_t packed)
 {
-    unsigned char key5[5];
-    key_to_5bytes(key, key5);
-    double s = score_candidate(engine->payloads, engine->cfg.sample_lines,
-                               engine->cfg.sample_bytes, key5);
+    uint64_t key = host_unpack_key(packed);
+    double   s   = host_unpack_score(packed);
     plat_mutex_lock(&engine->lock);
     if (s > engine->best_score) {
         engine->best_score = s;
@@ -661,7 +672,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cl_launcher_proc(void *arg)
             uint64_t key = host_unpack_key((uint64_t)packed);
             if (key != last_best_key) {
                 last_best_key = key;
-                cl_consider_best(engine, key);
+                cl_consider_best(engine, (uint64_t)packed);
             }
         }
 
@@ -741,7 +752,7 @@ void bruteforce_engine_init(BruteforceEngine *engine)
     memset(engine, 0, sizeof(*engine));
     plat_mutex_init(&engine->lock);
     plat_hrfreq_init(&engine->qpc_freq);
-    engine->pause_event = plat_event_create(1);
+    plat_event_init(&engine->pause_event, 1);
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)

@@ -579,7 +579,7 @@ void bruteforce_engine_init(BruteforceEngine *engine)
     memset(engine, 0, sizeof(*engine));
     plat_mutex_init(&engine->lock);
     plat_hrfreq_init(&engine->qpc_freq);
-    engine->pause_event = plat_event_create(1); /* signaled - workers run immediately */
+    plat_event_init(&engine->pause_event, 1); /* signaled - workers run immediately */
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)

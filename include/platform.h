@@ -100,10 +100,11 @@ static inline void plat_mutex_unlock(plat_mutex_t *m)  { LeaveCriticalSection(m)
 
 /* -- Event (manual-reset) ----------------------------------------------- */
 
-/* signaled=1 means threads waiting on plat_event_wait() are released immediately */
-static inline plat_event_t plat_event_create(int signaled)
+/* signaled=1 means threads waiting on plat_event_wait() are released immediately.
+ * Initializes in place; do not copy a plat_event_t by value (see POSIX build). */
+static inline void plat_event_init(plat_event_t *e, int signaled)
 {
-    return CreateEventA(NULL, TRUE, signaled ? TRUE : FALSE, NULL);
+    *e = CreateEventA(NULL, TRUE, signaled ? TRUE : FALSE, NULL);
 }
 static inline void plat_event_destroy(plat_event_t *e) { CloseHandle(*e); *e = NULL; }
 static inline void plat_event_set(plat_event_t *e)     { SetEvent(*e); }
@@ -270,13 +271,14 @@ static inline void plat_mutex_unlock(plat_mutex_t *m)  { pthread_mutex_unlock(m)
 
 /* -- Manual-reset event ------------------------------------------------- */
 
-static inline plat_event_t plat_event_create(int signaled)
+/* Initialize in place. Returning a plat_event_t by value and assigning it
+ * would copy an initialized pthread_mutex_t / pthread_cond_t, which is
+ * undefined behavior on POSIX (breaks on macOS/musl). */
+static inline void plat_event_init(plat_event_t *e, int signaled)
 {
-    plat_event_t e;
-    pthread_mutex_init(&e.mu, NULL);
-    pthread_cond_init(&e.cv, NULL);
-    e.signaled = signaled ? 1 : 0;
-    return e;
+    pthread_mutex_init(&e->mu, NULL);
+    pthread_cond_init(&e->cv, NULL);
+    e->signaled = signaled ? 1 : 0;
 }
 static inline void plat_event_destroy(plat_event_t *e)
 {
