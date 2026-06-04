@@ -119,7 +119,7 @@ the same engine as the GUI:
 dmrcrack --bin capture.bin
 
 # Score a single candidate key and exit
-dmrcrack --bin capture.bin --key 373374ABE8
+dmrcrack --bin capture.bin --key <KEY_HEX>
 
 # Dictionary attack: try a list of hex keys first (one per line, '#' comments)
 dmrcrack --bin capture.bin --wordlist keys.txt --potfile found.pot
@@ -128,7 +128,7 @@ dmrcrack --bin capture.bin --wordlist keys.txt --potfile found.pot
 dmrcrack --bin capture.bin --benchmark
 
 # Machine-readable result
-dmrcrack --bin capture.bin --key 373374ABE8 --json
+dmrcrack --bin capture.bin --key <KEY_HEX> --json
 ```
 
 Recovered keys can be appended to a potfile (`basename:key:score`) with
@@ -143,7 +143,7 @@ installed by the Debian package and by `cmake --install`.
 One payload per line, hex-encoded (33 bytes = 66 hex characters). Optional metadata after `;`:
 
 ```
-AABBCCDDEEFF112233...;ALG=21;KID=0F;MI=531699C4
+AABBCCDDEEFF112233...;ALG=21;KID=0F;MI=12345678
 ```
 
 | Tag | Meaning |

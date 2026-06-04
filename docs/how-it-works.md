@@ -71,7 +71,7 @@ One voice burst per line, 33 bytes (66 hex chars) of de-interleaved dibits, with
 metadata after `;`:
 
 ```
-AABBCCDD...;ALG=21;KID=0F;MI=531699C4
+AABBCCDD...;ALG=21;KID=0F;MI=12345678
 ```
 
 - 33 bytes = 132 dibits = one voice burst payload, excluding the sync slot.
@@ -199,9 +199,9 @@ key range whenever you can.
 The pipeline is not "looks plausible," it is verified end to end:
 
 - **Synthetic roundtrip:** 600/600 encrypt-then-decrypt cycles pass.
-- **Real data:** the known test key `373374ABE8` on the bundled
-  `test/aaaaa/RC4-40` capture produces the Z-scores above, and feeding that key
-  back into DSD-FME (`-1 373374ABE8 -w out.wav`) yields intelligible voice.
+- **Real data:** the recovered key on a real Enhanced Privacy capture produces
+  the Z-scores above, and feeding that key back into DSD-FME
+  (`-1 <key> -w out.wav`) yields intelligible voice.
 - **Same algorithm everywhere:** the CPU scorer, the CUDA/HIP kernel and the
   OpenCL kernel run the identical decode, cross-checked against DSD-FME's own
   decoder.

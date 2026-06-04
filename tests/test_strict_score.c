@@ -170,7 +170,7 @@ static float score_strict(const PayloadSet *payloads, const unsigned char *ciphe
 int main(int argc, char *argv[]) {
     PayloadSet payloads;
     char err[512] = {0};
-    unsigned char correct_key[5] = { 0x37, 0x33, 0x74, 0xAB, 0xE8 };
+    unsigned char correct_key[5] = { 0, 0, 0, 0, 0 }; /* pass the real key as argv[2] */
     unsigned char *cipher_packs;
     int payload_limit, n_random = 500, i;
     float score_correct;
