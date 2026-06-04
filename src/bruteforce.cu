@@ -213,7 +213,7 @@ __device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
 
 /* KPA 24-bit pre-filter for silence frames: decrypt 3 bytes (C0+C1) and verify
  * they equal the AMBE silence pattern (all zeros = unvoiced, zero pitch, all bands
- * unvoiced).  A wrong key passes by chance with probability 2^-24 ≈ 60 ppb —
+ * unvoiced).  A wrong key passes by chance with probability 2^-24 ~ 60 ppb -
  * ~16 million times stronger than the old single-bit check.
  * burst_drop = 256 + (silence_idx % 6) * 21 */
 __device__ __forceinline__ int kpa_silence_check_dev(
@@ -266,7 +266,7 @@ __device__ __forceinline__ void compute_hytera_ks_dev(
     }
 }
 
-/* KPA pre-filter macros — used inside kernel loops.
+/* KPA pre-filter macros - used inside kernel loops.
  * The strict kernel uses goto next_key; the ILP-2 kernel uses pruned flags. */
 #define KPA_PREFILTER(key5_ptr)                                                   \
     if (d_const_n_silence > 0) {                                                  \
@@ -326,7 +326,7 @@ __device__ __forceinline__ void rc4_crypt_first3_skip4_dev(
         out3[k] = in7[k] ^ ctx->S[(ctx->S[i] + ctx->S[j]) & 0xFF];
     }
 
-    /* Last 4 bytes: advance state only — no keystream read needed */
+    /* Last 4 bytes: advance state only - no keystream read needed */
     #pragma unroll
     for (int k = 3; k < 7; ++k) {
         i = (i + 1) & 0xFF;
@@ -340,7 +340,7 @@ __device__ __forceinline__ void rc4_crypt_first3_skip4_dev(
     ctx->j = j;
 }
 
-/* ── Shared-memory RC4 helpers (interleaved layout) ─────────────────────── *
+/* -- Shared-memory RC4 helpers (interleaved layout) ----------------------- *
  * S-box layout: S_base[byte_index * stride + lane], where stride=blockDim.x *
  * and lane=threadIdx.x.  This interleaves per-thread S-boxes so that threads *
  * 0-3 access bank 0, threads 4-7 access bank 1, etc. (4-way conflict) rather *
@@ -442,7 +442,7 @@ __device__ __forceinline__ int popcount_byte_dev(unsigned char b)
  * Encoding: bits[63:40] = sortable_float >> 8, bits[39:0] = key & 0xFFFFFFFFFF.
  * The sortable transform (flip sign bit; flip all bits for negatives) makes IEEE754
  * floats compare correctly as unsigned integers, so atomicMax picks the best score
- * and its associated key in a single indivisible operation — no race window. */
+ * and its associated key in a single indivisible operation - no race window. */
 __device__ __forceinline__ unsigned long long pack_score_key_dev(float score, uint64_t key)
 {
     unsigned int u = __float_as_uint(score);
@@ -795,14 +795,14 @@ void bruteforce_kernel_strict(
 
         /* Bit-frequency accumulators packed as uint16 pairs in uint32 registers.
          * bcnt_p[k] = (count[2k+1] << 16) | count[2k], max count = MAX_CONST_LINES = 256 < 65535.
-         * 12 uint32 registers vs 24 int previously — saves 12 registers toward the
-         * __launch_bounds__(256,2) target of ≤128 regs/thread. */
+         * 12 uint32 registers vs 24 int previously - saves 12 registers toward the
+         * __launch_bounds__(256,2) target of <=128 regs/thread. */
         unsigned int bcnt_p[12];
         #pragma unroll
         for (int k = 0; k < 12; k++) bcnt_p[k] = 0u;
 
 /* Helpers: b in [0,23], two uint16 counters packed per uint32.
- * BCNT_ADD: adds bit (0 or 1) to counter b — branchless.
+ * BCNT_ADD: adds bit (0 or 1) to counter b - branchless.
  * BCNT_GET: extracts counter b as float. */
 #define BCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
 #define BCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
@@ -864,9 +864,9 @@ void bruteforce_kernel_strict(
                 }
             }
 
-            /* Chi²-floor pruning at superframe boundary.
-             * E[chi²|wrong] = 6n, 3σ floor = 6n − 3·sqrt(48n).
-             * Correct key: chi²/n ≈ 212 — never triggers this floor. */
+            /* Chi2-floor pruning at superframe boundary.
+             * E[chi2|wrong] = 6n, 3sigma floor = 6n - 3.sqrt(48n).
+             * Correct key: chi2/n ~ 212 - never triggers this floor. */
             if (enable_prune && processed_bursts >= 12) {
                 float half_n = (float)processed_bursts * 0.5f;
                 float chi2_mid = 0.0f;
@@ -883,7 +883,7 @@ void bruteforce_kernel_strict(
 
         if (processed_bursts == payload_count) {
             /* Add bit-frequency chi-squared component.
-             * Wrong key: E[chi2/n] ≈ 6. Correct key: chi2/n ≈ 212 (Z≈335 with 126 payloads). */
+             * Wrong key: E[chi2/n] ~ 6. Correct key: chi2/n ~ 212 (Z~335 with 126 payloads). */
             if (processed_bursts >= 6) {
                 float half_n = (float)processed_bursts * 0.5f;
                 float chi2 = 0.0f;
@@ -914,11 +914,11 @@ void bruteforce_kernel_strict(
 }
 
 /* =========================================================================
- * ILP-2 STRICT KERNEL — 2 keys per thread, 128 threads/block
- * S-boxes live in 64 KB dynamic shared memory (2 × 128 × 256 bytes/block).
- * __launch_bounds__(128, 2): compiler targets ≤2 active blocks/SM so that
+ * ILP-2 STRICT KERNEL - 2 keys per thread, 128 threads/block
+ * S-boxes live in 64 KB dynamic shared memory (2 x 128 x 256 bytes/block).
+ * __launch_bounds__(128, 2): compiler targets <=2 active blocks/SM so that
  * the register file is partitioned for 256 threads, reducing spill pressure.
- * Hardware constraint: 2 × 64 KB = 128 KB shared per SM (Ada limit).
+ * Hardware constraint: 2 x 64 KB = 128 KB shared per SM (Ada limit).
  * ========================================================================= */
 __global__ __launch_bounds__(128, 2)
 void bruteforce_kernel_strict_ilp2(
@@ -935,7 +935,7 @@ void bruteforce_kernel_strict_ilp2(
     /* Each thread processes 2 consecutive keys: base_key and base_key+1 */
     uint64_t stride2 = stride * 2ULL;
     extern __shared__ unsigned char sh_s[];
-    /* Interleaved layout: S_base[byte_k * 128 + lane] — 4-way bank conflicts
+    /* Interleaved layout: S_base[byte_k * 128 + lane] - 4-way bank conflicts
      * vs 32-way for the contiguous layout (S[lane*256+k]). */
     const int lane = (int)threadIdx.x;
     constexpr int smem_stride = 128;
@@ -965,7 +965,7 @@ void bruteforce_kernel_strict_ilp2(
         KPA_PREFILTER_A(ka);
         KPA_PREFILTER_B(kb);
 
-        /* Packed uint16 bit-freq accumulators — one set per key */
+        /* Packed uint16 bit-freq accumulators - one set per key */
         unsigned int ba[12], bb[12];
         #pragma unroll
         for (int k = 0; k < 12; k++) { ba[k] = 0u; bb[k] = 0u; }
@@ -1043,7 +1043,7 @@ void bruteforce_kernel_strict_ilp2(
                     for (int b=0;b<8;b++) BB_ADD(16+b, (pb0[2]>>(7-b))&1);
                 }
 
-                /* Per-burst floor — applied to both independently */
+                /* Per-burst floor - applied to both independently */
                 if (enable_prune && bursts_a >= 1 && !pruned_a &&
                     score_a < d_abs_floor[bursts_a]) pruned_a = 1;
                 if (enable_prune && bursts_b >= 1 && !pruned_b &&
@@ -1113,7 +1113,7 @@ void bruteforce_kernel_strict_ilp2(
 }
 
 /* =========================================================================
- * HYTERA EP KERNEL — Hytera Enhanced Privacy (ALG=0x02, mode_policy=4)
+ * HYTERA EP KERNEL - Hytera Enhanced Privacy (ALG=0x02, mode_policy=4)
  * Same scoring structure as bruteforce_kernel_strict but uses a fixed
  * 21-byte keystream per superframe instead of KMI9 RC4.
  * Kept in a separate kernel so the MOTOTRBO kernels carry zero overhead.
@@ -1330,7 +1330,7 @@ void bruteforce_kernel(
                 }
                 if (pruned) break;
 
-                /* Chi²-floor at superframe boundary (same logic as strict kernel) */
+                /* Chi2-floor at superframe boundary (same logic as strict kernel) */
                 if (enable_prune && n_freq >= 12) {
                     float half_n = (float)n_freq * 0.5f;
                     float chi2_mid = 0.0f;
@@ -1628,7 +1628,7 @@ void bruteforce_kernel(
                     }
                 }
 
-                /* G) Silence frame bonus (many 0x00/0xFF bytes → valid AMBE silence) */
+                /* G) Silence frame bonus (many 0x00/0xFF bytes -> valid AMBE silence) */
                 {
                     int silence_count = 0;
                     for (int bx = 0; bx < bytes_to_test; ++bx) {
@@ -1719,7 +1719,7 @@ static int load_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode,
         int ver = 0;
         if (fscanf(fp, "VER=%d\n", &ver) != 1 || ver != CUDA_PROFILE_VERSION) {
             fclose(fp);
-            plat_delete_file(path); /* stale profile — delete so autotune re-runs */
+            plat_delete_file(path); /* stale profile - delete so autotune re-runs */
             return 0;
         }
     }
@@ -1758,7 +1758,7 @@ static void save_cuda_launch_profile(const cudaDeviceProp *prop, int strict_mode
     fclose(fp);
 }
 
-/* Forward declaration — defined after scoring helpers, called from cuda_launcher_thread */
+/* Forward declaration - defined after scoring helpers, called from cuda_launcher_thread */
 static void run_dictionary_phase(BruteforceEngine *engine);
 
 /* CpuWorkerCtx and forward declarations needed by cpu_4way_worker_proc / cuda_launcher_thread */
@@ -1778,7 +1778,7 @@ static double score_candidate_host(
     const PayloadSet *payloads, int sample_lines,
     int sample_bytes, const unsigned char key[5]);
 
-/* ─── Identity table for AVX2 S-box initialisation ──────────────────────── */
+/* --- Identity table for AVX2 S-box initialisation ------------------------ */
 static const unsigned char rc4_id256[RC4_SBOX_SIZE] = {
       0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
      16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
@@ -1798,10 +1798,10 @@ static const unsigned char rc4_id256[RC4_SBOX_SIZE] = {
     240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255
 };
 
-/* ─── 4-way interleaved RC4 KSA (9-byte key) ────────────────────────────── *
+/* --- 4-way interleaved RC4 KSA (9-byte key) ------------------------------ *
  * Runs four independent RC4 key-scheduling passes in the same loop body so
  * the CPU out-of-order engine overlaps independent load/store chains.
- * AVX2 is used for the identity S-box initialisation (8 × 256-bit stores
+ * AVX2 is used for the identity S-box initialisation (8 x 256-bit stores
  * per S-box instead of 256 byte stores) when compiled with /arch:AVX2.    */
 static void rc4_ksa9_4way(
     unsigned char Sa[RC4_SBOX_SIZE], unsigned char Sb[RC4_SBOX_SIZE],
@@ -1827,7 +1827,7 @@ static void rc4_ksa9_4way(
         Sa[i] = Sb[i] = Sc[i] = Sd[i] = (unsigned char)i;
 #endif
 
-    /* 4-way interleaved KSA — four independent j-chains */
+    /* 4-way interleaved KSA - four independent j-chains */
     ja = jb = jc = jd = 0u;
     for (i = 0; i < RC4_SBOX_SIZE; i++) {
         int ki = i % 9;
@@ -1853,23 +1853,23 @@ static void rc4_ksa9_4way(
     } \
 } while (0)
 
-/* ─── 4-way AVX2 CPU assist worker ──────────────────────────────────────── *
+/* --- 4-way AVX2 CPU assist worker ---------------------------------------- *
  * Processes 4 candidate keys per outer loop iteration using:
- *   • AVX2 S-box init (8 × 256-bit stores per box, vs 256 byte stores)
- *   • 4-way interleaved KSA — lets the CPU OOO engine overlap 4 independent
+ *   - AVX2 S-box init (8 x 256-bit stores per box, vs 256 byte stores)
+ *   - 4-way interleaved KSA - lets the CPU OOO engine overlap 4 independent
  *     scatter/gather chains, roughly doubling effective IPC on the KSA loop
- *   • Per-superframe KSA: one KSA per 6-burst superframe (instead of 6),
- *     then continuous PRGA across all bursts — 6× fewer KSA calls
- *   • P-core pinning via plat_thread_set_affinity(worker_index)
+ *   - Per-superframe KSA: one KSA per 6-burst superframe (instead of 6),
+ *     then continuous PRGA across all bursts - 6x fewer KSA calls
+ *   - P-core pinning via plat_thread_set_affinity(worker_index)
  *
  * Scores keys using the same inter-frame Hamming metric as the GPU kernel
- * (score_burst = 48 − HD(sf0,sf1) − HD(sf1,sf2)) so GPU/CPU best_score are
+ * (score_burst = 48 - HD(sf0,sf1) - HD(sf1,sf2)) so GPU/CPU best_score are
  * directly comparable.
  *
  * Falls back to scalar score_candidate_host() for legacy mode (mode_policy<2)
  * or when cipher_packs is NULL.
  *
- * Does NOT touch finished_threads/search_completed/running — the GPU thread
+ * Does NOT touch finished_threads/search_completed/running - the GPU thread
  * owns those. */
 static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
 {
@@ -1880,11 +1880,16 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
     uint64_t local_count = 0;
     uint64_t k;
     int b;
+    /* Match the GPU kernel's pruning gate (enable_prune = total_keys > 2^20):
+     * narrow ranges (e.g. mask searches) score every key in full, so the early
+     * floor never discards the correct key there. */
+    int cpu_enable_prune =
+        ((engine->cfg.end_key - engine->cfg.start_key + 1ULL) > (1ULL << 20));
 
     plat_thread_set_affinity(ctx->worker_index);
 
     if (ctx->mode_policy >= 2 && cipher_packs != NULL && pcount > 0) {
-        /* ── Correct pipeline: 4-way KSA + per-superframe PRGA ── */
+        /* -- Correct pipeline: 4-way KSA + per-superframe PRGA -- */
         k = ctx->start_key;
         while (k <= ctx->end_key) {
             int batch, sf_base;
@@ -2019,7 +2024,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         }
                     } /* sf */
 
-                    /* Hamming score per key: burst_score = 48 − HD(sf0,sf1) − HD(sf1,sf2)
+                    /* Hamming score per key: burst_score = 48 - HD(sf0,sf1) - HD(sf1,sf2)
                      * Matches GPU kernel score_burst_correct_dev(). */
                     for (b = 0; b < 4; b++) {
                         int h01 = 0, h12 = 0, i;
@@ -2031,25 +2036,22 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         scores[b] += (double)(48 - h01 - h12);
                     }
 
-                    /* Per-burst absolute floor (mirrors GPU kernel d_abs_floor[k]).
-                     * floor[k] = 33k − 2σ_k, σ_k = 3.46·√k.
-                     * Rejects >99.9997% of wrong keys from burst 1 onward. */
-                    {
-                        float fv;
-                        processed_bursts_cpu++;
-                        fv = 33.0f * (float)processed_bursts_cpu
-                           - 6.92f * sqrtf((float)processed_bursts_cpu);
+                    /* Per-burst absolute floor (same formula as the GPU kernel's
+                     * d_abs_floor[k] = 33k - 2*3.46*sqrt(k)), gated by
+                     * cpu_enable_prune so narrow/mask ranges score in full. */
+                    processed_bursts_cpu++;
+                    if (cpu_enable_prune) {
+                        float fv = 33.0f * (float)processed_bursts_cpu
+                                 - 6.92f * sqrtf((float)processed_bursts_cpu);
                         all_pruned_cpu = 1;
                         for (b = 0; b < 4; b++) {
                             if (!pruned[b]) {
-                                if ((float)scores[b] < fv)
-                                    pruned[b] = 1;
-                                else
-                                    all_pruned_cpu = 0;
+                                if ((float)scores[b] < fv) pruned[b] = 1;
+                                else                       all_pruned_cpu = 0;
                             }
                         }
+                        if (all_pruned_cpu) break;
                     }
-                    if (all_pruned_cpu) break;
                 } /* burst */
 
                 sf_base += n_bursts;
@@ -2072,7 +2074,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                 plat_atomic64_add(&engine->keys_tested, 1024LL);
         }
     } else {
-        /* ── Fallback: scalar scoring for legacy mode (mode_policy < 2) ── */
+        /* -- Fallback: scalar scoring for legacy mode (mode_policy < 2) -- */
         for (k = ctx->start_key; k <= ctx->end_key; ++k) {
             unsigned char key_bytes[5];
             double score;
@@ -2148,7 +2150,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     CpuWorkerCtx *cpu_assist_ctxs = NULL;
     plat_thread_t *cpu_assist_handles = NULL;
     int n_cpu_assist = 0;
-    unsigned long long last_gpu_kt = 0; /* GPU keys_tested at last poll — for delta-add */
+    unsigned long long last_gpu_kt = 0; /* GPU keys_tested at last poll - for delta-add */
     cudaDeviceProp prop;
 
     int payload_limit = engine->cfg.sample_lines;
@@ -2218,7 +2220,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             if (has_mi && is_rc4_alg_host(alg))    mi_rc4_lines++;
             if (has_mi && is_hytera_ep_alg_host(alg)) mi_hytera_lines++;
         }
-        /* Hytera EP takes priority: if ≥90% of payloads have MI + ALG=0x02, use mode 4 */
+        /* Hytera EP takes priority: if >=90% of payloads have MI + ALG=0x02, use mode 4 */
         if (payload_limit > 0 && mi_hytera_lines * 10 >= payload_limit * 9) {
             mode_policy = 4;
         } else if (payload_limit > 0 && mi_rc4_lines * 10 >= payload_limit * 9) {
@@ -2285,10 +2287,10 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         float host_abs_floor[MAX_CONST_LINES + 1];
         host_abs_floor[0] = -FLT_MAX;
         for (int k = 1; k <= payload_limit; ++k) {
-            /* Wrong key:   mean=24*k,  sigma≈3.46*sqrt(k)
-             * Correct key: mean≈44*k  (h01≈2, h12≈2 → score≈44 per burst)
+            /* Wrong key:   mean=24*k,  sigma~3.46*sqrt(k)
+             * Correct key: mean~44*k  (h01~2, h12~2 -> score~44 per burst)
              * Floor at 33*k - 2*sigma: rejects ~99.9997% of wrong keys at k=6.
-             * Margin to correct-key mean: +11 per burst → safe from false negatives. */
+             * Margin to correct-key mean: +11 per burst -> safe from false negatives. */
             float sigma_k = 3.46f * sqrtf((float)k);
             host_abs_floor[k] = 33.0f * (float)k - 2.0f * sigma_k;
         }
@@ -2346,7 +2348,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
     }
 
-    /* KPA silence pre-filter activation — must come after use_ilp2 is set.
+    /* KPA silence pre-filter activation - must come after use_ilp2 is set.
      * Disabled for ILP-2: its main loop uses shared-memory RC4 (~10-20x faster than
      * local memory), so the KPA's local-memory KSA9 costs more than abs-floor saves.
      * Disabled for Hytera EP (mode_policy==4): KPA uses KMI9 algorithm. */
@@ -2414,7 +2416,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             int chunk_candidates_legacy[3] = {  64,  96, 128 };
             int bpsm_count = 4;
             int chunk_count = 3;
-            uint64_t tune_keys = (1ULL << 18); /* 262144 keys — enough for timing */
+            uint64_t tune_keys = (1ULL << 18); /* 262144 keys - enough for timing */
             float best_kps = -1.0f;
             cudaEvent_t ev_start = NULL;
             cudaEvent_t ev_stop = NULL;
@@ -2591,8 +2593,43 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         int gp = (engine->cfg.gpu_split_pct > 0) ? engine->cfg.gpu_split_pct : 80;
         if (gp < 50) gp = 50;
         if (gp > 95) gp = 95;
-        uint64_t gpu_range = (total_keys * (uint64_t)gp) / 100ULL;
-        uint64_t cpu_range = total_keys - gpu_range;
+        /* CPU-assist: the GPU sweeps the low part of the range; CPU worker threads
+         * sweep the high part in parallel, joined before the final result read.
+         * Re-enabled after fixing the real defect (the result merge): the GPU poll
+         * and final read previously OVERWROTE engine->best with the GPU's best,
+         * discarding a higher-scoring key found on the CPU, so whenever the
+         * recovered key fell in the CPU's share the engine returned a wrong key.
+         * Both now max-merge; the 4-way CPU scorer itself is correct.
+         *
+         * The CPU's share is auto-sized from a quick throughput probe so the much
+         * slower CPU never bottlenecks the GPU. gpu_split_pct is the *maximum* CPU
+         * share (100-gp); the engine uses less when the CPU is slow. */
+        uint64_t gpu_range, cpu_range;
+        {
+            /* Conservative probe: the scalar scorer over all payloads is slower
+             * than the 4-way worker, so cpu_kps is under-estimated and the CPU's
+             * share stays safe (never a bottleneck). */
+            unsigned char kb[5] = { 0x12, 0x34, 0x56, 0x78, 0x9A };
+            const int bench_n = 512;
+            uint64_t t0 = plat_ticks_ms();
+            volatile double acc = 0.0;
+            for (int i = 0; i < bench_n; i++) {
+                kb[4] = (unsigned char)i; kb[3] = (unsigned char)(i >> 8);
+                acc += score_candidate_host(engine->payloads, 0,
+                                            engine->cfg.sample_bytes, kb);
+            }
+            (void)acc;
+            uint64_t dt_ms = plat_ticks_ms() - t0; if (dt_ms == 0) dt_ms = 1;
+            double cpu_kps = ((double)bench_n * 1000.0 / (double)dt_ms)
+                           * (double)n_cpu_assist;
+            const double GPU_RATE_REF = 80.0e6; /* CPU stays a minority contributor */
+            double cpu_frac = cpu_kps / (cpu_kps + GPU_RATE_REF);
+            double cap = (double)(100 - gp) / 100.0;
+            if (cpu_frac > cap) cpu_frac = cap;
+            if (cpu_frac < 0.0) cpu_frac = 0.0;
+            cpu_range = (uint64_t)((double)total_keys * cpu_frac);
+            gpu_range = total_keys - cpu_range;
+        }
         if (cpu_range > 0 && mode_policy >= 2) {
             uint64_t cpu_start = engine->cfg.start_key + gpu_range;
             uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
@@ -2641,7 +2678,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         cudaStream_t streams[2] = { compute_stream, compute_stream2 };
         int active = 0;
         int have_pending = 0;
-        const int stop_sig = 1;             /* #6: hoisted — stable address for async memcpy */
+        const int stop_sig = 1;             /* #6: hoisted - stable address for async memcpy */
         uint64_t last_checkpoint_ms = plat_ticks_ms(); /* #34: periodic checkpoint timer */
 
         /* Helper: poll GPU results into engine using pinned memory */
@@ -2655,9 +2692,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                   plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(_gkt - last_gpu_kt)); \
                   last_gpu_kt = _gkt; } \
                 if (h_poll->best_packed != 0ULL) { \
+                    double _gs = (double)host_unpack_score(h_poll->best_packed); \
                     plat_mutex_lock(&engine->lock); \
-                    engine->best_score = (double)host_unpack_score(h_poll->best_packed); \
-                    engine->best_key   = host_unpack_key(h_poll->best_packed); \
+                    if (_gs > engine->best_score) { \
+                        engine->best_score = _gs; \
+                        engine->best_key   = host_unpack_key(h_poll->best_packed); \
+                    } \
                     plat_mutex_unlock(&engine->lock); \
                 } \
             } else { \
@@ -2669,9 +2709,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                   plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(_k - last_gpu_kt)); \
                   last_gpu_kt = _k; } \
                 if (_bp != 0ULL) { \
+                    double _gs = (double)host_unpack_score(_bp); \
                     plat_mutex_lock(&engine->lock); \
-                    engine->best_score = (double)host_unpack_score(_bp); \
-                    engine->best_key   = host_unpack_key(_bp); \
+                    if (_gs > engine->best_score) { \
+                        engine->best_score = _gs; \
+                        engine->best_key   = host_unpack_key(_bp); \
+                    } \
                     plat_mutex_unlock(&engine->lock); \
                 } \
             } \
@@ -2796,16 +2839,24 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         plat_atomic64_add(&engine->keys_tested, (int64_t)(final_k - last_gpu_kt));
         plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(final_k - last_gpu_kt));
         if (final_bp != 0ULL) {
+            double   gpu_best_score = (double)host_unpack_score(final_bp);
+            uint64_t gpu_best_key   = host_unpack_key(final_bp);
             plat_mutex_lock(&engine->lock);
-            engine->best_score = (double)host_unpack_score(final_bp);
-            engine->best_key   = host_unpack_key(final_bp);
+            /* Merge with the CPU assist workers' best (they own the upper share
+             * of the keyspace). Take the max so the recovered key is never
+             * discarded when it falls outside the GPU's portion. The GPU and CPU
+             * scorers use the same 48-HD-HD metric, so the scores are comparable. */
+            if (gpu_best_score > engine->best_score) {
+                engine->best_score = gpu_best_score;
+                engine->best_key   = gpu_best_key;
+            }
             plat_mutex_unlock(&engine->lock);
         }
     }
 
     if (plat_atomic32_load(&engine->stop_requested) == 0) {
         plat_atomic32_store(&engine->search_completed, 1);
-        /* #34: search finished cleanly — delete the progress file */
+        /* #34: search finished cleanly - delete the progress file */
         if (engine->progress_path[0] != '\0') {
             plat_delete_file(engine->progress_path);
             engine->progress_path[0] = '\0';
@@ -2849,7 +2900,7 @@ static void key_to_5bytes_cpu(uint64_t key, unsigned char out[5])
     out[4] = (unsigned char)(key & 0xFFu);
 }
 
-/* Forward declaration — defined later, after scoring helpers */
+/* Forward declaration - defined later, after scoring helpers */
 static double score_candidate_host(
     const PayloadSet *payloads, int sample_lines,
     int sample_bytes, const unsigned char key[5]);
@@ -2956,7 +3007,7 @@ void bruteforce_engine_init(BruteforceEngine *engine)
     memset(engine, 0, sizeof(*engine));
     plat_mutex_init(&engine->lock);
     plat_hrfreq_init(&engine->qpc_freq);
-    engine->pause_event = plat_event_create(1); /* signaled — workers run immediately */
+    engine->pause_event = plat_event_create(1); /* signaled - workers run immediately */
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)
@@ -3278,7 +3329,7 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     keys = (uint64_t)plat_atomic64_load((plat_atomic64_t *)&engine->keys_tested);
     total = 0;
     if (engine->cfg.has_resume_context) {
-        /* Show overall progress spanning original start → end */
+        /* Show overall progress spanning original start -> end */
         uint64_t orig = engine->cfg.original_start_key;
         if (engine->cfg.end_key >= orig)
             total = (engine->cfg.end_key - orig) + 1ull;
@@ -3568,8 +3619,8 @@ static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t
  * Used by bruteforce_test_score() and CPU fallback.
  *
  * out_sf0_bits24: if non-NULL, receives the 24 decrypted AMBE bits (C0+C1)
- * from sub-frame 0. Used by score_candidate_host for bit-frequency chi² scoring
- * Bit-frequency chi² is the primary metric: Z≈335 with 126 payloads.
+ * from sub-frame 0. Used by score_candidate_host for bit-frequency chi2 scoring
+ * Bit-frequency chi2 is the primary metric: Z~335 with 126 payloads.
  */
 static double score_burst_correct_host(
     const unsigned char *payload33,
@@ -3729,7 +3780,7 @@ static double score_candidate_host(
                             ambe_fr[1][j] ^= (unsigned char)(pr_val >> 15);
                         }
                     }
-                    /* extract 49 bits → pack 7 bytes */
+                    /* extract 49 bits -> pack 7 bytes */
                     unsigned char cipher7[7] = {0};
                     {
                         unsigned char bits49[49];
@@ -3771,9 +3822,9 @@ static double score_candidate_host(
         return score;
     }
 
-    /* KMI9 path (mode_policy >= 2): two metrics in a single pass —
-     *   1. Inter-frame Hamming on C0+C1 (24 bits), Z≈38 with 126 payloads.
-     *   2. Bit-frequency chi² across all frames, Z≈335 with 126 payloads. */
+    /* KMI9 path (mode_policy >= 2): two metrics in a single pass -
+     *   1. Inter-frame Hamming on C0+C1 (24 bits), Z~38 with 126 payloads.
+     *   2. Bit-frequency chi2 across all frames, Z~335 with 126 payloads. */
     if (mode_policy >= 2) {
         long bit_counts[24];
         int n_freq = 0, b;
@@ -3792,7 +3843,7 @@ static double score_candidate_host(
         }
 
         /* Bit-frequency chi-squared: sum_i (count_i - N/2)^2 / N.
-         * Wrong key:   E[result] ≈ 6  (uniform distribution, 24 * N/4 / N).
+         * Wrong key:   E[result] ~ 6  (uniform distribution, 24 * N/4 / N).
          * Correct key: result >> 6     (non-uniform speech bit distribution). */
         if (n_freq >= 6) {
             double half_n = (double)n_freq * 0.5;
@@ -4078,7 +4129,7 @@ double bruteforce_test_score(
  *   Level 1: all-same-nibble (factory resets), trivial incrementing patterns
  *   Level 2: common installer defaults, alternating patterns, magic numbers
  *
- * Each key is a uint64_t ≤ 0xFFFFFFFFFF (40 bits = 5 bytes = 10 hex digits).
+ * Each key is a uint64_t <= 0xFFFFFFFFFF (40 bits = 5 bytes = 10 hex digits).
  * =========================================================================
  */
 static const uint64_t s_dict_keys[] = {
