@@ -2344,8 +2344,15 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     /* ILP-2 only for MOTOTRBO (mode 2/3): Hytera EP has its own kernel (no smem S-box needed) */
     use_ilp2 = (mode_policy >= 2 && mode_policy != 4) && (cuda_sm >= 75);
     if (use_ilp2) {
-        cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
+        cu_err = cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
             cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
+        if (cu_err != cudaSuccess) {
+            /* This GPU will not raise the dynamic shared-memory limit for the
+             * ILP-2 kernel; fall back to the non-ILP-2 strict kernel, which
+             * produces identical results. */
+            use_ilp2 = 0;
+            cudaGetLastError();   /* clear the sticky error */
+        }
     }
 
     /* KPA silence pre-filter activation - must come after use_ilp2 is set.
@@ -2864,8 +2871,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     }
 
 cleanup:
-    /* Stop and wait for CPU assist workers if still running (e.g. CUDA error path) */
+    /* Stop and wait for CPU assist workers if still running (e.g. CUDA error path).
+     * Signal stop first: on an error-path goto, stop_requested may not be set, and
+     * the workers only poll it every 4096 keys, so a blind join could hang for the
+     * duration of the CPU's whole keyspace share. */
     if (n_cpu_assist > 0 && cpu_assist_handles) {
+        plat_atomic32_store(&engine->stop_requested, 1);
+        plat_event_set(&engine->pause_event);
         plat_threads_join(cpu_assist_handles, n_cpu_assist);
         for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_assist_handles[t]);
         free(cpu_assist_handles); cpu_assist_handles = NULL;

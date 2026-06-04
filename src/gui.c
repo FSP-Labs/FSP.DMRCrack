@@ -2434,12 +2434,17 @@ static int prompt_rtl_config(HWND parent, char *out_spec, size_t out_len)
     UpdateWindow(hdlg);
     SetFocus(g_rtldlg.ed_freq);
 
+    /* Suspend the main UI refresh timer: this loop pumps the whole thread's
+     * queue, so an IDT_UI_REFRESH tick would otherwise run engine/auto-listen
+     * side effects on the disabled main window while the dialog is open. */
+    KillTimer(parent, IDT_UI_REFRESH);
     while (!g_rtldlg.done && GetMessageA(&m, NULL, 0, 0) > 0) {
         if (!IsDialogMessageA(hdlg, &m)) {
             TranslateMessage(&m);
             DispatchMessageA(&m);
         }
     }
+    SetTimer(parent, IDT_UI_REFRESH, 200, NULL);
 
     ok = g_rtldlg.accepted;
     if (ok) {
@@ -2864,14 +2869,26 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             DestroyWindow(g_app.hwnd_help);
             g_app.hwnd_help = NULL;
         }
+        /* The big/label/header fonts can fall back to a base handle when their
+         * CreateFontA fails, so delete each derived font only if it is a
+         * distinct handle (while the bases are still valid for comparison),
+         * then free the base fonts once. Avoids double-freeing a shared HFONT. */
+        if (g_app.font_tile_metric_big && g_app.font_tile_metric_big != g_app.font_tile_metric)
+            DeleteObject(g_app.font_tile_metric_big);
+        g_app.font_tile_metric_big = NULL;
+        if (g_app.font_tile_label && g_app.font_tile_label != g_app.ui_font)
+            DeleteObject(g_app.font_tile_label);
+        g_app.font_tile_label = NULL;
+        if (g_app.font_header && g_app.font_header != g_app.ui_font_bold)
+            DeleteObject(g_app.font_header);
+        g_app.font_header = NULL;
+        if (g_app.font_header_sub && g_app.font_header_sub != g_app.ui_font)
+            DeleteObject(g_app.font_header_sub);
+        g_app.font_header_sub = NULL;
+        if (g_app.font_tile_metric) { DeleteObject(g_app.font_tile_metric); g_app.font_tile_metric = NULL; }
         if (g_app.ui_font)         { DeleteObject(g_app.ui_font); g_app.ui_font = NULL; }
         if (g_app.ui_font_bold)    { DeleteObject(g_app.ui_font_bold); g_app.ui_font_bold = NULL; }
         if (g_app.ui_font_section) { DeleteObject(g_app.ui_font_section); g_app.ui_font_section = NULL; }
-        if (g_app.font_tile_metric)     { DeleteObject(g_app.font_tile_metric); g_app.font_tile_metric = NULL; }
-        if (g_app.font_tile_metric_big) { DeleteObject(g_app.font_tile_metric_big); g_app.font_tile_metric_big = NULL; }
-        if (g_app.font_tile_label)      { DeleteObject(g_app.font_tile_label);  g_app.font_tile_label  = NULL; }
-        if (g_app.font_header)      { DeleteObject(g_app.font_header);      g_app.font_header      = NULL; }
-        if (g_app.font_header_sub)  { DeleteObject(g_app.font_header_sub);  g_app.font_header_sub  = NULL; }
         destroy_theme_brushes();
         bruteforce_stop(&g_app.engine);
         bruteforce_engine_destroy(&g_app.engine);

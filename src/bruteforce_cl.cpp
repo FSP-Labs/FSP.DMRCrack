@@ -644,7 +644,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cl_launcher_proc(void *arg)
                      "clEnqueueNDRangeKernel failed (%d)", (int)err);
             break;
         }
-        clFinish(st->queue);
+        cl_int fin = clFinish(st->queue);
+        if (fin != CL_SUCCESS) {
+            snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                     "clFinish failed (%d)", (int)fin);
+            break;
+        }
 
         plat_atomic64_add(&engine->keys_tested, (int64_t)this_chunk);
         plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)this_chunk);
@@ -978,6 +983,10 @@ void bruteforce_stop(BruteforceEngine *engine)
         free(engine->workers);
         engine->workers = NULL;
     }
+    /* Close each thread handle (Windows _beginthreadex handles must be closed)
+     * before freeing the array, so repeated start/stop cycles do not leak. */
+    for (int t = 0; t < engine->cfg.thread_count; ++t)
+        plat_thread_close(engine->thread_handles[t]);
     free(engine->thread_handles);
     engine->thread_handles = NULL;
 }

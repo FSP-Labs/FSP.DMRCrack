@@ -629,7 +629,7 @@ void validate_payload_set(const PayloadSet *ps,
 
     for (i = 0; i < ps->count; i++) {
         const PayloadLine *it = &ps->items[i];
-        if (it->has_mi && (it->algid == 0x21 || it->algid == 0x01))
+        if (it->has_mi && it->has_algid && (it->algid == 0x21 || it->algid == 0x01))
             kmi9++;
         if (!has_kid && it->has_mi) {
             first_kid = it->keyid;
@@ -656,11 +656,15 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
     unsigned char other_alg = 0;
     PayloadClass cls;
     int ck = 0;
+    char scratch[1];
 
-    if (msg && msg_len) msg[0] = '\0';
+    /* msg is an optional out-param; route writes to a throwaway when NULL so the
+     * snprintf calls below never dereference a null pointer. */
+    if (!msg) { msg = scratch; msg_len = sizeof(scratch); }
+    if (msg_len) msg[0] = '\0';
     if (crackable) *crackable = 0;
     if (!ps || ps->count == 0) {
-        if (msg) snprintf(msg, msg_len, "No payloads loaded");
+        snprintf(msg, msg_len, "No payloads loaded");
         return PAYLOAD_CLASS_NONE;
     }
     total = ps->count;

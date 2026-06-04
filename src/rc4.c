@@ -21,6 +21,8 @@ void rc4_init(RC4_CTX *ctx, const unsigned char *key, size_t keylen)
     unsigned int i;
     unsigned int j;
 
+    if (keylen == 0) return;   /* guard against div-by-zero in key[i % keylen] */
+
     for (i = 0; i < 256; ++i) {
         ctx->S[i] = (unsigned char)i;
     }

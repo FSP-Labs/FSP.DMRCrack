@@ -177,9 +177,16 @@ static int potfile_lookup(const char *potfile, const char *bin_path,
     if (!fp) return 0;
     const char *base = path_basename(bin_path);
     size_t blen = strlen(base);
-    char line[256];
+    char line[4096];
     int found = 0;
     while (fgets(line, sizeof(line), fp)) {
+        size_t ll = strlen(line);
+        /* Skip any line that did not fit in the buffer (no terminating newline
+         * and not EOF), so a truncated row never yields a partial wrong key. */
+        if (ll == sizeof(line) - 1 && line[ll - 1] != '\n' && !feof(fp)) {
+            int c; while ((c = fgetc(fp)) != '\n' && c != EOF) { }
+            continue;
+        }
         if (strncmp(line, base, blen) == 0 && line[blen] == ':') {
             unsigned long long key = 0; double sc = 0.0;
             if (sscanf(line + blen + 1, "%llx:%lf", &key, &sc) >= 1) {
@@ -640,7 +647,10 @@ int main(int argc, char **argv)
     printf("Press Ctrl+C to stop and save checkpoint.\n\n");
 
     if (!bruteforce_start(&g_engine, &cfg, &g_payloads, err, sizeof(err))) {
-        fprintf(stderr, "error: %s\n", err); return 1;
+        fprintf(stderr, "error: %s\n", err);
+        bruteforce_engine_destroy(&g_engine);
+        payload_set_free(&g_payloads);
+        return 1;
     }
 
     /* -- Poll loop -------------------------------------------------------- */
