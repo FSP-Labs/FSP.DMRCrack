@@ -67,7 +67,7 @@ int payload_save_file(const char *path, const PayloadSet *payloads, char *err, s
  * err / err_len : optional error message buffer
  *
  * Returns 1 on success (>= 1 voice burst written), 0 on error.
- * Replaces the Python script tools/dsdfme_dsp_to_bin.py — no Python needed.
+ * Replaces the Python script tools/dsdfme_dsp_to_bin.py - no Python needed.
  */
 int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
                        const char *log_path, char *err, size_t err_len);
@@ -75,6 +75,21 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
 void validate_payload_set(const PayloadSet *ps,
                           char *summary, size_t summary_len,
                           char *warn,    size_t warn_len);
+
+/* Algorithm classification for a loaded capture, so the user learns up front
+ * whether it is crackable instead of after a long search. */
+typedef enum {
+    PAYLOAD_CLASS_MOTOTRBO_RC4 = 0, /* RC4 EP + MI: crackable (strict pipeline)   */
+    PAYLOAD_CLASS_HYTERA_EP,        /* Hytera EP + MI: crackable                  */
+    PAYLOAD_CLASS_RC4_NO_MI,        /* RC4 algid but no MI: weak fallback only    */
+    PAYLOAD_CLASS_UNSUPPORTED,      /* non-RC4 cipher (likely AES): NOT crackable */
+    PAYLOAD_CLASS_NONE              /* no encryption metadata                     */
+} PayloadClass;
+
+/* Classify a loaded set and write a one-line human verdict into msg.
+ * crackable (out, optional): 1 if the recommended pipeline can recover a key. */
+PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
+                              char *msg, size_t msg_len);
 
 #ifdef __cplusplus
 }

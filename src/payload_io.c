@@ -380,7 +380,7 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
 }
 
 /* =========================================================================
- * DSP → BIN converter (native C replacement for dsdfme_dsp_to_bin.py)
+ * DSP -> BIN converter (native C replacement for dsdfme_dsp_to_bin.py)
  * ========================================================================= */
 
 #define MAX_PI_PER_SLOT 8192
@@ -646,4 +646,73 @@ void validate_payload_set(const PayloadSet *ps,
     warn[0] = '\0';
     if (ps->count < 30)
         snprintf(warn, warn_len, "! Only %zu payloads -- low confidence", ps->count);
+}
+
+PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
+                              char *msg, size_t msg_len)
+{
+    size_t i;
+    size_t total, with_mi = 0, rc4_mi = 0, hytera_mi = 0, other_mi = 0;
+    unsigned char other_alg = 0;
+    PayloadClass cls;
+    int ck = 0;
+
+    if (msg && msg_len) msg[0] = '\0';
+    if (crackable) *crackable = 0;
+    if (!ps || ps->count == 0) {
+        if (msg) snprintf(msg, msg_len, "No payloads loaded");
+        return PAYLOAD_CLASS_NONE;
+    }
+    total = ps->count;
+
+    for (i = 0; i < total; i++) {
+        const PayloadLine *it = &ps->items[i];
+        unsigned char alg = it->has_algid ? it->algid
+                          : (ps->has_global_algid ? ps->global_algid : 0);
+        int has_mi = it->has_mi || ps->has_global_mi;
+        int is_rc4 = (alg == 0x21 || alg == 0x01 || ((alg & 0x07u) == 0x01u));
+        int is_hyt = (alg == 0x02);
+        if (has_mi) {
+            with_mi++;
+            if      (is_rc4) rc4_mi++;
+            else if (is_hyt) hytera_mi++;
+            else if (it->has_algid || ps->has_global_algid) {
+                other_mi++;
+                if (!other_alg) other_alg = alg;
+            }
+        }
+    }
+
+    /* Same precedence as the engine's mode auto-selection. */
+    if (hytera_mi * 10 >= total * 9) {
+        cls = PAYLOAD_CLASS_HYTERA_EP; ck = 1;
+        snprintf(msg, msg_len,
+            "Hytera Enhanced Privacy (RC4-40) + MI -- crackable (%zu/%zu frames)",
+            hytera_mi, total);
+    } else if (rc4_mi * 3 >= total) {
+        cls = PAYLOAD_CLASS_MOTOTRBO_RC4; ck = 1;
+        snprintf(msg, msg_len,
+            "MOTOTRBO Enhanced Privacy (RC4-40) + MI -- crackable (%zu/%zu frames%s)",
+            rc4_mi, total, (rc4_mi * 10 >= total * 9) ? ", strict" : ", relaxed");
+    } else if (other_mi > rc4_mi && other_mi > hytera_mi) {
+        cls = PAYLOAD_CLASS_UNSUPPORTED;
+        snprintf(msg, msg_len,
+            "Unsupported cipher (ALG=0x%02X, likely AES) -- NOT crackable by this tool",
+            (unsigned)other_alg);
+    } else if (rc4_mi > 0) {
+        cls = PAYLOAD_CLASS_MOTOTRBO_RC4; ck = 1;
+        snprintf(msg, msg_len,
+            "RC4-40 + MI, weak signal -- crackable but only %zu/%zu frames carry MI",
+            rc4_mi, total);
+    } else if (with_mi == 0) {
+        cls = PAYLOAD_CLASS_RC4_NO_MI;
+        snprintf(msg, msg_len,
+            "No MI metadata -- only the weak statistical fallback can run");
+    } else {
+        cls = PAYLOAD_CLASS_NONE;
+        snprintf(msg, msg_len, "No recognizable Enhanced Privacy metadata");
+    }
+
+    if (crackable) *crackable = ck;
+    return cls;
 }

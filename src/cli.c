@@ -15,7 +15,7 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * cli.c — headless entry point for FSP.DMRCrack (-DNO_GUI / Linux build)
+ * cli.c - headless entry point for FSP.DMRCrack (-DNO_GUI / Linux build)
  *
  * Usage:
  *   dmrcrack --bin <payload.bin> [options]
@@ -42,7 +42,7 @@
 #include <signal.h>
 #include <inttypes.h>
 
-/* ── Banner ───────────────────────────────────────────────────────────── */
+/* -- Banner ------------------------------------------------------------- */
 
 static void print_banner(void)
 {
@@ -65,7 +65,7 @@ static void print_banner(void)
     );
 }
 
-/* ── Globals ──────────────────────────────────────────────────────────── */
+/* -- Globals ------------------------------------------------------------ */
 static BruteforceEngine g_engine;
 static PayloadSet       g_payloads;
 static volatile int     g_interrupted = 0;
@@ -77,7 +77,7 @@ static void on_signal(int sig)
     bruteforce_stop(&g_engine);
 }
 
-/* ── Helpers ──────────────────────────────────────────────────────────── */
+/* -- Helpers ------------------------------------------------------------ */
 
 static int parse_hex40(const char *s, uint64_t *out)
 {
@@ -85,6 +85,41 @@ static int parse_hex40(const char *s, uint64_t *out)
     uint64_t v = strtoull(s, &end, 16);
     if (end == s || *end != '\0' || v > 0xFFFFFFFFFFULL) return 0;
     *out = v;
+    return 1;
+}
+
+/* Parse a 10-character nibble mask: a hex digit fixes that nibble, '?' is a
+ * wildcard. e.g. "A1B2C3D4??" fixes the top 8 nibbles, frees the low 2.
+ *   fixed_value  : fixed nibbles in place (wildcards left 0)
+ *   free_nibbles : number of '?'
+ *   free_idx[]   : nibble indices of wildcards, MS-first (0 = most significant)
+ *   low_contig   : 1 if the wildcards are exactly the lowest free_nibbles
+ *                  nibbles, i.e. the mask maps to a contiguous key range that
+ *                  the GPU engine can sweep directly.
+ * Returns 1 on success, 0 on a malformed mask. */
+static int parse_mask(const char *s, uint64_t *fixed_value,
+                      int *free_nibbles, int free_idx[10], int *low_contig)
+{
+    if (!s || strlen(s) != 10) return 0;
+    uint64_t fixed = 0;
+    int nfree = 0;
+    for (int i = 0; i < 10; ++i) {
+        char c = s[i];
+        int shift = (9 - i) * 4;
+        if (c == '?') { free_idx[nfree++] = i; continue; }
+        int v;
+        if      (c >= '0' && c <= '9') v = c - '0';
+        else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+        else return 0;
+        fixed |= (uint64_t)v << shift;
+    }
+    *fixed_value = fixed;
+    *free_nibbles = nfree;
+    int lc = 1;
+    for (int k = 0; k < nfree; ++k)
+        if (free_idx[k] != (10 - nfree + k)) { lc = 0; break; }
+    *low_contig = (nfree > 0) ? lc : 1;
     return 1;
 }
 
@@ -130,6 +165,32 @@ static void print_json_result(const char *bin_path, uint64_t key, double score)
            path_basename(bin_path), (unsigned long long)key, score);
 }
 
+/* Look up a previously recovered key for this capture in the potfile, indexed
+ * by capture file name (the hashcat model: results keyed by the unique thing
+ * that was cracked, not by a reusable slot/KID). Returns 1 if found, so the
+ * search can be skipped. Last matching line wins (most recent). */
+static int potfile_lookup(const char *potfile, const char *bin_path,
+                          uint64_t *key_out, double *score_out)
+{
+    if (!potfile) return 0;
+    FILE *fp = fopen(potfile, "rt");
+    if (!fp) return 0;
+    const char *base = path_basename(bin_path);
+    size_t blen = strlen(base);
+    char line[256];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strncmp(line, base, blen) == 0 && line[blen] == ':') {
+            unsigned long long key = 0; double sc = 0.0;
+            if (sscanf(line + blen + 1, "%llx:%lf", &key, &sc) >= 1) {
+                *key_out = key; if (score_out) *score_out = sc; found = 1;
+            }
+        }
+    }
+    fclose(fp);
+    return found;
+}
+
 static void print_usage(void)
 {
     printf(
@@ -142,16 +203,20 @@ static void print_usage(void)
         "  --gpu-pct <50-95>   GPU share of keyspace (default: 80)\n"
         "  --samples <n>       payload lines to sample per key (default: all)\n"
         "  --key   <hex>       score a single key and exit\n"
+        "  --mask  <10 chars>  nibble mask: hex digit fixes a nibble, '?' is a\n"
+        "                      wildcard (e.g. A1B2C3D4??). Low wildcards map to a\n"
+        "                      GPU range; scattered wildcards enumerate on CPU.\n"
         "  --wordlist <file>   try a list of candidate keys first (one hex key\n"
         "                      per line; '#' comments and blanks ignored)\n"
-        "  --potfile <file>    append recovered keys to a potfile (bin:key:score)\n"
+        "  --potfile <file>    append recovered keys to a potfile (bin:key:score);\n"
+        "                      a capture already in the potfile is shown and skipped\n"
         "  --json              print the final result as a JSON object\n"
         "  --benchmark         measure throughput on this machine and exit\n"
         "  --no-resume         ignore any saved checkpoint\n"
         "\n");
 }
 
-/* ── Progress bar ─────────────────────────────────────────────────────── */
+/* -- Progress bar ------------------------------------------------------- */
 
 static void print_progress(const BruteforceSnapshot *s)
 {
@@ -173,10 +238,10 @@ static void print_progress(const BruteforceSnapshot *s)
     fflush(stdout);
 }
 
-/* ── Entry point ──────────────────────────────────────────────────────── */
+/* -- Entry point -------------------------------------------------------- */
 
 #if defined(_WIN32) && !defined(NO_GUI)
-/* When built with GUI, this file is not compiled — main.c has WinMain. */
+/* When built with GUI, this file is not compiled - main.c has WinMain. */
 #else
 
 #if defined(_WIN32)
@@ -198,6 +263,7 @@ int main(int argc, char **argv)
 
     const char *bin_path   = NULL;
     const char *key_str    = NULL;
+    const char *mask_str   = NULL;
     const char *wordlist   = NULL;
     const char *potfile    = NULL;
     uint64_t    start_key  = 0x0000000000ULL;
@@ -210,7 +276,7 @@ int main(int argc, char **argv)
     int         benchmark  = 0;
     char        err[256];
 
-    /* ── Argument parsing ─────────────────────────────────────────────── */
+    /* -- Argument parsing ----------------------------------------------- */
     for (int i = 1; i < argc; ++i) {
         if      (strcmp(argv[i], "--bin")       == 0 && i+1 < argc) { bin_path  = argv[++i]; }
         else if (strcmp(argv[i], "--start")     == 0 && i+1 < argc) {
@@ -225,6 +291,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--gpu-pct")   == 0 && i+1 < argc) { gpu_pct  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--samples")   == 0 && i+1 < argc) { samples  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--key")       == 0 && i+1 < argc) { key_str  = argv[++i]; }
+        else if (strcmp(argv[i], "--mask")      == 0 && i+1 < argc) { mask_str = argv[++i]; }
         else if (strcmp(argv[i], "--wordlist")  == 0 && i+1 < argc) { wordlist = argv[++i]; }
         else if (strcmp(argv[i], "--potfile")   == 0 && i+1 < argc) { potfile  = argv[++i]; }
         else if (strcmp(argv[i], "--json")      == 0)                { json_out  = 1; }
@@ -248,7 +315,7 @@ int main(int argc, char **argv)
     if (threads < 1) threads = 1;
     if (threads > 64) threads = 64;
 
-    /* ── Load payloads ──────────────────────────────────────────────────── */
+    /* -- Load payloads ---------------------------------------------------- */
     payload_set_init(&g_payloads);
     printf("Loading %s ...\n", bin_path);
     if (!load_payload_file(bin_path, 0, &g_payloads, err, sizeof(err))) {
@@ -260,7 +327,31 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: no payloads in file\n"); return 1;
     }
 
-    /* ── Single-key score mode ─────────────────────────────────────────── */
+    /* Up-front algorithm classification: tell the user whether this is even
+     * crackable before committing to a long search. */
+    {
+        char cmsg[160]; int crackable = 0;
+        payload_classify(&g_payloads, &crackable, cmsg, sizeof(cmsg));
+        printf("  %s\n", cmsg);
+        if (!crackable)
+            fprintf(stderr, "warning: this capture is not recoverable by dmrcrack\n");
+    }
+
+    /* Potfile auto-skip (hashcat model): if this capture was already cracked,
+     * show the stored key and skip the search. Only for an actual search run. */
+    if (potfile && !key_str && !mask_str && !wordlist && !benchmark) {
+        uint64_t pk; double ps;
+        if (potfile_lookup(potfile, bin_path, &pk, &ps)) {
+            printf("Already cracked (potfile): ");
+            print_key(pk);
+            printf("  (score %.2f)\n", ps);
+            if (json_out) print_json_result(bin_path, pk, ps);
+            payload_set_free(&g_payloads);
+            return 0;
+        }
+    }
+
+    /* -- Single-key score mode ------------------------------------------- */
     if (key_str) {
         uint64_t kv;
         if (!parse_hex40(key_str, &kv)) {
@@ -282,7 +373,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* ── Dictionary / known-key mode ───────────────────────────────────── */
+    /* -- Dictionary / known-key mode ------------------------------------- */
     if (wordlist) {
         FILE *wf = fopen(wordlist, "rt");
         if (!wf) {
@@ -346,6 +437,75 @@ int main(int argc, char **argv)
         return 0;
     }
 
+    /* -- Mask mode ---------------------------------------------------------
+     * Low (contiguous) wildcards collapse to a key range and run the normal
+     * GPU search; scattered wildcards are enumerated on the CPU. */
+    if (mask_str) {
+        uint64_t fixed; int nfree, fidx[10], low_contig;
+        if (!parse_mask(mask_str, &fixed, &nfree, fidx, &low_contig)) {
+            fprintf(stderr, "error: --mask must be 10 chars of [0-9A-Fa-f?]\n");
+            payload_set_free(&g_payloads); return 1;
+        }
+
+        if (nfree == 0) {
+            /* Fully fixed mask: score the single key and exit. */
+            unsigned char kb[5] = {
+                (unsigned char)((fixed >> 32) & 0xFF), (unsigned char)((fixed >> 24) & 0xFF),
+                (unsigned char)((fixed >> 16) & 0xFF), (unsigned char)((fixed >>  8) & 0xFF),
+                (unsigned char)( fixed        & 0xFF) };
+            double sc = bruteforce_test_score(&g_payloads, 0, 0, kb);
+            printf("Mask %s (no wildcards) = single key ", mask_str);
+            print_key(fixed); printf("  score: %.4f\n", sc);
+            potfile_append(potfile, bin_path, fixed, sc);
+            if (json_out) print_json_result(bin_path, fixed, sc);
+            payload_set_free(&g_payloads); return 0;
+        }
+
+        if (low_contig) {
+            /* Contiguous low wildcards -> a key range; let the GPU sweep it. */
+            start_key = fixed;
+            end_key   = fixed | ((((uint64_t)1) << (4 * nfree)) - 1);
+            printf("Mask %s : %d free nibble(s) -> GPU range %010llX..%010llX\n\n",
+                   mask_str, nfree,
+                   (unsigned long long)start_key, (unsigned long long)end_key);
+            /* fall through to the full search below */
+        } else {
+            /* Scattered wildcards: enumerate the masked subset on the CPU. */
+            uint64_t total = 1;
+            for (int k = 0; k < nfree; ++k) total *= 16ULL;
+            if (total > (1ULL << 20)) {
+                fprintf(stderr,
+                    "error: scattered mask spans %llu keys, too many for CPU "
+                    "enumeration.\n       Use a prefix mask with low wildcards "
+                    "(e.g. ABCDE?????) for a GPU range search.\n",
+                    (unsigned long long)total);
+                payload_set_free(&g_payloads); return 1;
+            }
+            printf("Mask %s : %d scattered free nibble(s), %llu combination(s) "
+                   "(CPU)\n\n", mask_str, nfree, (unsigned long long)total);
+
+            uint64_t best_key = 0; double best_score = -1e308;
+            for (uint64_t combo = 0; combo < total; ++combo) {
+                uint64_t kv = fixed;
+                for (int k = 0; k < nfree; ++k) {
+                    unsigned digit = (unsigned)((combo >> (4 * (nfree - 1 - k))) & 0xF);
+                    kv |= (uint64_t)digit << ((9 - fidx[k]) * 4);
+                }
+                unsigned char kb[5] = {
+                    (unsigned char)((kv >> 32) & 0xFF), (unsigned char)((kv >> 24) & 0xFF),
+                    (unsigned char)((kv >> 16) & 0xFF), (unsigned char)((kv >>  8) & 0xFF),
+                    (unsigned char)( kv        & 0xFF) };
+                double sc = bruteforce_test_score(&g_payloads, 0, 0, kb);
+                if (sc > best_score) { best_score = sc; best_key = kv; }
+            }
+            printf("Best candidate (highest score): ");
+            print_key(best_key); printf("  (score %.4f)\n", best_score);
+            potfile_append(potfile, bin_path, best_key, best_score);
+            if (json_out) print_json_result(bin_path, best_key, best_score);
+            payload_set_free(&g_payloads); return 0;
+        }
+    }
+
     /* Determine sample_bytes from payload size (shared by benchmark + search) */
     int sample_bytes;
     {
@@ -355,7 +515,7 @@ int main(int argc, char **argv)
         sample_bytes = (ml >= 33) ? 33 : 27;
     }
 
-    /* ── Benchmark mode ────────────────────────────────────────────────── */
+    /* -- Benchmark mode -------------------------------------------------- */
     if (benchmark) {
         const double bench_seconds = 5.0;
         printf("Benchmark: running ~%.0f s over the keyspace...\n\n",
@@ -409,7 +569,7 @@ int main(int argc, char **argv)
         return 0;
     }
 
-    /* ── Engine init ───────────────────────────────────────────────────── */
+    /* -- Engine init ----------------------------------------------------- */
     bruteforce_engine_init(&g_engine);
 
     BruteforceConfig cfg;
@@ -421,7 +581,7 @@ int main(int argc, char **argv)
     cfg.gpu_split_pct = gpu_pct;
     cfg.sample_bytes  = sample_bytes;
 
-    /* ── Checkpoint resume ─────────────────────────────────────────────── */
+    /* -- Checkpoint resume ----------------------------------------------- */
     char progress_path[4096];
     snprintf(progress_path, sizeof(progress_path), "%s.progress", bin_path);
 
@@ -468,12 +628,12 @@ int main(int argc, char **argv)
     /* Pass the progress path to the engine for periodic writes */
     strncpy(g_engine.progress_path, progress_path, sizeof(g_engine.progress_path) - 1);
 
-    /* ── Signal handling ───────────────────────────────────────────────── */
+    /* -- Signal handling ------------------------------------------------- */
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
 
-    /* ── Start ─────────────────────────────────────────────────────────── */
-    printf("Searching %010llX – %010llX  (%d threads, GPU %d%%)\n",
+    /* -- Start ----------------------------------------------------------- */
+    printf("Searching %010llX - %010llX  (%d threads, GPU %d%%)\n",
            (unsigned long long)cfg.start_key,
            (unsigned long long)cfg.end_key,
            cfg.thread_count, cfg.gpu_split_pct);
@@ -483,7 +643,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: %s\n", err); return 1;
     }
 
-    /* ── Poll loop ──────────────────────────────────────────────────────── */
+    /* -- Poll loop -------------------------------------------------------- */
     BruteforceSnapshot snap;
     do {
         plat_sleep_ms(500);
@@ -494,13 +654,13 @@ int main(int argc, char **argv)
     bruteforce_get_snapshot(&g_engine, &snap);
     printf("\n\n");
 
-    /* ── Result ─────────────────────────────────────────────────────────── */
+    /* -- Result ----------------------------------------------------------- */
     if (snap.finished) {
         printf("Search complete.\n");
         printf("Best key:   ");
         print_key(snap.best_key);
         printf("\nBest score: %.4f\n", snap.best_score);
-        printf("  (highest-scoring key over the searched range — the recovered key)\n");
+        printf("  (highest-scoring key over the searched range - the recovered key)\n");
         potfile_append(potfile, bin_path, snap.best_key, snap.best_score);
         if (json_out) print_json_result(bin_path, snap.best_key, snap.best_score);
     } else {

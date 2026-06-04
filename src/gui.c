@@ -155,8 +155,8 @@ typedef struct {
     int  shown_gpu_warning;        /* 1 after the one-time GPU-not-found MessageBox */
 
     /* Extra fonts */
-    HFONT font_tile_metric;        /* Consolas 14pt bold — secondary tiles */
-    HFONT font_tile_metric_big;    /* Consolas 22pt bold — throughput dominant */
+    HFONT font_tile_metric;        /* Consolas 14pt bold - secondary tiles */
+    HFONT font_tile_metric_big;    /* Consolas 22pt bold - throughput dominant */
     HFONT font_tile_label;         /* Segoe UI 8pt regular */
     HFONT font_header;             /* Segoe UI 10pt bold */
     HFONT font_header_sub;         /* Segoe UI 8pt regular */
@@ -223,7 +223,7 @@ typedef struct {
     HWND spin_gpu_split;
     int  gpu_split_pct;   /* 50..95, default 80 */
 
-    HWND lbl_kpa_badge;  /* "KPA: N silence frames" — visible when n_silence > 0 */
+    HWND lbl_kpa_badge;  /* "KPA: N silence frames" - visible when n_silence > 0 */
 } AppState;
 
 static AppState g_app;
@@ -761,7 +761,7 @@ static void draw_status_strip(HDC hdc)
     FillRect(hdc, r, bg);
     DeleteObject(bg);
 
-    /* Top border line — separates strip from content above */
+    /* Top border line - separates strip from content above */
     { HPEN pen = CreatePen(PS_SOLID, 1, CLR_INPUT_BORDER);
       HPEN old = (HPEN)SelectObject(hdc, pen);
       MoveToEx(hdc, r->left, r->top, NULL);
@@ -1075,13 +1075,15 @@ static void choose_file(HWND owner)
             payload_set_free(&g_app.payloads);
             payload_set_init(&g_app.payloads);
             if (load_payload_file(file, 0, &g_app.payloads, err, sizeof(err))) {
-                char summary[160], warn_txt[160], plbl[320];
+                char summary[160], warn_txt[160], plbl[480], cmsg[160];
+                int crackable = 0;
                 validate_payload_set(&g_app.payloads, summary, sizeof(summary),
                                      warn_txt, sizeof(warn_txt));
+                payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
                 if (warn_txt[0])
-                    snprintf(plbl, sizeof(plbl), "%s  %s", summary, warn_txt);
+                    snprintf(plbl, sizeof(plbl), "%s  %s  \xb7  %s", summary, warn_txt, cmsg);
                 else
-                    snprintf(plbl, sizeof(plbl), "%s", summary);
+                    snprintf(plbl, sizeof(plbl), "%s  \xb7  %s", summary, cmsg);
                 SetWindowTextA(g_app.payload_label, plbl);
                 update_kpa_badge();
                 strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), file);
@@ -1275,7 +1277,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
     { size_t wdl = strlen(wav_dir); if (wdl > 1 && wav_dir[wdl-1] == '\\') wav_dir[wdl-1] = '\0'; }
 
     /* qname is filename-only; dsd-fme writes it relative to its CWD (wav_dir).
-     * dsd-fme (Cygwin) may create a DSP/ subdirectory — we search both locations. */
+     * dsd-fme (Cygwin) may create a DSP/ subdirectory - we search both locations. */
     _splitpath_s(out_bin, ob_drive, sizeof(ob_drive), ob_dir, sizeof(ob_dir),
                  ob_fname, sizeof(ob_fname), ob_ext, sizeof(ob_ext));
     snprintf(qname, sizeof(qname), "%s.dsdsp.txt", ob_fname);
@@ -1315,7 +1317,7 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
         }
     }
 
-    /* Step 1/2: run dsd-fme.exe directly (no shell), stderr → log file.
+    /* Step 1/2: run dsd-fme.exe directly (no shell), stderr -> log file.
      * -V 3 = both DMR slots. -Q writes the DSP output relative to the
      * child process CWD (which we set to wav_dir). */
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
@@ -1569,7 +1571,7 @@ static void start_listen(HWND hwnd)
  * must be verified on real hardware. The orchestration/monitoring is hardware
  * independent. */
 
-/* Launch a long-lived process, stdout+stderr → log, inside a Job Object so the
+/* Launch a long-lived process, stdout+stderr -> log, inside a Job Object so the
  * whole (Cygwin) process tree dies when we terminate the job. Non-blocking. */
 static int launch_capture_process(const char *cmdline, const char *log_path,
                                    const char *working_dir,
@@ -1986,6 +1988,18 @@ static int start_bruteforce(HWND hwnd)
         snprintf(warn, sizeof(warn), g_lang.warn_low_payloads_n, g_app.payloads.count);
         SetWindowTextA(g_app.payload_label, warn);
     }
+    /* Up-front classification: warn before committing to a long search if the
+     * capture is not recoverable (e.g. AES) or has no MI. */
+    {
+        char cmsg[160]; int crackable = 0;
+        payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
+        if (!crackable && !g_app.capture_auto_mode) {
+            char q[256];
+            snprintf(q, sizeof(q), "%s\n\nStart the search anyway?", cmsg);
+            if (MessageBoxA(hwnd, q, APP_TITLE, MB_YESNO | MB_ICONWARNING) == IDNO)
+                return 0;
+        }
+    }
     update_kpa_badge();
 
     cfg.start_key = start_key;
@@ -2007,7 +2021,7 @@ static int start_bruteforce(HWND hwnd)
       cfg.sample_bytes = (ml >= 33) ? 33 : 27;
     }
 
-    /* #34: checkpoint/resume — check for a .progress sidecar file */
+    /* #34: checkpoint/resume - check for a .progress sidecar file */
     {
         char progress_path[MAX_PATH];
         snprintf(progress_path, sizeof(progress_path), "%s.progress", g_app.loaded_file);
@@ -2587,7 +2601,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             685, y + 2, 170, 20, hwnd, (HMENU)ID_PAYLOAD_LABEL, NULL, NULL);
 
         g_app.lbl_kpa_badge = CreateWindowExA(0, "STATIC", "",
-            WS_CHILD | SS_LEFT,   /* NOT WS_VISIBLE — starts hidden */
+            WS_CHILD | SS_LEFT,   /* NOT WS_VISIBLE - starts hidden */
             0, 0, 200, 18, hwnd, (HMENU)0, NULL, NULL);
 
         y += 34;
