@@ -18,18 +18,18 @@
 #define GPU_COMPAT_H
 
 /*
- * gpu_compat.h — CUDA / HIP compatibility shim
+ * gpu_compat.h - CUDA / HIP compatibility shim
  *
  * When USE_HIP is defined (AMD ROCm build), every cudaXxx symbol is aliased
  * to its hipXxx counterpart.  The GPU kernels and host launch code need no
- * ifdefs — they just include this header instead of <cuda_runtime.h>.
+ * ifdefs - they just include this header instead of <cuda_runtime.h>.
  *
  * On NVIDIA builds (default), this header is a no-op pass-through.
  */
 
 #if defined(USE_HIP)
 
-/* ── HIP backend ─────────────────────────────────────────────────────── */
+/* -- HIP backend ------------------------------------------------------- */
 #include <hip/hip_runtime.h>
 
 /* Error type and success sentinel */
@@ -79,20 +79,20 @@
 #define cudaEventDestroy        hipEventDestroy
 
 /* Intrinsics available in both CUDA and HIP */
-/* __popc, __float_as_uint, __uint_as_float, __fsqrt_rn — already provided by HIP */
+/* __popc, __float_as_uint, __uint_as_float, __fsqrt_rn - already provided by HIP */
 
-/* __ldg: PTX read-only cache load — AMD has no equivalent; plain deref is correct */
+/* __ldg: PTX read-only cache load - AMD has no equivalent; plain deref is correct */
 #define __ldg(ptr) (*(ptr))
 
 /* CUDART_VERSION: alias to HIP version encoding so existing code compiles unchanged */
 #define CUDART_VERSION (HIP_VERSION_MAJOR * 1000 + HIP_VERSION_MINOR * 10)
 
-#else  /* ── CUDA backend (default) ───────────────────────────────────── */
+#else  /* -- CUDA backend (default) ------------------------------------- */
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 
-/* Nothing to alias — CUDA names are used directly. */
+/* Nothing to alias - CUDA names are used directly. */
 
 #endif  /* USE_HIP */
 

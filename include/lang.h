@@ -41,9 +41,9 @@ typedef struct {
 
     /* ---- Tile body formats ---- */
     const char *tile_cpu_only;            /* "CPU only" / "Solo CPU" */
-    const char *tile_split_fmt;           /* "GPU  %s  ·  CPU  %s" */
-    const char *tile_score_fmt;           /* "Score  %.2f" / "Puntuación  %.2f" */
-    const char *tile_progress_meta_fmt;   /* "%s keys   ·   ETA  %s   ·   elapsed  %s" */
+    const char *tile_split_fmt;           /* "GPU  %s  .  CPU  %s" */
+    const char *tile_score_fmt;           /* "Score  %.2f" / "Puntuacion  %.2f" */
+    const char *tile_progress_meta_fmt;   /* "%s keys   .   ETA  %s   .   elapsed  %s" */
 
     /* ---- Empty / idle states ---- */
     const char *empty_hint;               /* "Load a .bin or capture live, then Start" */
@@ -57,12 +57,12 @@ typedef struct {
     /* ---- Status strip ---- */
     const char *status_backend_cuda; /* "CUDA GPU" */
     const char *status_backend_cpu;  /* "CPU" */
-    const char *msg_cuda_fallback;   /* "CUDA error — continued on CPU" */
+    const char *msg_cuda_fallback;   /* "CUDA error - continued on CPU" */
 
     /* ---- Payload validation ---- */
-    const char *val_payloads_ok;     /* "%zu payloads · KMI9: %zu/%zu · KID=%02X" */
+    const char *val_payloads_ok;     /* "%zu payloads . KMI9: %zu/%zu . KID=%02X" */
     const char *val_align_warn;      /* "! Burst alignment off" */
-    const char *warn_low_payloads_n; /* "! Only %zu payloads — low confidence, risk of false positive" */
+    const char *warn_low_payloads_n; /* "! Only %zu payloads - low confidence, risk of false positive" */
 
     /* ---- Buttons ---- */
     const char *btn_demodulate;
@@ -95,7 +95,7 @@ typedef struct {
     const char *err_dsd_detail_fmt;           /* "%s (exit %lu)\n\nLog: %s\n\n%s" */
     const char *err_no_dsp_detail_fmt;        /* "%s\n\nLog: %s\n\ndsd-fme output:\n%s" */
     const char *lbl_empty_log;                /* "(empty log)" */
-    const char *lbl_empty_log_no_output;      /* "(empty log — dsd-fme produced no output)" */
+    const char *lbl_empty_log_no_output;      /* "(empty log - dsd-fme produced no output)" */
     const char *err_py_script_missing;        /* "Error: missing tools\dsdfme_dsp_to_bin.py"  */
     const char *err_bin_load;                 /* "Error loading generated BIN"                */
 
@@ -116,10 +116,10 @@ typedef struct {
     const char *cap_sync_ok;                  /* "signal OK"                                  */
     const char *cap_sync_none;                /* "no signal"                                  */
     const char *cap_status_fmt;               /* "Live capture | %s | %zu encrypted | %s"     */
-    const char *cap_target_fmt;               /* "Target reached (%zu) — starting crack"      */
+    const char *cap_target_fmt;               /* "Target reached (%zu) - starting crack"      */
     /* RTL-SDR config dialog */
-    const char *cap_dlg_title;                /* "Live capture — RTL-SDR"                     */
-    const char *cap_lbl_freq;                 /* "Frequency (e.g. 451.2M) — or .wav path"     */
+    const char *cap_dlg_title;                /* "Live capture - RTL-SDR"                     */
+    const char *cap_lbl_freq;                 /* "Frequency (e.g. 451.2M) - or .wav path"     */
     const char *cap_lbl_dev;                  /* "Device index"                               */
     const char *cap_lbl_gain;                 /* "Gain (0 = AGC)"                             */
     const char *cap_lbl_ppm;                  /* "PPM correction"                             */
@@ -201,7 +201,7 @@ extern "C" {
 extern const Lang g_lang_en;
 extern const Lang g_lang_es;
 
-/* Active language pointer — switch at runtime to change language.
+/* Active language pointer - switch at runtime to change language.
  * Use the g_lang macro so all existing g_lang.xxx references work unchanged. */
 extern const Lang *g_lang_ptr;
 

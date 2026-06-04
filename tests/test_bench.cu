@@ -21,7 +21,7 @@
  * (requires -rdc=true in the build).
  * ------------------------------------------------------------------------- */
 
-/* Kernel — C++ (mangled) linkage, matches bruteforce.cu definition */
+/* Kernel - C++ (mangled) linkage, matches bruteforce.cu definition */
 __global__ void bruteforce_kernel_strict(
     uint64_t start_key,
     uint64_t total_keys,
@@ -85,7 +85,7 @@ static int upload_payloads(const PayloadSet *ps, int limit,
     static unsigned char h_algid[MAX_CONST_LINES];
     static unsigned char h_flags[MAX_CONST_LINES];
 
-    /* Pre-compute de-interleaved+packed cipher packs (3 sub-frames × 7 bytes each).
+    /* Pre-compute de-interleaved+packed cipher packs (3 sub-frames x 7 bytes each).
      * This is the format the strict kernel expects in d_const_cipher_packs. */
     precompute_cipher_packs(ps, h_cipher, n);
 
@@ -102,9 +102,9 @@ static int upload_payloads(const PayloadSet *ps, int limit,
     cudaMemcpyToSymbol(d_const_meta_flags, h_flags, n * sizeof(unsigned char));
 
     /* Absolute per-burst Hamming floor: same formula as bruteforce.cu cuda_launcher_thread.
-     * Wrong key:   mean = 24*k, sigma ≈ 3.46*sqrt(k)
-     * Correct key: mean ≈ 44*k  (h01≈2, h12≈2 → score ≈ 44/burst)
-     * Floor = 33*k − 2*sigma rejects ~99.9997% of wrong keys. */
+     * Wrong key:   mean = 24*k, sigma ~ 3.46*sqrt(k)
+     * Correct key: mean ~ 44*k  (h01~2, h12~2 -> score ~ 44/burst)
+     * Floor = 33*k - 2*sigma rejects ~99.9997% of wrong keys. */
     abs_floor_host[0] = -3.402823e38f;
     for (int k = 1; k <= n; k++) {
         float sigma_k = 3.46f * sqrtf((float)k);
@@ -343,7 +343,7 @@ int main(int argc, char **argv)
                                    bench_secs * 1000.0);
 
         /* RC4 steps: KSA256 + discard + 3 sub-frames/burst * 7 bytes = 21 PRGA steps
-           For reject path (chi² prunes early), use conservative 256+256+63 */
+           For reject path (chi2 prunes early), use conservative 256+256+63 */
         double rc4_steps = 256.0 + 256.0 + (double)uploaded * 21.0 / 6.0;
         double cycles_per_key  = (double)clock_khz * 1000.0 / kps;
         double cycles_per_step = cycles_per_key / rc4_steps;

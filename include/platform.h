@@ -18,7 +18,7 @@
 #define PLATFORM_H
 
 /*
- * platform.h — thin Win32/POSIX abstraction layer
+ * platform.h - thin Win32/POSIX abstraction layer
  *
  * Wraps threading, atomics, synchronization, and timing so that
  * bruteforce.cu / bruteforce.c compile and run on both Windows and Linux
@@ -32,11 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Types ────────────────────────────────────────────────────────────── */
+/* -- Types -------------------------------------------------------------- */
 
 #if defined(_WIN32)
 
-/* ── Windows implementation ───────────────────────────────────────────── */
+/* -- Windows implementation --------------------------------------------- */
 #include <windows.h>
 #include <process.h>
 
@@ -47,7 +47,7 @@ typedef volatile LONG   plat_atomic32_t;
 typedef volatile LONG64 plat_atomic64_t;
 typedef DWORD           plat_ticks_t;
 
-/* ── Thread ───────────────────────────────────────────────────────────── */
+/* -- Thread ------------------------------------------------------------- */
 
 /* Thread function type: unsigned __stdcall fn(void *) on Windows */
 typedef unsigned (__stdcall *plat_thread_fn_t)(void *);
@@ -91,14 +91,14 @@ static inline void plat_thread_set_ideal_processor(int idx)
     SetThreadIdealProcessor(GetCurrentThread(), (DWORD)idx);
 }
 
-/* ── Mutex ────────────────────────────────────────────────────────────── */
+/* -- Mutex -------------------------------------------------------------- */
 
 static inline void plat_mutex_init(plat_mutex_t *m)    { InitializeCriticalSection(m); }
 static inline void plat_mutex_destroy(plat_mutex_t *m) { DeleteCriticalSection(m); }
 static inline void plat_mutex_lock(plat_mutex_t *m)    { EnterCriticalSection(m); }
 static inline void plat_mutex_unlock(plat_mutex_t *m)  { LeaveCriticalSection(m); }
 
-/* ── Event (manual-reset) ─────────────────────────────────────────────── */
+/* -- Event (manual-reset) ----------------------------------------------- */
 
 /* signaled=1 means threads waiting on plat_event_wait() are released immediately */
 static inline plat_event_t plat_event_create(int signaled)
@@ -110,7 +110,7 @@ static inline void plat_event_set(plat_event_t *e)     { SetEvent(*e); }
 static inline void plat_event_reset(plat_event_t *e)   { ResetEvent(*e); }
 static inline void plat_event_wait(plat_event_t *e)    { WaitForSingleObject(*e, INFINITE); }
 
-/* ── 32-bit atomics ───────────────────────────────────────────────────── */
+/* -- 32-bit atomics ----------------------------------------------------- */
 
 static inline long plat_atomic32_load(plat_atomic32_t *a)
 {
@@ -125,7 +125,7 @@ static inline long plat_atomic32_inc(plat_atomic32_t *a)
     return InterlockedIncrement(a);
 }
 
-/* ── 64-bit atomics ───────────────────────────────────────────────────── */
+/* -- 64-bit atomics ----------------------------------------------------- */
 
 static inline int64_t plat_atomic64_load(plat_atomic64_t *a)
 {
@@ -140,7 +140,7 @@ static inline void plat_atomic64_add(plat_atomic64_t *a, int64_t delta)
     InterlockedAdd64(a, delta);
 }
 
-/* ── Timing ───────────────────────────────────────────────────────────── */
+/* -- Timing ------------------------------------------------------------- */
 
 /* Returns milliseconds since some arbitrary epoch (monotonic) */
 static inline uint64_t plat_ticks_ms(void)
@@ -168,11 +168,11 @@ static inline double plat_hrtimer_elapsed_s(const plat_hrtimer_t *start,
          / (double)freq->val.QuadPart;
 }
 
-/* ── Sleep ────────────────────────────────────────────────────────────── */
+/* -- Sleep -------------------------------------------------------------- */
 
 static inline void plat_sleep_ms(unsigned ms) { Sleep(ms); }
 
-/* ── CPU count ────────────────────────────────────────────────────────── */
+/* -- CPU count ---------------------------------------------------------- */
 
 static inline int plat_cpu_count(void)
 {
@@ -181,15 +181,15 @@ static inline int plat_cpu_count(void)
     return (int)si.dwNumberOfProcessors;
 }
 
-/* ── Directory creation (best-effort, no error checking) ──────────────── */
+/* -- Directory creation (best-effort, no error checking) ---------------- */
 
 static inline void plat_mkdir(const char *path) { CreateDirectoryA(path, NULL); }
 
-/* ── File deletion ────────────────────────────────────────────────────── */
+/* -- File deletion ------------------------------------------------------ */
 
 static inline void plat_delete_file(const char *path) { DeleteFileA(path); }
 
-#else  /* ── POSIX (Linux, macOS) ────────────────────────────────────── */
+#else  /* -- POSIX (Linux, macOS) -------------------------------------- */
 
 /* Required for cpu_set_t, CPU_ZERO/SET, pthread_setaffinity_np on Linux */
 #ifndef _GNU_SOURCE
@@ -217,7 +217,7 @@ typedef struct {
     int              signaled;
 } plat_event_t;
 
-/* ── Thread ───────────────────────────────────────────────────────────── */
+/* -- Thread ------------------------------------------------------------- */
 
 /* Thread function type: void *fn(void *) on POSIX */
 typedef void *(*plat_thread_fn_t)(void *);
@@ -261,14 +261,14 @@ static inline void plat_thread_set_affinity(int worker_index)
 
 static inline void plat_thread_set_ideal_processor(int idx) { (void)idx; }
 
-/* ── Mutex ────────────────────────────────────────────────────────────── */
+/* -- Mutex -------------------------------------------------------------- */
 
 static inline void plat_mutex_init(plat_mutex_t *m)    { pthread_mutex_init(m, NULL); }
 static inline void plat_mutex_destroy(plat_mutex_t *m) { pthread_mutex_destroy(m); }
 static inline void plat_mutex_lock(plat_mutex_t *m)    { pthread_mutex_lock(m); }
 static inline void plat_mutex_unlock(plat_mutex_t *m)  { pthread_mutex_unlock(m); }
 
-/* ── Manual-reset event ───────────────────────────────────────────────── */
+/* -- Manual-reset event ------------------------------------------------- */
 
 static inline plat_event_t plat_event_create(int signaled)
 {
@@ -304,7 +304,7 @@ static inline void plat_event_wait(plat_event_t *e)
     pthread_mutex_unlock(&e->mu);
 }
 
-/* ── 32-bit atomics ───────────────────────────────────────────────────── */
+/* -- 32-bit atomics ----------------------------------------------------- */
 
 static inline int32_t plat_atomic32_load(plat_atomic32_t *a)
 {
@@ -319,7 +319,7 @@ static inline int32_t plat_atomic32_inc(plat_atomic32_t *a)
     return __atomic_add_fetch(a, 1, __ATOMIC_ACQ_REL);
 }
 
-/* ── 64-bit atomics ───────────────────────────────────────────────────── */
+/* -- 64-bit atomics ----------------------------------------------------- */
 
 static inline int64_t plat_atomic64_load(plat_atomic64_t *a)
 {
@@ -334,7 +334,7 @@ static inline void plat_atomic64_add(plat_atomic64_t *a, int64_t delta)
     (void)__atomic_fetch_add(a, delta, __ATOMIC_ACQ_REL);
 }
 
-/* ── Timing ───────────────────────────────────────────────────────────── */
+/* -- Timing ------------------------------------------------------------- */
 
 static inline uint64_t plat_ticks_ms(void)
 {
@@ -358,11 +358,11 @@ static inline double plat_hrtimer_elapsed_s(const plat_hrtimer_t *start,
     return ds + dn;
 }
 
-/* ── Sleep ────────────────────────────────────────────────────────────── */
+/* -- Sleep -------------------------------------------------------------- */
 
 static inline void plat_sleep_ms(unsigned ms) { usleep((useconds_t)ms * 1000u); }
 
-/* ── CPU count ────────────────────────────────────────────────────────── */
+/* -- CPU count ---------------------------------------------------------- */
 
 static inline int plat_cpu_count(void)
 {
@@ -370,12 +370,12 @@ static inline int plat_cpu_count(void)
     return (n > 0) ? (int)n : 1;
 }
 
-/* ── Directory creation (best-effort, no error checking) ──────────────── */
+/* -- Directory creation (best-effort, no error checking) ---------------- */
 
 #include <sys/stat.h>
 static inline void plat_mkdir(const char *path) { mkdir(path, 0755); }
 
-/* ── File deletion ────────────────────────────────────────────────────── */
+/* -- File deletion ------------------------------------------------------ */
 #include <stdio.h>
 static inline void plat_delete_file(const char *path) { remove(path); }
 

@@ -6,7 +6,7 @@
  *
  * One work-item processes exactly one candidate key. The host enqueues the
  * keyspace in chunks (start_key + global_id) and accumulates keys_tested itself,
- * so the kernel never touches a global counter — only the packed best result.
+ * so the kernel never touches a global counter - only the packed best result.
  *
  * Cipher packs are precomputed on the host (deinterleave -> mbe_demodulate ->
  * extract 49 bits -> pack 7 bytes), identical to precompute_cipher_packs().
@@ -23,7 +23,7 @@ typedef struct {
     uchar j;
 } RC4_CTX;
 
-/* ── score/key packing (matches pack_score_key_dev / unpack_score_dev) ─────
+/* -- score/key packing (matches pack_score_key_dev / unpack_score_dev) -----
  * bits[63:40] = sortable_float >> 8, bits[39:0] = key & 0xFFFFFFFFFF.
  * The sortable transform makes IEEE-754 floats order correctly as integers,
  * so a single atomic max selects the best (score,key) without a race window. */
@@ -158,7 +158,7 @@ inline int popc8(uchar b) { return popcount((uint)b); }
 #define BCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((uint)(bit)) << (((b)&1u)<<4)
 #define BCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
 
-/* ── MOTOTRBO KMI9 strict kernel (mode_policy 2/3) ── */
+/* -- MOTOTRBO KMI9 strict kernel (mode_policy 2/3) -- */
 __kernel void kernel_strict(
     const ulong start_key,
     const ulong total_keys,
@@ -254,7 +254,7 @@ __kernel void kernel_strict(
     }
 }
 
-/* ── Hytera Enhanced Privacy kernel (mode_policy 4) ── */
+/* -- Hytera Enhanced Privacy kernel (mode_policy 4) -- */
 __kernel void kernel_hytera(
     const ulong start_key,
     const ulong total_keys,

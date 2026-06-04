@@ -19,7 +19,7 @@
  *
  * Replaces the previous hand-rolled WinHTTP + GitHub API updater.
  * WinSparkle fetches an appcast XML, verifies the EdDSA signature of the
- * installer, downloads it, and launches it — all with its own UI.
+ * installer, downloads it, and launches it - all with its own UI.
  */
 #include "../include/updater.h"
 #include "../include/version.h"

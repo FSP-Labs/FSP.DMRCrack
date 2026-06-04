@@ -15,7 +15,7 @@
 // along with this program. If not, see https://www.gnu.org/licenses/.
 
 /*
- * OpenCL brute-force backend — vendor-neutral (NVIDIA / AMD / Intel).
+ * OpenCL brute-force backend - vendor-neutral (NVIDIA / AMD / Intel).
  *
  * This is a drop-in replacement for bruteforce.cu / bruteforce.c that runs the
  * proven scoring pipeline on any OpenCL 1.2 device. The two GPU kernels
@@ -24,7 +24,7 @@
  *
  * If no usable OpenCL device is found, or the capture has no ALG/MI metadata
  * (legacy statistical mode), the engine transparently falls back to the proven
- * multi-threaded CPU scorer — so the tool still works in GPU-less VMs.
+ * multi-threaded CPU scorer - so the tool still works in GPU-less VMs.
  *
  * The host-side scoring helpers (precompute_cipher_packs, score_candidate, ...)
  * are self-contained copies of the proven CPU pipeline; this TU is the only

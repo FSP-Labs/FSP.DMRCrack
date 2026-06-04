@@ -367,7 +367,7 @@ static double score_candidate(
                 /* Expected hamming for random: n_bytes * 4 */
                 expected = n_bytes * 4;
                 deviation = hamming - expected;
-                /* Use absolute deviation — both positive and negative
+                /* Use absolute deviation - both positive and negative
                  * deviations indicate structure */
                 if (deviation < 0) deviation = -deviation;
                 autocorr_score += (double)deviation;
@@ -475,7 +475,7 @@ static double score_candidate(
                 }
                 var_xor /= (double)n_pairs;
 
-                /* Random XOR of two uniform bytes: mean=127.5, var≈5440
+                /* Random XOR of two uniform bytes: mean=127.5, var~5440
                  * Structured data: lower or higher variance */
                 {
                     double random_var = 5440.0;
@@ -579,7 +579,7 @@ void bruteforce_engine_init(BruteforceEngine *engine)
     memset(engine, 0, sizeof(*engine));
     plat_mutex_init(&engine->lock);
     plat_hrfreq_init(&engine->qpc_freq);
-    engine->pause_event = plat_event_create(1); /* signaled — workers run immediately */
+    engine->pause_event = plat_event_create(1); /* signaled - workers run immediately */
 }
 
 void bruteforce_engine_destroy(BruteforceEngine *engine)
