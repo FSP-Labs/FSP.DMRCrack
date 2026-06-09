@@ -8,7 +8,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.4.0] - 2026-06-09
+
 ### Added
+- **Unsupported-cipher gate (AES refusal)** — `bruteforce_start` now classifies
+  the capture and refuses to launch on a non-RC4 cipher (AES and anything that is
+  neither RC4-40 nor Hytera EP) instead of falling through to the statistical
+  scorer, burning a full keyspace run, and reporting a junk key. The gate sits at
+  the single backend-agnostic chokepoint, so both the GPU launcher and the CPU
+  fallback, and both the CLI and the GUI, reject AES traffic up front with a clear
+  message. The CLI exits non-zero on an unsupported capture (single-key `--key`
+  score still runs); the GUI shows an error box instead of a misleading "start
+  anyway?" prompt. RC4-40 and Hytera EP captures are unaffected.
 - **In-app listen (decrypt to audio)** — after a key is recovered, the GUI can
   re-run DSD-FME with `-1 <key5>` to decrypt the source capture to a plain WAV
   and open it in the system player, closing the capture -> crack -> listen loop.
@@ -104,6 +117,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ASCII to avoid CP-1252 mojibake under the Win32 ANSI APIs.
 
 ### Fixed
+- **ILP-2 autotune launched the kernel with 0 dynamic shared memory** — the
+  autotune launch of `bruteforce_kernel_strict_ilp2` passed `0` for the dynamic
+  shared-memory size while the kernel stores its entire RC4 S-box in
+  `extern __shared__`. Every S-box access during autotune was therefore
+  out-of-bounds, so the measured throughput (and the launch parameters chosen
+  from it) were meaningless. The production launch already used `65536`; the
+  autotune launch now matches. The production scan was never affected.
+- **`score_burst_correct_dev` double-counted the inter-frame Hamming distance** —
+  the scoring loop added `HD(sf1, sf2)` to both accumulators, returning
+  `48 − HD(sf0,sf1) − 2·HD(sf1,sf2)`. Dead code today (no active kernel calls it),
+  but rewritten to the canonical `h01 = HD(sf0,sf1)`, `h12 = HD(sf1,sf2)` form.
+- **`precompute_cipher_packs` out-of-bounds read on short payloads** — both the
+  CUDA and OpenCL host paths read up to byte 32 of each payload without checking
+  `len >= 33`, so a corrupt or hand-crafted `.bin` could trigger a heap OOB read.
+  Added a `len < 33` guard that zero-fills and skips the payload.
 - **Checkpoint `end` field written as GPU share instead of full keyspace** — when
   CPU assist workers were spawned (mode_policy ≥ 2), `total_keys` was recut to
   `gpu_range` (80 % of keyspace) before the checkpoint write. The `.progress` file
@@ -130,6 +158,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   misread by CP850/CP1252 consoles; replaced with ASCII `-`.
 
 ### Internal
+- **Single source of truth for the DMR de-interleave tables** — `rW/rX/rY/rZ` and
+  `sf_dibit_idx` were copy-pasted in five places (`bruteforce.c`,
+  `bruteforce_cl.cpp`, two copies in `bruteforce.cu`, and `test_strict_score.c`),
+  where a transcription error would silently corrupt only one backend. The values
+  now live once in `include/dmr_tables.h` as initializer-list macros; each
+  translation unit keeps its own storage qualifier (host `static const` vs CUDA
+  `__device__ __constant__`) but initializes from the shared macros. Verified
+  value-preserving (252 integers, identical).
 - `.editorconfig` added for consistent indentation and line endings across editors (PR #35)
 - `__restrict__` annotations on device scoring function pointer parameters (PR #37)
 - `const BruteforceEngine *` in `bruteforce_get_snapshot()` for caller-side const

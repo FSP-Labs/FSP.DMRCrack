@@ -1,3 +1,15 @@
+dmrcrack (0.4.0+dfsg-1) unstable; urgency=medium
+
+  * New upstream release 0.4.0.
+  * Refuse to brute-force unsupported ciphers (AES): the engine now classifies
+    the capture up front and aborts on non-RC4 traffic instead of running a full
+    keyspace scan and reporting a junk key.
+  * Fix an out-of-bounds read in precompute_cipher_packs on payloads shorter
+    than 33 bytes (CPU and OpenCL host paths).
+  * Single-source the DMR de-interleave tables in include/dmr_tables.h.
+
+ -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Tue, 09 Jun 2026 00:00:00 +0000
+
 dmrcrack (0.3.3+dfsg-1) unstable; urgency=medium
 
   * Initial Debian package.
