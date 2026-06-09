@@ -604,11 +604,9 @@ __device__ float score_burst_correct_dev(
     }
     // Score: inter-frame Hamming on first 24 bits (C0+C1)
     int h01 = 0, h12 = 0;
-    for (int i = 0; i < 3; ++i) {
-        for (int b = 0; b < 3; ++b) {
-            if (i < 2) h01 += __popc((plain7[i][b] ^ plain7[i+1][b]) & 0xFF);
-            if (i == 1) h12 += __popc((plain7[i][b] ^ plain7[i+1][b]) & 0xFF);
-        }
+    for (int b = 0; b < 3; ++b) {
+        h01 += __popc((plain7[0][b] ^ plain7[1][b]) & 0xFF);
+        h12 += __popc((plain7[1][b] ^ plain7[2][b]) & 0xFF);
     }
     return (float)(48 - h01 - h12);
 }
@@ -617,6 +615,12 @@ void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_ciph
     // For each payload, for each sub-frame (0,1,2), output 7 bytes
     for (int p = 0; p < payload_limit; ++p) {
         const unsigned char *payload33 = payloads->items[p].data;
+        // A voice burst is 33 bytes (132 dibits). Guard against short/corrupt
+        // payloads so the sf_dibit_idx -> byte_idx (max 32) reads stay in bounds.
+        if (payloads->items[p].len < 33) {
+            memset(out_cipher_packs + p * DMR_CIPHER_PACK_BYTES, 0, DMR_CIPHER_PACK_BYTES);
+            continue;
+        }
         for (int sf = 0; sf < 3; ++sf) {
             unsigned char ambe_fr[4][24] = {0};
             for (int i = 0; i < 36; ++i) {
@@ -2490,7 +2494,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                                     d_stop_requested
                                 );
                             } else if (use_ilp2) {
-                                bruteforce_kernel_strict_ilp2<<<blocks, 128, 0, compute_stream>>>(
+                                bruteforce_kernel_strict_ilp2<<<blocks, 128, 65536, compute_stream>>>(
                                     engine->cfg.start_key + tuned,
                                     cur,
                                     payload_limit,

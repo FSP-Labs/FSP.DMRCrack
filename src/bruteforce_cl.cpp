@@ -357,6 +357,12 @@ void precompute_cipher_packs(const PayloadSet *payloads, unsigned char *out_ciph
 {
     for (int p = 0; p < payload_limit; ++p) {
         const unsigned char *payload33 = payloads->items[p].data;
+        // A voice burst is 33 bytes (132 dibits). Guard against short/corrupt
+        // payloads so the sf_dibit_idx -> byte_idx (max 32) reads stay in bounds.
+        if (payloads->items[p].len < 33) {
+            memset(out_cipher_packs + p * DMR_CIPHER_PACK_BYTES, 0, DMR_CIPHER_PACK_BYTES);
+            continue;
+        }
         for (int sf = 0; sf < 3; ++sf) {
             unsigned char ambe_fr[4][24];
             memset(ambe_fr, 0, sizeof(ambe_fr));
