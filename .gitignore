@@ -101,3 +101,4 @@ build_cl/
 
 # Local preview / launch config (per-machine dev tooling)
 .claude/launch.json
+build_verify.log
