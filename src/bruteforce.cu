@@ -2976,6 +2976,23 @@ int bruteforce_start(
         return 0;
     }
 
+    /*
+     * Refuse to launch on a cipher we cannot brute-force (AES and other non
+     * RC4-40 schemes). Otherwise the scan falls through to the legacy
+     * statistical scorer, burns an entire keyspace run, and reports a junk
+     * key. This is the single backend-agnostic chokepoint -- gating here covers
+     * both the GPU launcher and the CPU fallback, and both the CLI and GUI.
+     */
+    {
+        char cmsg[160];
+        int crackable = 0;
+        PayloadClass cls = payload_classify(payloads, &crackable, cmsg, sizeof(cmsg));
+        if (cls == PAYLOAD_CLASS_UNSUPPORTED && !crackable) {
+            set_error(err, err_len, cmsg);
+            return 0;
+        }
+    }
+
     int deviceCount = 0;
     cudaError_t cu_err = cudaGetDeviceCount(&deviceCount);
     if (cu_err != cudaSuccess || deviceCount == 0) {

@@ -338,8 +338,16 @@ int main(int argc, char **argv)
      * crackable before committing to a long search. */
     {
         char cmsg[160]; int crackable = 0;
-        payload_classify(&g_payloads, &crackable, cmsg, sizeof(cmsg));
+        PayloadClass cls = payload_classify(&g_payloads, &crackable, cmsg, sizeof(cmsg));
         printf("  %s\n", cmsg);
+        /* AES (and other non-RC4 ciphers) cannot be brute-forced -- refuse the
+         * search outright rather than burning a full keyspace run on a junk
+         * result. Single-key score (--key) below still runs for inspection. */
+        if (cls == PAYLOAD_CLASS_UNSUPPORTED && !crackable && !key_str) {
+            fprintf(stderr, "error: this capture is not recoverable by dmrcrack\n");
+            payload_set_free(&g_payloads);
+            return 1;
+        }
         if (!crackable)
             fprintf(stderr, "warning: this capture is not recoverable by dmrcrack\n");
     }

@@ -1992,7 +1992,13 @@ static int start_bruteforce(HWND hwnd)
      * capture is not recoverable (e.g. AES) or has no MI. */
     {
         char cmsg[160]; int crackable = 0;
-        payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
+        PayloadClass cls = payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
+        if (cls == PAYLOAD_CLASS_UNSUPPORTED && !g_app.capture_auto_mode) {
+            /* AES and other non-RC4 ciphers cannot be brute-forced -- inform
+             * and refuse (bruteforce_start would reject it anyway). */
+            MessageBoxA(hwnd, cmsg, APP_TITLE, MB_OK | MB_ICONERROR);
+            return 0;
+        }
         if (!crackable && !g_app.capture_auto_mode) {
             char q[256];
             snprintf(q, sizeof(q), "%s\n\nStart the search anyway?", cmsg);
