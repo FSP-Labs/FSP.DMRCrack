@@ -57,7 +57,7 @@ FSP.DMRCrack exploits the structure of AMBE voice coding: valid speech produces 
 2. Run the installer (requires Windows 10/11 x64, admin rights).
 3. Launch **FSP.DMRCrack** from the Start menu or desktop shortcut.
 
-Everything is included: the GPU brute-force engine, the DSD-FME demodulator, and all required Cygwin runtime DLLs. No additional downloads or configuration needed.
+Everything is included: the GPU brute-force engine, the DSD-FME demodulator, and all required Cygwin runtime DLLs.
 
 ### Build from source (Windows)
 
@@ -151,7 +151,7 @@ AABBCCDDEEFF112233...;ALG=21;KID=0F;MI=12345678
 | `ALG=21` | MOTOTRBO RC4 Enhanced Privacy — uses KMI9 pipeline (`key9 = key5 \|\| MI[4]`) |
 | `ALG=02` | Hytera Enhanced Privacy — RC4 KSA with key5, keystream XOR'd with KIV derived from key5+MI |
 | `KID=XX` | Key ID |
-| `MI=XXXXXXXX` | Message Indicator (32-bit, hex) |
+| `MI=...` | Message Indicator, hex — 32-bit (8 chars) for MOTOTRBO, 40-bit (10 chars) for Hytera |
 
 The pipeline is auto-selected at scan start based on the ALG distribution of loaded lines. If ≥ 90 % carry `ALG=02` + MI, the Hytera EP kernel is used. If ≥ 90 % carry `ALG=21`/`ALG=01` + MI, the MOTOTRBO KMI9 kernel is used. Otherwise the legacy 5-byte key mode runs.
 
@@ -200,7 +200,7 @@ Between superframes (every 6 bursts), MI advances by 32 LFSR steps: taps `{31,3,
 
 ### Hytera Enhanced Privacy pipeline (ALG=0x02)
 
-Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA), then a 21-byte keystream is generated and XOR'd with a key-IV (`kiv`) derived from `key5` and the MI bytes. All 6 bursts in a superframe share the same 21-byte keystream. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads without adding any overhead to MOTOTRBO paths.
+Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA), then a 21-byte keystream is generated and XOR'd with a key-IV (`kiv`) where `kiv[i] = key5[i] XOR MI[i]` over all 5 bytes (40-bit big-endian MI), matching DSD-FME's `hytera_enhanced_rc4_setup`. All 6 bursts in a superframe share the same 21-byte keystream. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads without adding any overhead to MOTOTRBO paths.
 
 ### GPU throughput
 
@@ -221,7 +221,7 @@ Narrow the key range (`--start` / `--end`) whenever you can to cut search time.
 
 - **Other ciphers.** Supported: DMR Enhanced Privacy RC4 (MOTOTRBO ALG=0x21 and Hytera Enhanced Privacy ALG=0x02), both with a 40-bit key. Not supported: AES-256 (Motorola DMR-AES / Hytera HP), Tytera DMRA, or any non-RC4 cipher.
 - **Captures without MI metadata.** The strict pipeline needs the Message Indicator extracted from each superframe. Without it the legacy statistical scorer runs, which is much less reliable.
-- **Bad audio.** If DSD-FME can't cleanly demodulate the WAV, the search will run but won't find the key. Garbage in, garbage out.
+- **Bad audio.** If DSD-FME can't cleanly demodulate the WAV, the search will run but won't find the key.
 - **Production live SDR ingest.** The offline file workflow (record to WAV, then feed it in) is the supported path. Direct RTL-SDR live capture exists in the GUI but is experimental and not yet hardware-validated.
 - **Targeting third-party systems.** This is for authorized auditing of systems you own or have written permission to test. See `LICENSE`.
 

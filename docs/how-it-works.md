@@ -43,9 +43,10 @@ other DMR Tier II/III radios. Two dialects matter here:
 | MOTOTRBO EP | `0x21` (also `0x01`) | RC4 with a 9-byte key: `key9 = key5 ‖ MI[4]` |
 | Hytera EP | `0x02` | RC4 with the 5-byte key, keystream XOR'd with a key-IV derived from `key5` + MI |
 
-Both use a **40-bit (5-byte) base key**. Both mix in a per-superframe 32-bit
+Both use a **40-bit (5-byte) base key**. Both mix in a per-superframe
 **Message Indicator (MI)** that is transmitted in the clear in PI headers, so it
-is known to an attacker. The unknown is only the 5-byte key.
+is known to an attacker (MOTOTRBO uses a 32-bit MI, Hytera a 40-bit MI). The
+unknown is only the 5-byte key.
 
 A 2⁴⁰ keyspace at, say, 100 million keys/s finishes in about three hours. The
 search is embarrassingly parallel, which is why this is a GPU problem.
@@ -110,10 +111,9 @@ SF2: dibits 96..131
 sync: dibits 54..77 (skipped, not voice)
 ```
 
-A critical detail that took real work to get right: **RC4 is applied to the
-packed AMBE sub-frames, not to the raw interleaved payload.** You must
-de-interleave first, then decrypt the 7-byte packed cipher. Applying RC4 to the
-raw burst scores like noise even for the correct key.
+**RC4 is applied to the packed AMBE sub-frames, not to the raw interleaved
+payload.** De-interleave first, then decrypt the 7-byte packed cipher. Applying
+RC4 to the raw burst scores like noise even for the correct key.
 
 ---
 
@@ -149,8 +149,6 @@ capture the correct key reaches:
 - Z ≈ 335 (bit-frequency), Z ≈ 38 (Hamming) measured in Python (`verify_decrypt.py`),
 - Z ≈ 48.5 (inter-frame Hamming) measured in the C scorer (`test_strict_score`).
 
-Far above the floor. There is no ambiguity about which key is correct.
-
 ---
 
 ## The Hytera dialect (ALG 0x02)
@@ -159,8 +157,9 @@ Hytera Enhanced Privacy uses a different key schedule, handled by a dedicated
 kernel so it adds zero overhead to the MOTOTRBO path:
 
 - RC4 KSA with the **5-byte key only** (no MI in the KSA, drop = 0).
-- Generate a 21-byte keystream and XOR it with a key-IV: `kiv[0] = key5[0]`,
-  `kiv[1..4] = key5[1..4] ⊕ MI_bytes[0..3]` (big-endian MI).
+- Generate a 21-byte keystream and XOR it with a key-IV:
+  `kiv[i] = key5[i] ⊕ MI[i]` over all 5 bytes (40-bit big-endian MI), matching
+  DSD-FME's `hytera_enhanced_rc4_setup`.
 - **All 6 bursts** of a superframe share the same 21-byte keystream.
 
 The scoring (inter-frame Hamming + bit-frequency) is identical. The mode is
@@ -196,7 +195,7 @@ key range whenever you can.
 
 ## How we know it is correct
 
-The pipeline is not "looks plausible," it is verified end to end:
+The pipeline is verified end to end:
 
 - **Synthetic roundtrip:** 600/600 encrypt-then-decrypt cycles pass.
 - **Real data:** the recovered key on a real Enhanced Privacy capture produces
@@ -232,6 +231,5 @@ The pipeline is not "looks plausible," it is verified end to end:
 | Capture → `.bin` conversion | `tools/dsdfme_dsp_to_bin.py` |
 | Key validation (Z-scores) | `tools/verify_decrypt.py` |
 
-Want to dig in or contribute? Start with
-[CONTRIBUTING.md](../CONTRIBUTING.md). Benchmarks on AMD / Intel / Apple GPUs are
-especially welcome.
+To contribute, see [CONTRIBUTING.md](../CONTRIBUTING.md). Benchmarks on
+AMD / Intel / Apple GPUs are welcome.
