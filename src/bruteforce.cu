@@ -2286,7 +2286,10 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
              && (prop.sharedMemPerBlockOptin >= 65536);
 #endif
     if (use_ilp2) {
-        cu_err = cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
+        /* Cast to const void* so this resolves under both CUDA and HIP -- HIP's
+         * hipFuncSetAttribute only has the (const void*, attr, int) overload,
+         * not CUDA's templated (T*, attr, int) form. */
+        cu_err = cudaFuncSetAttribute((const void *)bruteforce_kernel_strict_ilp2,
             cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
         if (cu_err != cudaSuccess) {
             /* Device refuses to raise the dynamic shared-memory limit for the
