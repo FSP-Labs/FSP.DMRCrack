@@ -131,11 +131,13 @@ inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[
     ctx->i = i; ctx->j = j;
 }
 
-/* Hytera EP keystream: RC4 KSA with key5 (drop=0), then ks[i]=rc4[i]^kiv[i%5]. */
-inline void compute_hytera_ks(const uchar key5[5], uint mi, uchar ks_out[21])
+/* Hytera EP keystream: RC4 KSA with key5 (drop=0), then ks[i]=rc4[i]^kiv[i%5].
+ * Matches DSD-FME hytera_enhanced_rc4_setup: kiv[i]=key5[i]^MI[i] for all 5 bytes,
+ * MI is 40-bit big-endian (MI[0] = bits 39..32). Mirrors include/hytera_ks.h. */
+inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[21])
 {
     uchar kiv[5];
-    kiv[0] = key5[0];
+    kiv[0] = key5[0] ^ (uchar)((mi >> 32) & 0xFFu);
     kiv[1] = key5[1] ^ (uchar)((mi >> 24) & 0xFFu);
     kiv[2] = key5[2] ^ (uchar)((mi >> 16) & 0xFFu);
     kiv[3] = key5[3] ^ (uchar)((mi >>  8) & 0xFFu);
@@ -163,10 +165,10 @@ __kernel void kernel_strict(
     const ulong start_key,
     const ulong total_keys,
     const int   payload_count,
-    const uint  global_mi,
+    const ulong global_mi,
     const int   enable_prune,
     __global const uchar *cipher_packs,
-    __global const uint  *line_mi,
+    __global const ulong *line_mi,
     __global const uchar *meta_flags,
     __global const float *abs_floor,
     volatile __global ulong *best_packed)
@@ -184,8 +186,8 @@ __kernel void kernel_strict(
     for (int k = 0; k < 12; ++k) bcnt_p[k] = 0u;
 
     for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
-        uint mi = global_mi;
-        if (meta_flags[sf_base] & 0x1u) mi = line_mi[sf_base];
+        uint mi = (uint)global_mi;   /* MOTOTRBO KMI9 uses the low 32 bits */
+        if (meta_flags[sf_base] & 0x1u) mi = (uint)line_mi[sf_base];
 
         uchar kmi9[9];
         compose_kmi9(key, mi, kmi9);
@@ -259,10 +261,10 @@ __kernel void kernel_hytera(
     const ulong start_key,
     const ulong total_keys,
     const int   payload_count,
-    const uint  global_mi,
+    const ulong global_mi,
     const int   enable_prune,
     __global const uchar *cipher_packs,
-    __global const uint  *line_mi,
+    __global const ulong *line_mi,
     __global const uchar *meta_flags,
     __global const float *abs_floor,
     volatile __global ulong *best_packed)
@@ -280,7 +282,7 @@ __kernel void kernel_hytera(
     for (int k = 0; k < 12; ++k) bcnt_p[k] = 0u;
 
     for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
-        uint mi = global_mi;
+        ulong mi = global_mi;   /* Hytera EP uses the full 40-bit MI */
         if (meta_flags[sf_base] & 0x1u) mi = line_mi[sf_base];
 
         uchar ks[21];

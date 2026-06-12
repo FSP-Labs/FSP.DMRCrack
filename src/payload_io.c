@@ -81,6 +81,24 @@ static int parse_hex_token_u32(const char *p, int max_digits, uint32_t *out_val,
     return 1;
 }
 
+/* 64-bit variant for the MI tag (Hytera EP uses a 40-bit / 10-hex MI). */
+static int parse_hex_token_u64(const char *p, int max_digits, uint64_t *out_val, int *out_digits)
+{
+    int digits = 0;
+    uint64_t v = 0;
+    while (*p != '\0' && digits < max_digits) {
+        int hv = hex_value(*p);
+        if (hv < 0) break;
+        v = (v << 4) | (uint64_t)hv;
+        ++digits;
+        ++p;
+    }
+    if (digits <= 0) return 0;
+    *out_val = v;
+    if (out_digits) *out_digits = digits;
+    return 1;
+}
+
 void payload_set_init(PayloadSet *set)
 {
     if (set == NULL) {
@@ -154,7 +172,7 @@ static int payload_set_push(PayloadSet *set, uint8_t *data, size_t len)
 
 static void parse_line_metadata(
     const char *line,
-    int *has_mi, uint32_t *mi,
+    int *has_mi, uint64_t *mi,
     int *has_alg, uint8_t *alg,
     int *has_kid, uint8_t *kid,
     int *out_silence)
@@ -168,11 +186,14 @@ static void parse_line_metadata(
     *has_kid = 0;
     *out_silence = 0;
 
+    /* MI may be up to 40 bits (10 hex) for Hytera EP, or 32 bits (8 hex) for MOTOTRBO. */
     p = find_tag_ci(line, "MI=");
-    if (p != NULL && parse_hex_token_u32(p + 3, 8, &v, &digits)) {
-        if (digits <= 8) {
+    if (p != NULL) {
+        uint64_t miv;
+        int midigits;
+        if (parse_hex_token_u64(p + 3, 10, &miv, &midigits) && midigits <= 10) {
             *has_mi = 1;
-            *mi = v;
+            *mi = miv;
         }
     }
 
@@ -307,7 +328,7 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
         uint8_t *data = NULL;
         size_t data_len = 0;
         int has_mi = 0, has_alg = 0, has_kid = 0, silence_cand = 0;
-        uint32_t mi = 0;
+        uint64_t mi = 0;
         uint8_t alg = 0, kid = 0;
 
         parse_line_metadata(line, &has_mi, &mi, &has_alg, &alg, &has_kid, &kid, &silence_cand);
@@ -361,10 +382,28 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
 
     fclose(f);
 
-    tmp.n_silence = 0;
-    for (size_t i = 0; i < tmp.count && tmp.n_silence < 64; i++) {
-        if (tmp.items[i].silence_candidate && tmp.items[i].has_mi) {
-            tmp.silence_indices[tmp.n_silence++] = (uint16_t)i;
+    /* Build the KPA silence-frame cache. The KPA pre-filter HARD-rejects any key
+     * for which a cached "silence" frame does not decrypt to C0=C1=0, so a frame
+     * wrongly tagged SILENCE prunes the *correct* key. Some DSP layouts emit a
+     * type-0x98 marker before every voice burst, which makes the converter's
+     * "first burst after a header" heuristic tag (nearly) every line -- that is
+     * not real silence. Guard against it: if an implausible fraction of frames is
+     * tagged, the tagging is untrustworthy, so build NO cache (KPA off) and fall
+     * back to full scoring (slower but correct) instead of pruning the real key. */
+    {
+        size_t silence_cand = 0;
+        for (size_t i = 0; i < tmp.count; i++)
+            if (tmp.items[i].silence_candidate && tmp.items[i].has_mi) silence_cand++;
+
+        tmp.n_silence = 0;
+        /* Real captures are overwhelmingly speech; >50% "silence" means the
+         * converter over-tagged (see DSP type-0x98 case above). */
+        if (silence_cand * 2 <= tmp.count) {
+            for (size_t i = 0; i < tmp.count && tmp.n_silence < 64; i++) {
+                if (tmp.items[i].silence_candidate && tmp.items[i].has_mi) {
+                    tmp.silence_indices[tmp.n_silence++] = (uint16_t)i;
+                }
+            }
         }
     }
 
@@ -385,7 +424,7 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
 
 #define MAX_PI_PER_SLOT 8192
 
-typedef struct { uint32_t mi; uint8_t alg; uint8_t kid; } PiEntry;
+typedef struct { uint64_t mi; uint8_t alg; uint8_t kid; } PiEntry;
 typedef struct { PiEntry *e; int n; int cap; } PiList;
 
 static uint32_t lfsr_advance(uint32_t mi, int steps)
@@ -398,23 +437,37 @@ static uint32_t lfsr_advance(uint32_t mi, int steps)
     return mi;
 }
 
-/* Parse one log line for a PI header.
- * Expected pattern (case-insensitive substrings):
- *   "Slot N ... ALG ID: XX ... KEY ID: XX ... MI(32): XXXXXXXX"
- * Returns 1 if all four fields found, 0 otherwise.
+/* Format the MI tag value: 8 hex for a 32-bit MOTOTRBO MI (keeps legacy output
+ * byte-identical), 10 hex for a 40-bit Hytera EP MI. */
+static void format_mi_tag(char *buf, size_t n, uint64_t mi)
+{
+    if (mi > 0xFFFFFFFFULL)
+        snprintf(buf, n, "%010llX", (unsigned long long)mi);
+    else
+        snprintf(buf, n, "%08llX", (unsigned long long)mi);
+}
+
+/* Parse one log line for a PI header. DSD-FME uses a common "DMR PI H-" prefix
+ * for both ciphers; they are distinguished by the MI field width, NOT the prefix:
+ *   MOTOTRBO/DMRA RC4: "Slot N DMR PI H- ALG ID: 21; KEY ID: 01; MI(32): XXXXXXXX; DMRA RC4;"
+ *   Hytera Enhanced:   "Slot N DMR PI H- ALG ID: 02; KEY ID: XX; MI(40): XXXXXXXXXX; Hytera Enhanced;"
+ * The "Slot N" is parsed inline when present; *slot_known is set to 0 only when
+ * it is absent, so the caller can supply the slot from the surrounding sync.
+ * Returns 1 if a PI header was parsed, 0 otherwise.
  */
-static int parse_pi_line(const char *line, int *slot_out,
-                          uint8_t *alg_out, uint8_t *kid_out, uint32_t *mi_out)
+static int parse_pi_line(const char *line, int *slot_out, int *slot_known,
+                          uint8_t *alg_out, uint8_t *kid_out, uint64_t *mi_out)
 {
     const char *p;
     unsigned int v;
 
+    *slot_known = 0;
     p = strstr(line, "Slot ");
-    if (!p) return 0;
-    p += 5;
-    while (*p == ' ') p++;
-    if (*p != '1' && *p != '2') return 0;
-    *slot_out = *p - '0';
+    if (p) {
+        p += 5;
+        while (*p == ' ') p++;
+        if (*p == '1' || *p == '2') { *slot_out = *p - '0'; *slot_known = 1; }
+    }
 
     p = strstr(line, "ALG ID:");
     if (!p) return 0;
@@ -430,17 +483,37 @@ static int parse_pi_line(const char *line, int *slot_out,
     if (sscanf(p, "%x", &v) != 1) return 0;
     *kid_out = (uint8_t)v;
 
+    /* MI: Hytera 40-bit (MI(40)) preferred, else MOTOTRBO 32-bit (MI(32)). */
+    p = strstr(line, "MI(40):");
+    if (p) {
+        unsigned long long mv;
+        p += 7;
+        while (*p == ' ') p++;
+        if (sscanf(p, "%llx", &mv) != 1) return 0;
+        *mi_out = (uint64_t)mv;
+        return 1;
+    }
     p = strstr(line, "MI(32):");
-    if (!p) return 0;
-    p += 7;
-    while (*p == ' ') p++;
-    if (sscanf(p, "%x", &v) != 1) return 0;
-    *mi_out = (uint32_t)v;
-
-    return 1;
+    if (p) {
+        p += 7;
+        while (*p == ' ') p++;
+        if (sscanf(p, "%x", &v) != 1) return 0;
+        *mi_out = (uint64_t)v;
+        return 1;
+    }
+    return 0;
 }
 
-static void pi_list_push(PiList *pl, uint32_t mi, uint8_t alg, uint8_t kid)
+/* Track which slot's burst a line belongs to from the bracketed sync marker,
+ * e.g. "Sync: +DMR  [SLOT1]  slot2" or "[slot1]". Returns 1/2, or 0 if none. */
+static int sync_active_slot(const char *line)
+{
+    if (strstr(line, "[SLOT1]") || strstr(line, "[slot1]")) return 1;
+    if (strstr(line, "[SLOT2]") || strstr(line, "[slot2]")) return 2;
+    return 0;
+}
+
+static void pi_list_push(PiList *pl, uint64_t mi, uint8_t alg, uint8_t kid)
 {
     if (pl->n == pl->cap) {
         int new_cap = pl->cap ? pl->cap * 2 : 64;
@@ -467,11 +540,15 @@ static void load_pi_lists(const char *log_path, PiList pi[2])
     f = fopen(log_path, "r");
     if (!f) return;
 
+    int cur_slot = 0;   /* last active slot seen in a sync line */
     while (fgets(line, sizeof(line), f)) {
-        int slot;
+        int slot = 0, slot_known = 0;
         uint8_t alg, kid;
-        uint32_t mi;
-        if (!parse_pi_line(line, &slot, &alg, &kid, &mi)) continue;
+        uint64_t mi;
+        int s = sync_active_slot(line);
+        if (s) cur_slot = s;
+        if (!parse_pi_line(line, &slot, &slot_known, &alg, &kid, &mi)) continue;
+        if (!slot_known) slot = cur_slot;   /* Hytera PI: use surrounding sync context */
         if (slot < 1 || slot > 2) continue;
         if (pi[slot-1].n < MAX_PI_PER_SLOT)
             pi_list_push(&pi[slot-1], mi, alg, kid);
@@ -512,7 +589,7 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
         int slot, si, sf_idx;
         unsigned int burst_type;
         size_t hexlen, k;
-        uint32_t mi = 0;
+        uint64_t mi = 0;
         uint8_t alg = 0, kid = 0;
         int has_meta = 0;
 
@@ -540,8 +617,16 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
                 kid = pi[si].e[sf_idx].kid;
             } else {
                 int extra = sf_idx - (pi[si].n - 1);
-                mi  = lfsr_advance(pi[si].e[pi[si].n - 1].mi, 32 * extra);
-                alg = pi[si].e[pi[si].n - 1].alg;
+                uint8_t last_alg = pi[si].e[pi[si].n - 1].alg;
+                uint64_t last_mi = pi[si].e[pi[si].n - 1].mi;
+                /* MOTOTRBO advances the MI by 32 LFSR steps per superframe. The
+                 * Hytera EP LFSR differs and is not modeled here, so for ALG=0x02
+                 * we reuse the last decoded MI rather than extrapolate incorrectly. */
+                if (last_alg == 0x02)
+                    mi = last_mi;
+                else
+                    mi = lfsr_advance((uint32_t)last_mi, 32 * extra);
+                alg = last_alg;
                 kid = pi[si].e[pi[si].n - 1].kid;
             }
             has_meta = 1;
@@ -552,10 +637,12 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
             if (si >= 0 && si < 2) after_voice_hdr[si] = 0;  /* clear: only first burst */
 
             if (has_meta) {
+                char mibuf[16];
+                format_mi_tag(mibuf, sizeof(mibuf), mi);
                 if (is_silence)
-                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X;SILENCE=1\n", hex, alg, kid, mi);
+                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%s;SILENCE=1\n", hex, alg, kid, mibuf);
                 else
-                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%08X\n", hex, alg, kid, mi);
+                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%s\n", hex, alg, kid, mibuf);
             } else {
                 if (is_silence)
                     fprintf(fout, "%s;SILENCE=1\n", hex);
@@ -604,7 +691,7 @@ int payload_save_file(const char *path, const PayloadSet *payloads, char *err, s
             fprintf(f, "%02X", line->data[j]);
         if (line->has_algid) fprintf(f, ";ALG=%02X", line->algid);
         if (line->has_keyid) fprintf(f, ";KID=%02X", line->keyid);
-        if (line->has_mi)    fprintf(f, ";MI=%08X", line->mi);
+        if (line->has_mi)    { char mibuf[16]; format_mi_tag(mibuf, sizeof(mibuf), line->mi); fprintf(f, ";MI=%s", mibuf); }
         if (line->silence_candidate) fprintf(f, ";SILENCE=1");
         fprintf(f, "\n");
     }

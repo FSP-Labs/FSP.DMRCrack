@@ -35,6 +35,7 @@ extern "C" {
 #endif
 #include "../include/rc4.h"
 #include "../include/dmr_tables.h"
+#include "../include/hytera_ks.h"
 #ifdef __cplusplus
 }
 #endif
@@ -51,7 +52,7 @@ extern "C" {
 #define MAX_CONST_LINES 256
 __constant__ unsigned char d_const_payloads[8192];
 __constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * DMR_CIPHER_PACK_BYTES]; // 21 bytes per burst (3x7)
-__constant__ unsigned int d_const_mi[MAX_CONST_LINES];
+__constant__ unsigned long long d_const_mi[MAX_CONST_LINES];  /* 40-bit MI (Hytera) / 32-bit (MOTOTRBO, low bits) */
 __constant__ unsigned char d_const_algid[MAX_CONST_LINES];
 __constant__ unsigned char d_const_meta_flags[MAX_CONST_LINES];
 __constant__ float d_abs_floor[MAX_CONST_LINES + 1]; // Absolute screening threshold by burst count
@@ -222,7 +223,7 @@ __device__ __forceinline__ int kpa_silence_check_dev(
     uint16_t silence_idx,
     uint32_t burst_drop)
 {
-    uint32_t mi = d_const_mi[silence_idx];
+    uint32_t mi = (uint32_t)d_const_mi[silence_idx];
     unsigned char kmi9[9];
     compose_kmi9_dev(key5, mi, kmi9);
 
@@ -240,15 +241,16 @@ __device__ __forceinline__ int kpa_silence_check_dev(
 }
 
 /* Hytera Enhanced Privacy (ALG=0x02) keystream generation.
- * RC4 KSA with key5 (drop=0), then kiv-XOR: ks[i] = rc4[i] ^ kiv[i%5].
- * kiv[0]=key5[0], kiv[1..4]=key5[1..4]^MI_bytes[0..3] (big-endian MI).
- * All 6 bursts in a superframe share the same 21-byte keystream. */
+ * Matches DSD-FME hytera_enhanced_rc4_setup(): RC4 KSA with key5 (drop=0), then
+ * kiv-XOR ks[i] = rc4[i] ^ kiv[i%5], where kiv[i] = key5[i] ^ MI[i] for ALL 5
+ * bytes (MI is 40-bit, big-endian). All 6 bursts in a superframe share the
+ * same 21-byte keystream. */
 __device__ __forceinline__ void compute_hytera_ks_dev(
-    const unsigned char key5[5], uint32_t mi,
+    const unsigned char key5[5], uint64_t mi,
     unsigned char ks_out[21])
 {
     unsigned char kiv[5];
-    kiv[0] = key5[0];
+    kiv[0] = key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu);
     kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
     kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
     kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
@@ -726,7 +728,7 @@ void bruteforce_kernel_strict(
         for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
             uint32_t line_mi = global_mi;
             if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u)) {
-                line_mi = d_const_mi[sf_base];
+                line_mi = (uint32_t)d_const_mi[sf_base];
             }
 
             unsigned char kmi9[9];
@@ -894,7 +896,7 @@ void bruteforce_kernel_strict_ilp2(
             /* --- MI for this superframe --- */
             uint32_t mi = global_mi;
             if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u))
-                mi = d_const_mi[sf_base];
+                mi = (uint32_t)d_const_mi[sf_base];
 
             /* --- KSA for key A and key B in parallel (interleaved) --- */
             unsigned char kmi_a[9], kmi_b[9];
@@ -1038,7 +1040,7 @@ void bruteforce_kernel_hytera(
     uint64_t start_key,
     uint64_t total_keys,
     int payload_count,
-    uint32_t global_mi,
+    uint64_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
     unsigned long long* __restrict__ dev_best_packed,
     int* __restrict__ dev_stop_requested)
@@ -1066,7 +1068,7 @@ void bruteforce_kernel_hytera(
 #define HBCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
 
         for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
-            uint32_t line_mi = global_mi;
+            uint64_t line_mi = global_mi;
             if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u))
                 line_mi = d_const_mi[sf_base];
 
@@ -1199,7 +1201,7 @@ void bruteforce_kernel(
             for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
                 uint32_t line_mi = global_mi;
                 if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u)) {
-                    line_mi = d_const_mi[sf_base];
+                    line_mi = (uint32_t)d_const_mi[sf_base];
                 }
                 unsigned char kmi9[9];
                 compose_kmi9_dev(key, line_mi, kmi9);
@@ -1367,7 +1369,7 @@ void bruteforce_kernel(
                     uint8_t flags = d_const_meta_flags[p];
                     line_has_mi = (uint8_t)(flags & 0x1u);
                     line_has_alg = (uint8_t)(flags & 0x2u);
-                    if (line_has_mi) line_mi = d_const_mi[p];
+                    if (line_has_mi) line_mi = (uint32_t)d_const_mi[p];
                     if (line_has_alg) line_alg = d_const_algid[p];
                 }
                 if (!line_has_mi && has_global_mi) line_mi = global_mi;
@@ -1596,7 +1598,7 @@ void bruteforce_kernel(
 static int infer_line_mi_host(const PayloadSet *payloads, int line_idx, uint32_t *out_mi);
 static int is_rc4_alg_host(uint8_t alg);
 static int is_hytera_ep_alg_host(uint8_t alg);
-static void compute_hytera_ks_cpu(const unsigned char key5[5], uint32_t mi, unsigned char ks_out[21]);
+static void compute_hytera_ks_cpu(const unsigned char key5[5], uint64_t mi, unsigned char ks_out[21]);
 
 typedef struct {
     int threads_per_block;
@@ -1846,7 +1848,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                 unsigned ia, ja, ib, jb, ic, jc, id, jd;
                 unsigned char _t;
                 int n, burst, sf;
-                uint32_t mi;
+                uint64_t mi;   /* 40-bit for Hytera EP; MOTOTRBO uses low 32 bits */
                 unsigned char hytera_ks[4][21];
 
                 if (n_bursts > 6) n_bursts = 6;
@@ -2043,7 +2045,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
 {
     BruteforceEngine *engine = (BruteforceEngine *)arg;
     unsigned char *host_payload_flat = NULL;
-    unsigned int host_mi[MAX_CONST_LINES];
+    unsigned long long host_mi[MAX_CONST_LINES];
     unsigned char host_algid[MAX_CONST_LINES];
     unsigned char host_meta_flags[MAX_CONST_LINES];
     unsigned long long *d_keys_tested = NULL;
@@ -2072,7 +2074,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     uint8_t has_global_mi = engine->payloads->has_global_mi ? 1u : 0u;
     uint8_t has_global_algid = engine->payloads->has_global_algid ? 1u : 0u;
     uint8_t global_algid = engine->payloads->global_algid;
-    uint32_t global_mi = engine->payloads->global_mi;
+    uint32_t global_mi = (uint32_t)engine->payloads->global_mi;       /* MOTOTRBO: low 32 bits */
+    uint64_t global_mi64 = engine->payloads->global_mi;               /* Hytera EP: full 40 bits */
     int mode_policy = 0;
 
     plat_atomic32_store(&engine->cuda_stage, 0);
@@ -2252,17 +2255,41 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     plat_atomic32_store(&engine->cuda_compute_major, prop.major);
     plat_atomic32_store(&engine->cuda_compute_minor, prop.minor);
 
-    /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved RC4 chains.
-     * ILP-2: safe on all Turing+ (sm_75+); the double S-box concern was for
-     * legacy mode. KMI9 path (mode_policy>=2) uses one S-box per thread. */
+    /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved shared-memory RC4 chains.
+     * It needs 64 KB of dynamic shared memory per block, and both its interleaved
+     * S-box layout and its 2-keys/thread latency hiding were tuned and *measured*
+     * on NVIDIA (Turing..Ada).
+     *
+     * The old gate `(major*10+minor) >= 75` silently misfires on AMD/HIP: there
+     * major/minor encode the gfx arch (gfx1030 -> 10.3, gfx906 -> 9.0), so
+     * major*10+minor is always >= 75. AMD would then run the NVIDIA-tuned kernel
+     * while its 64 KB request pins it to a single workgroup per CU (AMD LDS is
+     * 64 KB/CU) and the wavefront width differs from the assumed 32 -- a
+     * pathological configuration that the cudaFuncSetAttribute fallback below
+     * does NOT catch, because granting 64 KB succeeds.
+     *
+     * Fix: enable ILP-2 only on NVIDIA, and only when the device can actually
+     * grant a 64 KB opt-in dynamic shared block. AMD/HIP uses the portable
+     * non-ILP strict kernel (correct, one per-thread S-box) until the AMD path
+     * is profiled and a gfx-tuned variant exists. To re-enable ILP-2 on AMD
+     * after benchmarking, drop the USE_HIP guard here. */
     cuda_sm = prop.major * 10 + prop.minor;
-    /* ILP-2 only for MOTOTRBO (mode 2/3): Hytera EP has its own kernel (no smem S-box needed) */
-    use_ilp2 = (mode_policy >= 2 && mode_policy != 4) && (cuda_sm >= 75);
+#if defined(USE_HIP)
+    use_ilp2 = 0;          /* AMD: portable non-ILP strict kernel (see above) */
+    (void)cuda_sm;
+#else
+    /* ILP-2 only for MOTOTRBO (mode 2/3); Hytera EP (mode 4) has its own kernel.
+     * sharedMemPerBlockOptin is the opt-in dynamic-smem ceiling: 64 KB on Turing,
+     * 100 KB on Ampere/Ada -- so this never disables ILP-2 on a supported GPU. */
+    use_ilp2 = (mode_policy >= 2 && mode_policy != 4)
+             && (cuda_sm >= 75)
+             && (prop.sharedMemPerBlockOptin >= 65536);
+#endif
     if (use_ilp2) {
         cu_err = cudaFuncSetAttribute(bruteforce_kernel_strict_ilp2,
             cudaFuncAttributeMaxDynamicSharedMemorySize, 65536);
         if (cu_err != cudaSuccess) {
-            /* This GPU will not raise the dynamic shared-memory limit for the
+            /* Device refuses to raise the dynamic shared-memory limit for the
              * ILP-2 kernel; fall back to the non-ILP-2 strict kernel, which
              * produces identical results. */
             use_ilp2 = 0;
@@ -2399,7 +2426,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                                     engine->cfg.start_key + tuned,
                                     cur,
                                     payload_limit,
-                                    global_mi,
+                                    global_mi64,
                                     d_keys_tested,
                                     d_best_packed,
                                     d_stop_requested
@@ -2650,7 +2677,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         #define LAUNCH_CHUNK(stream_idx, off, cnt) do { \
             if (mode_policy == 4) { \
                 bruteforce_kernel_hytera<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
-                    engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
+                    engine->cfg.start_key + (off), (cnt), payload_limit, global_mi64, \
                     d_keys_tested, d_best_packed, d_stop_requested); \
             } else if (use_ilp2) { \
                 bruteforce_kernel_strict_ilp2<<<blocksPerGrid, 128, 65536, streams[stream_idx]>>>( \
@@ -3383,7 +3410,7 @@ static int infer_line_mi_host(const PayloadSet *payloads, int line_idx, uint32_t
     }
 
     if (best_idx >= 0) {
-        uint32_t mi = payloads->items[best_idx].mi;
+        uint32_t mi = (uint32_t)payloads->items[best_idx].mi;
         int delta = line_idx - best_idx;
         if (delta > 0) mi = lfsr_step_n_fwd(mi, delta);
         else if (delta < 0) mi = lfsr_step_n_back(mi, -delta);
@@ -3392,7 +3419,7 @@ static int infer_line_mi_host(const PayloadSet *payloads, int line_idx, uint32_t
     }
 
     if (payloads->has_global_mi) {
-        *out_mi = payloads->global_mi;
+        *out_mi = (uint32_t)payloads->global_mi;
         return 1;
     }
 
@@ -3523,24 +3550,11 @@ static int is_hytera_ep_alg_host(uint8_t alg)
 }
 
 static void compute_hytera_ks_cpu(
-    const unsigned char key5[5], uint32_t mi,
+    const unsigned char key5[5], uint64_t mi,
     unsigned char ks_out[21])
 {
-    unsigned char kiv[5];
-    kiv[0] = key5[0];
-    kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
-    kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
-    kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
-    kiv[4] = key5[4] ^ (unsigned char)( mi        & 0xFFu);
-
-    RC4_CTX rc4;
-    rc4_init(&rc4, key5, 5);  /* KSA with key5, drop=0 */
-
-    unsigned char zeros[21];
-    memset(zeros, 0, sizeof(zeros));
-    rc4_crypt(&rc4, zeros, ks_out, 21);
-
-    for (int i = 0; i < 21; i++) ks_out[i] ^= kiv[i % 5];
+    /* Single source of truth shared with tests; matches compute_hytera_ks_dev. */
+    hytera_compute_ks(key5, mi, ks_out, 21);
 }
 
 static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t mi)
@@ -3690,7 +3704,7 @@ static double score_candidate_host(
         memset(bit_counts, 0, sizeof(bit_counts));
 
         for (size_t sf_base = 0; sf_base < line_count; sf_base += 6) {
-            uint32_t mi = payloads->items[sf_base].has_mi
+            uint64_t mi = payloads->items[sf_base].has_mi
                           ? payloads->items[sf_base].mi
                           : payloads->global_mi;
             unsigned char ks[21];
@@ -3776,7 +3790,7 @@ static double score_candidate_host(
 
         for (size_t p = 0; p < line_count; ++p) {
             const PayloadLine *line = &payloads->items[p];
-            uint32_t mi = line->has_mi ? line->mi : payloads->global_mi;
+            uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
             int burst_pos = (int)(p % 6);
             if (line->len >= 33) {
                 unsigned char sf0_bits[24];
@@ -3822,7 +3836,7 @@ static double score_candidate_host(
             int use_kmi_force;
             double mode_score = 0.0;
             RC4_CTX rc4_cont = rc4_base;
-            uint32_t running_mi = payloads->global_mi;
+            uint32_t running_mi = (uint32_t)payloads->global_mi;
             uint32_t prev_last_sig = 0u;
             int has_prev_sig = 0;
 
@@ -3889,10 +3903,10 @@ static double score_candidate_host(
                     bytes_to_test = 33;
                 }
 
-                if (line->has_mi) line_mi = line->mi;
+                if (line->has_mi) line_mi = (uint32_t)line->mi;
                 else if (!infer_line_mi_host(payloads, (int)line_idx, &line_mi)) {
                     /* Use LFSR-tracked MI when available (use_mi_lfsr mode), else fall back to global */
-                    line_mi = (use_mi_lfsr && running_mi != 0u) ? running_mi : payloads->global_mi;
+                    line_mi = (use_mi_lfsr && running_mi != 0u) ? running_mi : (uint32_t)payloads->global_mi;
                 }
 
                 if (use_mi_lfsr) {

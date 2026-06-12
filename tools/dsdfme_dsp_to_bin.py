@@ -33,10 +33,24 @@ from typing import Optional
 
 VOICE_TYPE = "10"
 
+# MOTOTRBO PI header: carries an inline "Slot N" and a 32-bit MI.
 PI_RE = re.compile(
     r"Slot\s+([12]).*?ALG ID:\s*([0-9A-Fa-f]{2});\s*KEY ID:\s*([0-9A-Fa-f]{2});\s*MI\(32\):\s*([0-9A-Fa-f]{8})",
     re.IGNORECASE,
 )
+
+# Hytera Enhanced PI header ("DMR PI H- ... MI(40): XXXXXXXXXX"): 40-bit MI, no
+# inline slot -- the slot comes from the surrounding bracketed sync marker.
+HYTERA_PI_RE = re.compile(
+    r"ALG ID:\s*([0-9A-Fa-f]{2});\s*KEY ID:\s*([0-9A-Fa-f]{2});\s*MI\(40\):\s*([0-9A-Fa-f]{10})",
+    re.IGNORECASE,
+)
+
+# Active slot marker in a sync line, e.g. "[SLOT1]" / "[slot2]".
+SYNC_SLOT_RE = re.compile(r"\[slot([12])\]", re.IGNORECASE)
+
+# Inline "Slot N" prefix on a PI header line.
+INLINE_SLOT_RE = re.compile(r"Slot\s+([12])", re.IGNORECASE)
 
 DSP_RE = re.compile(r"^\s*(\d+)\s+([0-9A-Fa-f]{2})\s+([0-9A-Fa-f]+)\s*$")
 
@@ -62,16 +76,34 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
     if not log_path or not log_path.exists():
         return pi_seq
 
+    cur_slot = 0  # last active slot seen in a sync line (for Hytera PI attribution)
     with log_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            sm = SYNC_SLOT_RE.search(line)
+            if sm:
+                cur_slot = int(sm.group(1))
+
             m = PI_RE.search(line)
-            if not m:
+            if m:
+                slot = int(m.group(1))
+                alg = int(m.group(2), 16)
+                kid = int(m.group(3), 16)
+                mi = int(m.group(4), 16)
+                pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
                 continue
-            slot = int(m.group(1))
-            alg = int(m.group(2), 16)
-            kid = int(m.group(3), 16)
-            mi = int(m.group(4), 16)
-            pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
+
+            # Hytera Enhanced PI: 40-bit MI. Slot from the inline "Slot N" when
+            # present (DSD-FME prints it), else the surrounding sync context.
+            if "MI(40):" in line:
+                hm = HYTERA_PI_RE.search(line)
+                if hm:
+                    sl = INLINE_SLOT_RE.search(line)
+                    slot = int(sl.group(1)) if sl else cur_slot
+                    if slot in (1, 2):
+                        alg = int(hm.group(1), 16)
+                        kid = int(hm.group(2), 16)
+                        mi = int(hm.group(3), 16)
+                        pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
 
     return pi_seq
 
@@ -133,18 +165,25 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
                         alg = pi_list[sf_idx]["alg"]
                         kid = pi_list[sf_idx]["kid"]
                     else:
-                        # Extrapolate beyond available PIs using LFSR (+32 per SF)
                         last_pi = pi_list[-1]
                         extra_sfs = sf_idx - (len(pi_list) - 1)
-                        mi = dmr_mi_lfsr_step(last_pi["mi"], 32 * extra_sfs)
                         alg = last_pi["alg"]
                         kid = last_pi["kid"]
+                        if alg == 0x02:
+                            # Hytera EP advances the MI with its own LFSR (not modeled
+                            # here); reuse the last decoded MI rather than extrapolate
+                            # with the MOTOTRBO LFSR.
+                            mi = last_pi["mi"]
+                        else:
+                            # MOTOTRBO: +32 LFSR steps per superframe.
+                            mi = dmr_mi_lfsr_step(last_pi["mi"], 32 * extra_sfs)
 
                     if alg is not None:
                         line_out += f";ALG={alg:02X}"
                     if kid is not None:
                         line_out += f";KID={kid:02X}"
-                    line_out += f";MI={mi:08X}"
+                    # 10 hex for a 40-bit Hytera MI, 8 hex for a 32-bit MOTOTRBO MI.
+                    line_out += f";MI={mi:010X}" if mi > 0xFFFFFFFF else f";MI={mi:08X}"
 
                     ss["burst_count"] += 1
 

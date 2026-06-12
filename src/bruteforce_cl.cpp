@@ -219,7 +219,7 @@ static double score_candidate(
     if (mode_policy >= 2) {
         for (line_idx = 0; line_idx < line_count; ++line_idx) {
             const PayloadLine *line = &payloads->items[line_idx];
-            uint32_t mi = line->has_mi ? line->mi : payloads->global_mi;
+            uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
             int burst_pos = (int)(line_idx % 6);
             if (line->len >= 33) {
                 score += score_burst_correct_cpu(line->data, key, mi, burst_pos);
@@ -425,7 +425,7 @@ typedef struct {
     cl_mem           buf_best;
     int              mode_policy;
     int              payload_count;
-    uint32_t         global_mi;
+    uint64_t         global_mi;   /* 40-bit for Hytera EP; MOTOTRBO uses low 32 bits */
     size_t           local_size;
     int              gpu_ok;       /* 1 if OpenCL path is active */
 } ClState;
@@ -524,7 +524,7 @@ static int cl_build(BruteforceEngine *engine, ClState *st)
 
 static int cl_upload(BruteforceEngine *engine, ClState *st,
                      const unsigned char *cipher_packs,
-                     const uint32_t *line_mi,
+                     const uint64_t *line_mi,
                      const unsigned char *meta_flags,
                      const float *abs_floor,
                      int payload_count)
@@ -537,7 +537,7 @@ static int cl_upload(BruteforceEngine *engine, ClState *st,
     if (err != CL_SUCCESS) { cl_set_error(engine, "clCreateBuffer(cipher) failed"); return 0; }
 
     st->buf_mi = clCreateBuffer(st->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
-                                (size_t)payload_count * sizeof(uint32_t), (void *)line_mi, &err);
+                                (size_t)payload_count * sizeof(uint64_t), (void *)line_mi, &err);
     if (err != CL_SUCCESS) { cl_set_error(engine, "clCreateBuffer(mi) failed"); return 0; }
 
     st->buf_meta = clCreateBuffer(st->context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
@@ -621,13 +621,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cl_launcher_proc(void *arg)
         cl_ulong  cl_start = (cl_ulong)offset;
         cl_ulong  cl_total = (cl_ulong)this_chunk;
         cl_int    ci = st->payload_count;
-        cl_uint   cmi = st->global_mi;
+        cl_ulong  cmi = st->global_mi;
         cl_int    cprune = enable_prune;
 
         clSetKernelArg(st->kernel, 0, sizeof(cl_ulong), &cl_start);
         clSetKernelArg(st->kernel, 1, sizeof(cl_ulong), &cl_total);
         clSetKernelArg(st->kernel, 2, sizeof(cl_int),   &ci);
-        clSetKernelArg(st->kernel, 3, sizeof(cl_uint),  &cmi);
+        clSetKernelArg(st->kernel, 3, sizeof(cl_ulong), &cmi);
         clSetKernelArg(st->kernel, 4, sizeof(cl_int),   &cprune);
         clSetKernelArg(st->kernel, 5, sizeof(cl_mem),   &st->buf_cipher);
         clSetKernelArg(st->kernel, 6, sizeof(cl_mem),   &st->buf_mi);
@@ -838,7 +838,7 @@ int bruteforce_start(
 
                 /* Build per-line MI / meta arrays + abs_floor thresholds. */
                 unsigned char *cipher = (unsigned char *)calloc((size_t)payload_count, DMR_CIPHER_PACK_BYTES);
-                uint32_t *line_mi = (uint32_t *)calloc((size_t)payload_count, sizeof(uint32_t));
+                uint64_t *line_mi = (uint64_t *)calloc((size_t)payload_count, sizeof(uint64_t));
                 unsigned char *meta = (unsigned char *)calloc((size_t)payload_count, 1);
                 float *absf = (float *)calloc((size_t)(payload_count + 1), sizeof(float));
                 if (cipher && line_mi && meta && absf) {

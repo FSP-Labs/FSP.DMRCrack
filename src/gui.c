@@ -1697,6 +1697,30 @@ static DWORD WINAPI capture_monitor_proc(LPVOID param)
         snprintf(status, sizeof(status), g_lang.cap_status_fmt, sync, enc, elapsed);
         SetWindowTextA(g_app.demod_label, status);
 
+        /* dsd-fme launches fine but exits within milliseconds when it cannot
+         * open the RTL-SDR (no device / no WinUSB driver / device busy). Without
+         * this check the status bar would just sit at 0 frames forever. Detect
+         * the early exit and surface the real cause from the log. */
+        if (!g_app.capture_stop_flag && enc < LIVE_CAPTURE_TARGET_FRAMES &&
+            g_app.capture_proc &&
+            WaitForSingleObject(g_app.capture_proc, 0) == WAIT_OBJECT_0) {
+            char ltail[1024] = {0};
+            read_log_tail(logfile, ltail, sizeof(ltail));
+            if (strstr(ltail, "No supported devices") ||
+                strstr(ltail, "Failed to open rtlsdr") ||
+                strstr(ltail, "RTL Input")) {
+                SetWindowTextA(g_app.demod_label, g_lang.err_capture_no_device);
+            } else {
+                SetWindowTextA(g_app.demod_label, g_lang.err_capture_died);
+            }
+            /* dsd-fme is already gone; reset the toggle button and release the
+             * dead process/job handles so the next capture starts clean. */
+            SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_start);
+            if (g_app.capture_job)  { CloseHandle(g_app.capture_job);  g_app.capture_job  = NULL; }
+            if (g_app.capture_proc) { CloseHandle(g_app.capture_proc); g_app.capture_proc = NULL; }
+            break;
+        }
+
         if (enc >= LIVE_CAPTURE_TARGET_FRAMES) {
             /* Good capture: stop dsd-fme, finalize the .bin, hand off to main thread. */
             char fin_dsp[MAX_PATH], cerr[256] = {0};
@@ -2331,12 +2355,44 @@ static LRESULT CALLBACK help_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
 #define IDC_RTL_DEV  102
 #define IDC_RTL_GAIN 103
 #define IDC_RTL_PPM  104
+#define IDC_RTL_ADV  105
+
+/* Collapsed dialog shows only the frequency; the technical fields hide behind a
+ * "More options" toggle so a non-technical user only deals with one field. */
+#define RTL_W            440
+#define RTL_H_COLLAPSED  280
+#define RTL_H_EXPANDED   440
+#define RTL_ADV_Y        186   /* top of the advanced section (client coords) */
+#define RTL_BTN_Y_OPEN   356   /* OK/Cancel row when advanced is shown          */
+#define RTL_BTN_Y_SHUT   196   /* OK/Cancel row when advanced is hidden          */
 
 static struct {
     HWND ed_freq, ed_dev, ed_gain, ed_ppm;
-    HWND lbl_freq;
+    HWND lbl_freq, lbl_intro, lbl_freqhint;
+    HWND btn_adv, btn_ok, btn_cancel;
+    HWND adv[9];        /* advanced labels + edits + hints, shown/hidden together */
+    HWND dim[5];        /* statics drawn in the muted colour (intro + hints)      */
+    int  n_adv, n_dim;
+    int  advanced_shown;
     int  done, accepted;
 } g_rtldlg;
+
+/* Reposition the toggle/OK/Cancel and resize the window for the current state. */
+static void rtl_dlg_relayout(HWND hwnd)
+{
+    int shown = g_rtldlg.advanced_shown;
+    int btn_y = shown ? RTL_BTN_Y_OPEN : RTL_BTN_Y_SHUT;
+    int i;
+    for (i = 0; i < g_rtldlg.n_adv; ++i)
+        ShowWindow(g_rtldlg.adv[i], shown ? SW_SHOW : SW_HIDE);
+    SetWindowTextA(g_rtldlg.btn_adv, shown ? g_lang.cap_adv_hide : g_lang.cap_adv_show);
+    MoveWindow(g_rtldlg.btn_ok,     230, btn_y, 90, 28, TRUE);
+    MoveWindow(g_rtldlg.btn_cancel, 326, btn_y, 90, 28, TRUE);
+    SetWindowPos(hwnd, NULL, 0, 0, RTL_W,
+                 shown ? RTL_H_EXPANDED : RTL_H_COLLAPSED,
+                 SWP_NOMOVE | SWP_NOZORDER);
+    InvalidateRect(hwnd, NULL, TRUE);
+}
 
 static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
@@ -2344,36 +2400,69 @@ static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     case WM_CREATE:
     {
         HFONT f = g_app.ui_font ? g_app.ui_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        int lx = 14, ex = 200, ew = 130, y = 14, rowh = 30;
-        struct { const char *lbl; int id; const char *def; HWND *out; } rows[] = {
-            { g_lang.cap_lbl_freq, IDC_RTL_FREQ, "451.2M", &g_rtldlg.ed_freq },
-            { g_lang.cap_lbl_dev,  IDC_RTL_DEV,  "0",      &g_rtldlg.ed_dev  },
-            { g_lang.cap_lbl_gain, IDC_RTL_GAIN, "0",      &g_rtldlg.ed_gain },
-            { g_lang.cap_lbl_ppm,  IDC_RTL_PPM,  "0",      &g_rtldlg.ed_ppm  },
-        };
-        for (int i = 0; i < 4; ++i) {
-            HWND st = CreateWindowExA(0, "STATIC", rows[i].lbl, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                lx, y + 4, ex - lx - 6, 20, hwnd, NULL, GetModuleHandleA(NULL), NULL);
-            HWND ed = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", rows[i].def,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                (i == 0) ? lx : ex, (i == 0) ? y + 26 : y, (i == 0) ? 366 : ew, 24,
-                hwnd, (HMENU)(INT_PTR)rows[i].id, GetModuleHandleA(NULL), NULL);
-            SendMessageA(st, WM_SETFONT, (WPARAM)f, FALSE);
-            SendMessageA(ed, WM_SETFONT, (WPARAM)f, FALSE);
-            *rows[i].out = ed;
-            if (i == 0) g_rtldlg.lbl_freq = st;   /* highlighted: the required field */
-            y += (i == 0) ? rowh + 24 : rowh;
-        }
+        HMODULE mod = GetModuleHandleA(NULL);
+        int LX = 16, W = RTL_W - 40;   /* left margin + usable width */
+        g_rtldlg.n_adv = g_rtldlg.n_dim = 0;
+
+        #define MKSTATIC(txt, x, yy, ww, hh) \
+            CreateWindowExA(0, "STATIC", (txt), WS_CHILD | WS_VISIBLE | SS_LEFT, \
+                (x), (yy), (ww), (hh), hwnd, NULL, mod, NULL)
+        #define MKEDIT(def, id, x, yy, ww) \
+            CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", (def), \
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, \
+                (x), (yy), (ww), 24, hwnd, (HMENU)(INT_PTR)(id), mod, NULL)
+
+        /* Plain-language intro (muted) */
+        g_rtldlg.lbl_intro = MKSTATIC(g_lang.cap_intro, LX, 12, W, 58);
+        g_rtldlg.dim[g_rtldlg.n_dim++] = g_rtldlg.lbl_intro;
+
+        /* The one field that matters: the frequency (highlighted) */
+        g_rtldlg.lbl_freq = MKSTATIC(g_lang.cap_lbl_freq, LX, 78, W, 18);
+        g_rtldlg.ed_freq  = MKEDIT("461.8375", IDC_RTL_FREQ, LX, 98, W);
+        g_rtldlg.lbl_freqhint = MKSTATIC(g_lang.cap_freq_hint, LX, 128, W, 16);
+        g_rtldlg.dim[g_rtldlg.n_dim++] = g_rtldlg.lbl_freqhint;
+
+        /* "More options" toggle (ghost button) */
+        g_rtldlg.btn_adv = CreateWindowExA(0, "BUTTON", g_lang.cap_adv_show,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            LX, 150, 150, 26, hwnd, (HMENU)(INT_PTR)IDC_RTL_ADV, mod, NULL);
+
+        /* Advanced section (created here, shown/hidden by rtl_dlg_relayout) */
         {
-            HWND ok = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_ok,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
-                200, y + 8, 90, 28, hwnd, (HMENU)(INT_PTR)IDOK, GetModuleHandleA(NULL), NULL);
-            HWND cancel = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_cancel,
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-                300, y + 8, 90, 28, hwnd, (HMENU)(INT_PTR)IDCANCEL, GetModuleHandleA(NULL), NULL);
-            SendMessageA(ok, WM_SETFONT, (WPARAM)f, FALSE);
-            SendMessageA(cancel, WM_SETFONT, (WPARAM)f, FALSE);
+            int y = RTL_ADV_Y, EX = 252, EW = RTL_W - EX - 24;
+            struct { const char *lbl; const char *hint; int id; const char *def; HWND *out; } a[] = {
+                { g_lang.cap_lbl_dev,  g_lang.cap_hint_dev,  IDC_RTL_DEV,  "0", &g_rtldlg.ed_dev  },
+                { g_lang.cap_lbl_gain, g_lang.cap_hint_gain, IDC_RTL_GAIN, "0", &g_rtldlg.ed_gain },
+                { g_lang.cap_lbl_ppm,  g_lang.cap_hint_ppm,  IDC_RTL_PPM,  "0", &g_rtldlg.ed_ppm  },
+            };
+            for (int i = 0; i < 3; ++i) {
+                HWND lb = MKSTATIC(a[i].lbl,  LX, y,      EX - LX - 8, 18);
+                HWND ed = MKEDIT (a[i].def, a[i].id, EX, y - 2, EW);
+                HWND hn = MKSTATIC(a[i].hint, LX, y + 19, EX - LX - 8, 16);
+                *a[i].out = ed;
+                g_rtldlg.adv[g_rtldlg.n_adv++] = lb;
+                g_rtldlg.adv[g_rtldlg.n_adv++] = ed;
+                g_rtldlg.adv[g_rtldlg.n_adv++] = hn;   /* shown/hidden with the section */
+                g_rtldlg.dim[g_rtldlg.n_dim++] = hn;   /* and drawn in the muted colour  */
+                y += 50;
+            }
         }
+
+        g_rtldlg.btn_ok = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_ok,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
+            230, RTL_BTN_Y_SHUT, 90, 28, hwnd, (HMENU)(INT_PTR)IDOK, mod, NULL);
+        g_rtldlg.btn_cancel = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_cancel,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            326, RTL_BTN_Y_SHUT, 90, 28, hwnd, (HMENU)(INT_PTR)IDCANCEL, mod, NULL);
+
+        /* font on every child */
+        { HWND c = GetWindow(hwnd, GW_CHILD);
+          while (c) { SendMessageA(c, WM_SETFONT, (WPARAM)f, FALSE); c = GetWindow(c, GW_HWNDNEXT); } }
+
+        g_rtldlg.advanced_shown = 0;
+        rtl_dlg_relayout(hwnd);   /* start collapsed */
+        #undef MKSTATIC
+        #undef MKEDIT
         return 0;
     }
     case WM_CTLCOLOREDIT:
@@ -2386,8 +2475,16 @@ static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     case WM_CTLCOLORSTATIC:
     {
         HDC hdc = (HDC)wparam;
-        /* The frequency label leads (required); the optional fields recede. */
-        SetTextColor(hdc, ((HWND)lparam == g_rtldlg.lbl_freq) ? CLR_BRIGHT : CLR_DIM);
+        HWND c = (HWND)lparam;
+        COLORREF col = CLR_TEXT;           /* advanced field labels: readable */
+        if (c == g_rtldlg.lbl_freq) {
+            col = CLR_BRIGHT;              /* the one required field leads */
+        } else {
+            int i;                         /* intro + hints recede */
+            for (i = 0; i < g_rtldlg.n_dim; ++i)
+                if (c == g_rtldlg.dim[i]) { col = CLR_DIM; break; }
+        }
+        SetTextColor(hdc, col);
         SetBkColor(hdc, CLR_BG);
         return (LRESULT)g_app.br_bg;
     }
@@ -2405,6 +2502,10 @@ static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPA
     }
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case IDC_RTL_ADV:
+            g_rtldlg.advanced_shown = !g_rtldlg.advanced_shown;
+            rtl_dlg_relayout(hwnd);
+            return 0;
         case IDOK:     g_rtldlg.accepted = 1; g_rtldlg.done = 1; return 0;
         case IDCANCEL: g_rtldlg.accepted = 0; g_rtldlg.done = 1; return 0;
         }
@@ -2430,7 +2531,7 @@ static int prompt_rtl_config(HWND parent, char *out_spec, size_t out_len)
 
     hdlg = CreateWindowExA(WS_EX_DLGMODALFRAME, RTLDLG_CLASS_NAME, g_lang.cap_dlg_title,
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        pr.left + 120, pr.top + 120, 410, 260,
+        pr.left + 120, pr.top + 120, RTL_W, RTL_H_COLLAPSED,
         parent, NULL, GetModuleHandleA(NULL), NULL);
     if (!hdlg) return 0;
     { BOOL dark = TRUE; DwmSetWindowAttribute(hdlg, 20, &dark, sizeof(dark)); }

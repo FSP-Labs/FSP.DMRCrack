@@ -67,6 +67,11 @@ static void close_worker_resources(BruteforceEngine *engine)
 
     free(engine->workers);
     engine->workers = NULL;
+
+    free(engine->cpu_cipher_packs);
+    engine->cpu_cipher_packs = NULL;
+    engine->cpu_pack_lines = 0;
+    engine->cpu_mode_correct = 0;
 }
 
 static void key_to_5bytes(uint64_t key, unsigned char out[5])
@@ -155,6 +160,130 @@ static void rc4_discard_cpu(RC4_CTX *ctx, int nbytes)
 static int is_rc4_alg_cpu(uint8_t alg)
 {
     return alg == 0x21 || alg == 0x01 || ((alg & 0x07u) == 0x01u);
+}
+
+/*
+ * ==========================================================================
+ * Precomputed-pack fast path (mode_policy >= 2)
+ * ==========================================================================
+ * The de-interleave -> mbe_demodulate -> extract -> pack step depends only on
+ * the payload, never on the candidate key. The original score_burst_correct_cpu
+ * recomputed it for every one of the ~10^12 keys. Here it is hoisted out and
+ * precomputed once per scan into a 21-byte "cipher pack" per line (3 sub-frames
+ * x 7 bytes), exactly like precompute_cipher_packs() does for the GPU. The
+ * per-key hot loop then collapses to RC4 + inter-frame Hamming, and within a
+ * superframe a single KSA + continuous PRGA replaces six per-burst KSAs.
+ */
+static void precompute_packs_cpu(const PayloadSet *payloads, size_t line_count,
+                                 unsigned char *out /* line_count * 21 */)
+{
+    size_t p;
+    int sf, i, j, bi;
+    for (p = 0; p < line_count; ++p) {
+        const unsigned char *payload33 = payloads->items[p].data;
+        unsigned char *dst = out + p * 21;
+        if (payloads->items[p].len < 33) { memset(dst, 0, 21); continue; }
+        for (sf = 0; sf < 3; ++sf) {
+            unsigned char ambe_fr[4][24];
+            unsigned char bits49[49];
+            unsigned char cipher7[7];
+            int foo, pr_val;
+            memset(ambe_fr, 0, sizeof(ambe_fr));
+            for (i = 0; i < 36; ++i) {
+                int d = sf_dibit_idx_cpu[sf][i];
+                int byte_idx = d >> 2;
+                int shift = (3 - (d & 3)) * 2;
+                unsigned char dibit = (unsigned char)((payload33[byte_idx] >> shift) & 0x3u);
+                ambe_fr[rW_cpu[i]][rX_cpu[i]] = (unsigned char)((dibit >> 1) & 1u);
+                ambe_fr[rY_cpu[i]][rZ_cpu[i]] = (unsigned char)(dibit & 1u);
+            }
+            foo = 0;
+            for (i = 23; i >= 12; --i) foo = (foo << 1) | (int)ambe_fr[0][i];
+            pr_val = 16 * foo;
+            for (j = 22; j >= 0; --j) {
+                pr_val = (173 * pr_val + 13849) & 0xFFFF;
+                ambe_fr[1][j] ^= (unsigned char)(pr_val >> 15);
+            }
+            bi = 0;
+            for (j = 23; j >= 12; --j) bits49[bi++] = ambe_fr[0][j];
+            for (j = 22; j >= 11; --j) bits49[bi++] = ambe_fr[1][j];
+            for (j = 10; j >=  0; --j) bits49[bi++] = ambe_fr[2][j];
+            for (j = 13; j >=  0; --j) bits49[bi++] = ambe_fr[3][j];
+            memset(cipher7, 0, 7);
+            for (i = 0; i < 49; ++i)
+                cipher7[i >> 3] |= (unsigned char)((bits49[i] & 1u) << (7 - (i & 7)));
+            memcpy(dst + sf * 7, cipher7, 7);
+        }
+    }
+}
+
+/*
+ * Score a candidate key from precomputed packs. Bit-for-bit identical to the
+ * mode_policy>=2 branch of score_candidate() for any key, but ~Nx faster.
+ * When prune != 0, the per-burst absolute floor (33k - 6.92*sqrt(k), the same
+ * threshold the GPU kernel applies via d_abs_floor[]) rejects a key the moment
+ * its running score can no longer belong to the correct key; a pruned key
+ * returns -DBL_MAX so the caller skips it. With prune == 0 the full score is
+ * always returned.
+ */
+static double score_packed_cpu(const unsigned char *packs,
+                               const PayloadSet *payloads,
+                               size_t line_count,
+                               const unsigned char key5[5],
+                               int prune)
+{
+    double total = 0.0;
+    int processed = 0;
+    size_t sf_base;
+
+    for (sf_base = 0; sf_base < line_count; sf_base += 6) {
+        uint32_t mi = (uint32_t)(payloads->items[sf_base].has_mi
+                    ? payloads->items[sf_base].mi : payloads->global_mi);
+        unsigned char kmi9[9];
+        RC4_CTX rc4;
+        int bp;
+
+        kmi9[0] = key5[0]; kmi9[1] = key5[1]; kmi9[2] = key5[2];
+        kmi9[3] = key5[3]; kmi9[4] = key5[4];
+        kmi9[5] = (unsigned char)((mi >> 24) & 0xFFu);
+        kmi9[6] = (unsigned char)((mi >> 16) & 0xFFu);
+        kmi9[7] = (unsigned char)((mi >>  8) & 0xFFu);
+        kmi9[8] = (unsigned char)(mi & 0xFFu);
+
+        /* One KSA + discard(256) per superframe; the six bursts then stream
+         * consecutively (burst b consumes keystream bytes 257+b*21 .. 277+b*21),
+         * identical to rc4_init(kmi9) + rc4_discard(256 + b*21) done per burst. */
+        rc4_init(&rc4, kmi9, 9);
+        rc4_discard_cpu(&rc4, 256);
+
+        for (bp = 0; bp < 6; ++bp) {
+            size_t pidx = sf_base + (size_t)bp;
+            const unsigned char *cp;
+            unsigned char buf[7];
+            unsigned char d0[3], d1[3], d2[3];
+            int h01, h12;
+            if (pidx >= line_count) break;
+            cp = packs + pidx * 21;
+
+            rc4_crypt(&rc4, cp + 0,  buf, 7); d0[0] = buf[0]; d0[1] = buf[1]; d0[2] = buf[2];
+            rc4_crypt(&rc4, cp + 7,  buf, 7); d1[0] = buf[0]; d1[1] = buf[1]; d1[2] = buf[2];
+            rc4_crypt(&rc4, cp + 14, buf, 7); d2[0] = buf[0]; d2[1] = buf[1]; d2[2] = buf[2];
+
+            h01 = popcount_byte(d0[0] ^ d1[0]) + popcount_byte(d0[1] ^ d1[1])
+                + popcount_byte(d0[2] ^ d1[2]);
+            h12 = popcount_byte(d1[0] ^ d2[0]) + popcount_byte(d1[1] ^ d2[1])
+                + popcount_byte(d1[2] ^ d2[2]);
+            total += (double)(48 - h01 - h12);
+            processed++;
+
+            if (prune) {
+                double floor_v = 33.0 * (double)processed
+                               - 6.92 * sqrt((double)processed);
+                if (total < floor_v) return -DBL_MAX;
+            }
+        }
+    }
+    return total;
 }
 
 /*
@@ -281,7 +410,7 @@ static double score_candidate(
     if (mode_policy >= 2) {
         for (line_idx = 0; line_idx < line_count; ++line_idx) {
             const PayloadLine *line = &payloads->items[line_idx];
-            uint32_t mi = line->has_mi ? line->mi : payloads->global_mi;
+            uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
             int burst_pos = (int)(line_idx % 6);
             if (line->len >= 33) {
                 score += score_burst_correct_cpu(line->data, key, mi, burst_pos);
@@ -506,6 +635,16 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL worker_proc(void *arg)
     uint64_t local_count = 0;
     double local_best_score = -DBL_MAX;
 
+    /* Fast path for MOTOTRBO RC4 + MI captures: precomputed packs let the hot
+     * loop run RC4 + Hamming only, with hashcat-style abs_floor pruning. Pruning
+     * is gated on a wide keyspace so narrow ranges (mask/known-prefix) still
+     * score in full and never risk rejecting the sought key. */
+    const int            correct = engine->cpu_mode_correct;
+    const unsigned char *packs   = engine->cpu_cipher_packs;
+    const size_t         scn     = (size_t)engine->cfg.sample_lines;
+    const int            prune   =
+        (correct && (engine->cfg.end_key - engine->cfg.start_key) > (1ULL << 20)) ? 1 : 0;
+
     plat_thread_set_ideal_processor(ctx->worker_index);
 
     for (k = ctx->start_key; k <= ctx->end_key; ++k) {
@@ -521,7 +660,19 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL worker_proc(void *arg)
         }
 
         key_to_5bytes(k, key_bytes);
-        score = score_candidate(engine->payloads, engine->cfg.sample_lines, engine->cfg.sample_bytes, key_bytes);
+        if (correct) {
+            score = score_packed_cpu(packs, engine->payloads, scn, key_bytes, prune);
+            if (score == -DBL_MAX) {          /* pruned: cannot be the best key */
+                local_count++;
+                if ((local_count & 0x3FFu) == 0)
+                    plat_atomic64_add(&engine->keys_tested, 1024LL);
+                if (k == ctx->end_key) break;
+                continue;
+            }
+        } else {
+            score = score_candidate(engine->payloads, engine->cfg.sample_lines,
+                                    engine->cfg.sample_bytes, key_bytes);
+        }
 
         if (score > local_best_score) {
             local_best_score = score;
@@ -614,6 +765,33 @@ int bruteforce_start(
     if (engine->cfg.sample_lines <= 0 || (size_t)engine->cfg.sample_lines > payloads->count)
         engine->cfg.sample_lines = (int)payloads->count;
     engine->payloads = payloads;
+
+    /* If the capture is MOTOTRBO RC4 + MI (>= 1/3 of scored lines), precompute
+     * the key-independent cipher packs once so every worker runs the fast
+     * RC4 + Hamming scorer instead of re-deriving the AMBE packing per key.
+     * Same classification rule score_candidate() uses to pick mode_policy 2. */
+    engine->cpu_mode_correct = 0;
+    engine->cpu_cipher_packs = NULL;
+    engine->cpu_pack_lines = 0;
+    {
+        size_t lc = (size_t)engine->cfg.sample_lines;
+        size_t li;
+        int mi_rc4 = 0;
+        for (li = 0; li < lc; ++li) {
+            const PayloadLine *ln = &payloads->items[li];
+            uint8_t alg = ln->has_algid ? ln->algid : payloads->global_algid;
+            if (ln->has_mi && is_rc4_alg_cpu(alg)) mi_rc4++;
+        }
+        if (lc > 0 && mi_rc4 * 3 >= (int)lc) {
+            engine->cpu_cipher_packs = (unsigned char *)malloc(lc * 21);
+            if (engine->cpu_cipher_packs != NULL) {
+                precompute_packs_cpu(payloads, lc, engine->cpu_cipher_packs);
+                engine->cpu_pack_lines = (int)lc;
+                engine->cpu_mode_correct = 1;
+            }
+            /* malloc failure simply falls back to the per-key scorer below */
+        }
+    }
 
     engine->thread_handles = (plat_thread_t *)calloc((size_t)engine->cfg.thread_count, sizeof(plat_thread_t));
     engine->workers = calloc((size_t)engine->cfg.thread_count, sizeof(WorkerCtx));

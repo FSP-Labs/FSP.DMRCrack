@@ -102,6 +102,16 @@ typedef struct BruteforceEngine {
     plat_atomic32_t cuda_compute_major;
     plat_atomic32_t cuda_compute_minor;
     plat_atomic64_t cuda_last_update_ms;
+
+    /* CPU-only engine (bruteforce.c) correct-pipeline acceleration.
+     * When the capture is MOTOTRBO RC4 + MI (mode_policy >= 2) the
+     * key-independent de-interleave/demodulate/pack step is hoisted out of the
+     * per-key hot loop and precomputed once into cpu_cipher_packs (21 bytes per
+     * scored line). The worker then only runs RC4 + Hamming + abs_floor pruning,
+     * mirroring the GPU path. Unused by the CUDA/HIP build. */
+    unsigned char *cpu_cipher_packs;   /* cpu_pack_lines * 21 bytes, or NULL */
+    int            cpu_pack_lines;     /* number of lines covered by the packs */
+    int            cpu_mode_correct;   /* 1 = use precomputed-pack scorer */
 } BruteforceEngine;
 
 #ifdef __cplusplus

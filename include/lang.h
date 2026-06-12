@@ -113,17 +113,26 @@ typedef struct {
     const char *btn_capture_stop;             /* "Stop capture"                               */
     const char *err_capture_no_spec;          /* "Enter an RTL-SDR spec in the Audio field..." */
     const char *err_capture_launch;           /* "Could not start live capture"               */
+    const char *err_capture_no_device;        /* "RTL-SDR not opened: driver / plugged / busy" */
+    const char *err_capture_died;             /* "dsd-fme exited early - see live.log"         */
     const char *cap_sync_ok;                  /* "signal OK"                                  */
     const char *cap_sync_none;                /* "no signal"                                  */
     const char *cap_status_fmt;               /* "Live capture | %s | %zu encrypted | %s"     */
     const char *cap_target_fmt;               /* "Target reached (%zu) - starting crack"      */
     /* RTL-SDR config dialog */
     const char *cap_dlg_title;                /* "Live capture - RTL-SDR"                     */
-    const char *cap_lbl_freq;                 /* "Frequency (e.g. 451.2M) - or .wav path"     */
-    const char *cap_lbl_dev;                  /* "Device index"                               */
-    const char *cap_lbl_gain;                 /* "Gain (0 = AGC)"                             */
-    const char *cap_lbl_ppm;                  /* "PPM correction"                             */
-    const char *cap_btn_ok;                   /* "Start"                                      */
+    const char *cap_intro;                    /* plain-language instructions (top of dialog)  */
+    const char *cap_lbl_freq;                 /* "Radio frequency"                            */
+    const char *cap_freq_hint;                /* "In MHz, e.g. 461.8375 ..."                  */
+    const char *cap_adv_show;                 /* "More options"                               */
+    const char *cap_adv_hide;                 /* "Fewer options"                              */
+    const char *cap_lbl_dev;                  /* "SDR device number"                          */
+    const char *cap_hint_dev;                 /* "0 if you have one SDR"                       */
+    const char *cap_lbl_gain;                 /* "Signal gain"                                */
+    const char *cap_hint_gain;                /* "0 = automatic (recommended)"                */
+    const char *cap_lbl_ppm;                  /* "Frequency correction"                       */
+    const char *cap_hint_ppm;                 /* "0 if you are not sure"                       */
+    const char *cap_btn_ok;                   /* "Start listening"                            */
     const char *cap_btn_cancel;               /* "Cancel"                                     */
 
     /* ---- Brute-force validation errors ---- */
