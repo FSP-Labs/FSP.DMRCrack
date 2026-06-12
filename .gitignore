@@ -46,6 +46,9 @@ env/
 # Test data (may contain captured radio traffic — do not publish)
 test/
 
+# Live-capture session output (runtime; may contain intercepted traffic — do not publish)
+captures/
+
 # Paper / research write-up (kept private — do not publish)
 paper/
 

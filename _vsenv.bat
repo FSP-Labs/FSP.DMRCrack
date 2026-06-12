@@ -13,8 +13,10 @@ if not exist "%VSWHERE%" (
     exit /b 1
 )
 
+REM Prefer the newest CUDA-supported toolset (VS 2019-2022). nvcc rejects the
+REM VS 2026 (v18.0+) host compiler. VS2026_FALLBACK lets the caller force -latest.
 set "VSINSTALL="
-for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath`) do set "VSINSTALL=%%i"
+for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "$p=&'%VSWHERE%' -latest -version '[16.0,18.0)' -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath; if(-not $p){$p=&'%VSWHERE%' -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath}; $p"`) do set "VSINSTALL=%%v"
 if not defined VSINSTALL (
     echo ERROR: No suitable Visual Studio installation found.
     exit /b 1
