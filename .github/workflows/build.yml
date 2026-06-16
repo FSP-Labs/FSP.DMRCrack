@@ -12,7 +12,11 @@ permissions:
 jobs:
   build:
     name: Compile dmrcrack.exe
-    runs-on: windows-latest
+    # Pinned to windows-2022 (ships VS2022). The windows-latest image moved to a
+    # newer Visual Studio (v18/2026) that CUDA 12.9's nvcc rejects
+    # (host_config.h: "Only versions between 2017 and 2022 are supported"). Local
+    # builds work because they use CUDA 13.x. Revisit when CI bumps to CUDA 13.x.
+    runs-on: windows-2022
     timeout-minutes: 45
 
     steps:
