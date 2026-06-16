@@ -89,6 +89,48 @@ int main(void)
         CHECK(memcmp(pt, rt, 21) == 0, "encrypt/decrypt roundtrip is identity");
     }
 
+    /* 5. Per-frame keystream INDEXING must match DSD-FME's bitstream model.
+     *
+     *    DSD-FME (dsd_mbe.c) generates 135 keystream octets per superframe,
+     *    expands them MSB-first into a flat bitstream, then for each of the 18
+     *    AMBE frames XORs 49 bits and skips 7 (bit_counter += 56). Because
+     *    49 + 7 = 56 = 7 bytes exactly, frame f consumes keystream bytes
+     *    [f*7 .. f*7+6] using the first 49 bits (MSB-first).
+     *
+     *    The brute-forcer applies the keystream BYTE-WISE at offset
+     *    (burst_pos*3 + sf)*7 onto the MSB-first packed 7-byte AMBE sub-frame.
+     *    This test builds the DSD-FME bitstream reference independently and
+     *    confirms the 49 decrypted bits are identical for every one of the 18
+     *    frames -- the regression guard for the old "same 21 bytes for all 6
+     *    bursts" bug, which only decrypted burst 0 correctly. */
+    {
+        unsigned char ks135[135];
+        unsigned char ksbits[135 * 8];
+        int i, f, ok_idx = 1;
+
+        /* Reference keystream + MSB-first bit expansion (DSD-FME order). */
+        hytera_ref(key, mi5, ks135, 135);
+        for (i = 0; i < 135; ++i)
+            for (int b = 0; b < 8; ++b)
+                ksbits[i * 8 + b] = (unsigned char)((ks135[i] >> (7 - b)) & 1u);
+
+        /* Production keystream the brute-forcer actually indexes (126 bytes). */
+        unsigned char ksprod[126];
+        hytera_compute_ks(key, mi40, ksprod, 126);
+
+        for (f = 0; f < 18; ++f) {
+            int bit_base = f * 56;          /* DSD-FME: 49 used + 7 skipped */
+            int byte_base = f * 7;          /* brute-forcer byte offset      */
+            for (i = 0; i < 49; ++i) {
+                /* bit i of the brute-forcer's byte slice, MSB-first */
+                int bf_bit = (ksprod[byte_base + (i >> 3)] >> (7 - (i & 7))) & 1;
+                int ref_bit = ksbits[bit_base + i];
+                if (bf_bit != ref_bit) ok_idx = 0;
+            }
+        }
+        CHECK(ok_idx, "per-frame keystream indexing matches DSD-FME bitstream (18 frames)");
+    }
+
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", failures);
     return failures ? 1 : 0;
 }

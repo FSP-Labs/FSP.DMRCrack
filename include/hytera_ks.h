@@ -5,7 +5,11 @@
  *   - kiv[i] = key5[i] ^ MI[i]  for ALL 5 bytes (MI is 40-bit, big-endian:
  *     MI[0] is the most significant byte).
  *   - ks[i] = rc4[i] ^ kiv[i % 5].
- *   - All 6 bursts in a superframe share the same keystream.
+ *   - ONE keystream per superframe, consumed LINEARLY across the 18 AMBE frames
+ *     (6 bursts x 3 sub-frames). DSD-FME (dsd_mbe.c) XORs each frame's 49 ambe_d
+ *     bits then skips 7 bits => 56 bits = exactly 7 keystream bytes per AMBE frame
+ *     (byte-aligned). AMBE frame f (= burst_pos*3 + sf) uses bytes [f*7 .. f*7+6].
+ *     The 18 frames need 18*7 = 126 bytes (DSD-FME allocates 135).
  *
  * This header is the single source of truth for the host scorer
  * (compute_hytera_ks_cpu in bruteforce.cu) and the keystream self-test
@@ -17,7 +21,8 @@
 
 #include <stdint.h>
 
-/* Generate `n` keystream bytes (n <= 256 of practical use; voice needs 21). */
+/* Generate `n` keystream bytes (n <= 256 of practical use; a full voice
+ * superframe needs 126 = 18 AMBE frames x 7 bytes). */
 static inline void hytera_compute_ks(const unsigned char key5[5], uint64_t mi,
                                      unsigned char *ks_out, int n)
 {

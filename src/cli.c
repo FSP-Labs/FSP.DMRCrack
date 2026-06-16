@@ -26,6 +26,7 @@
  *   --end   <hex>        end key,   40-bit hex (default: FFFFFFFFFF)
  *   --threads <n>        CPU worker threads (default: CPU count - 1)
  *   --gpu-pct <50-95>    GPU share of keyspace in percent (default: 80)
+ *   --gpus <n>           number of GPUs to use (default: 0 = all detected)
  *   --samples <n>        payload lines to sample per candidate (default: all)
  *   --key   <hex>        test a specific key and print its score, then exit
  *   --no-resume          ignore any .progress checkpoint file
@@ -208,6 +209,7 @@ static void print_usage(void)
         "  --end   <hex>       end key   (default: FFFFFFFFFF)\n"
         "  --threads <n>       CPU worker threads (default: auto)\n"
         "  --gpu-pct <50-95>   GPU share of keyspace (default: 80)\n"
+        "  --gpus <n>          number of GPUs to use (default: 0 = all detected)\n"
         "  --samples <n>       payload lines to sample per key (default: all)\n"
         "  --key   <hex>       score a single key and exit\n"
         "  --mask  <10 chars>  nibble mask: hex digit fixes a nibble, '?' is a\n"
@@ -277,6 +279,7 @@ int main(int argc, char **argv)
     uint64_t    end_key    = 0xFFFFFFFFFFULL;
     int         threads    = 0;   /* 0 = auto */
     int         gpu_pct    = 80;
+    int         gpus       = 0;   /* 0 = use all detected GPUs */
     int         samples    = 0;   /* 0 = all */
     int         no_resume  = 0;
     int         json_out   = 0;
@@ -296,6 +299,7 @@ int main(int argc, char **argv)
         }
         else if (strcmp(argv[i], "--threads")   == 0 && i+1 < argc) { threads  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--gpu-pct")   == 0 && i+1 < argc) { gpu_pct  = atoi(argv[++i]); }
+        else if (strcmp(argv[i], "--gpus")      == 0 && i+1 < argc) { gpus     = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--samples")   == 0 && i+1 < argc) { samples  = atoi(argv[++i]); }
         else if (strcmp(argv[i], "--key")       == 0 && i+1 < argc) { key_str  = argv[++i]; }
         else if (strcmp(argv[i], "--mask")      == 0 && i+1 < argc) { mask_str = argv[++i]; }
@@ -545,6 +549,7 @@ int main(int argc, char **argv)
         bcfg.thread_count  = threads;
         bcfg.sample_lines  = samples;
         bcfg.gpu_split_pct = gpu_pct;
+        bcfg.gpu_device_count = gpus;
         bcfg.sample_bytes  = sample_bytes;
 
         if (!bruteforce_start(&g_engine, &bcfg, &g_payloads, err, sizeof(err))) {
@@ -594,6 +599,7 @@ int main(int argc, char **argv)
     cfg.thread_count = threads;
     cfg.sample_lines = samples;
     cfg.gpu_split_pct = gpu_pct;
+    cfg.gpu_device_count = gpus;
     cfg.sample_bytes  = sample_bytes;
 
     /* -- Checkpoint resume ----------------------------------------------- */

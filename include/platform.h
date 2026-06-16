@@ -140,6 +140,13 @@ static inline void plat_atomic64_add(plat_atomic64_t *a, int64_t delta)
 {
     InterlockedAdd64(a, delta);
 }
+/* Atomically add delta and return the value held *before* the add. Used by the
+ * multi-GPU work-queue to claim a contiguous block of keys lock-free.
+ * InterlockedAdd64 returns the post-add value, so subtract delta to recover it. */
+static inline int64_t plat_atomic64_fetch_add(plat_atomic64_t *a, int64_t delta)
+{
+    return InterlockedAdd64(a, delta) - delta;
+}
 
 /* -- Timing ------------------------------------------------------------- */
 
@@ -334,6 +341,12 @@ static inline void plat_atomic64_store(plat_atomic64_t *a, int64_t val)
 static inline void plat_atomic64_add(plat_atomic64_t *a, int64_t delta)
 {
     (void)__atomic_fetch_add(a, delta, __ATOMIC_ACQ_REL);
+}
+/* Atomically add delta and return the value held *before* the add. Used by the
+ * multi-GPU work-queue to claim a contiguous block of keys lock-free. */
+static inline int64_t plat_atomic64_fetch_add(plat_atomic64_t *a, int64_t delta)
+{
+    return __atomic_fetch_add(a, delta, __ATOMIC_ACQ_REL);
 }
 
 /* -- Timing ------------------------------------------------------------- */

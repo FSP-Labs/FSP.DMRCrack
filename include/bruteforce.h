@@ -45,6 +45,7 @@ typedef struct {
     int sample_lines;
     int sample_bytes;
     int gpu_split_pct;   /* GPU share of keyspace [50..95], default 80 */
+    int gpu_device_count; /* number of GPUs to use: 0 = auto (all detected), N = cap to N */
     int has_seed_best;       /* 1 = seed_best_key/score are valid (checkpoint resume) */
     uint64_t seed_best_key;
     double   seed_best_score;
@@ -99,6 +100,7 @@ typedef struct BruteforceEngine {
     plat_atomic32_t cuda_bpsm;
     plat_atomic32_t cuda_chunk_mult;
     plat_atomic32_t cuda_sm_count;
+    plat_atomic32_t cuda_devices_active; /* number of GPUs actively scanning (>=1 in GPU mode) */
     plat_atomic32_t cuda_compute_major;
     plat_atomic32_t cuda_compute_minor;
     plat_atomic64_t cuda_last_update_ms;

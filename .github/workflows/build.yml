@@ -262,3 +262,30 @@ jobs:
           name: dmrcrack-opencl-${{ github.sha }}
           path: bin/dmrcrack
           retention-days: 7
+
+  tests:
+    name: Unit tests (host)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Builds the host test tools (no GPU toolkit) and runs the data-free
+    # known-answer tests via ctest. Data-dependent tests (test_strict_score,
+    # test_score_canonical, test_silence_guard) compile here for coverage but
+    # are not executed -- their .bin captures live under the gitignored test/.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+
+      - name: Configure
+        run: cmake -S . -B build -DUSE_CUDA=OFF -DNO_GUI=ON -DBUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build build --parallel
+
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure

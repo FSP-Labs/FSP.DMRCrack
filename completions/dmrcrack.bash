@@ -8,7 +8,7 @@ _dmrcrack() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-    opts="--bin --start --end --threads --gpu-pct --samples --key \
+    opts="--bin --start --end --threads --gpu-pct --gpus --samples --key \
           --wordlist --potfile --json --benchmark --no-resume --help -h"
 
     case "$prev" in
@@ -21,7 +21,7 @@ _dmrcrack() {
             # 40-bit hex value — no completion candidates
             return 0
             ;;
-        --threads|--gpu-pct|--samples)
+        --threads|--gpu-pct|--gpus|--samples)
             # numeric argument — no completion candidates
             return 0
             ;;

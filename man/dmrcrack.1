@@ -1,4 +1,4 @@
-.TH DMRCRACK 1 "May 2026" "FSP\-Labs" "dmrcrack Manual"
+.TH DMRCRACK 1 "June 2026" "FSP\-Labs" "dmrcrack Manual"
 .SH NAME
 dmrcrack \- GPU\-accelerated RC4 40\-bit key recovery for DMR Enhanced Privacy
 .SH SYNOPSIS
@@ -64,6 +64,13 @@ The remaining fraction is searched in parallel by CPU workers.
 Default:
 .B 80
 .TP
+.BI \-\-gpus " n"
+Number of GPUs to use when several are present (CUDA/HIP back\-ends).
+.B 0
+(default) uses all detected GPUs; the keyspace is split across them with a
+dynamic work\-queue, so an asymmetric multi\-GPU rig self\-balances (faster GPUs
+claim more work). Has no effect on the OpenCL or CPU\-only back\-ends.
+.TP
 .BI \-\-samples " n"
 Number of payload lines sampled per key candidate.
 0 (default) means all lines.
@@ -72,6 +79,35 @@ Reducing this speeds up the search at the cost of accuracy.
 .BI \-\-key " hex"
 Score a single specific key and exit, without running the full search.
 Useful for validating that a candidate key is correct.
+.TP
+.BI \-\-mask " pattern"
+10\-character nibble mask restricting the search: a hex digit fixes that nibble,
+.B ?
+is a wildcard.
+For example
+.B A1B2C3D4??
+fixes the top eight nibbles and sweeps the low two.
+Low (trailing) wildcards map to a contiguous GPU range; scattered wildcards are
+enumerated on the CPU.
+.TP
+.BI \-\-wordlist " file"
+Try a list of candidate keys before the full keyspace search.
+One key per line (10 hex digits);
+.B #
+comments and blank lines are ignored.
+.TP
+.BI \-\-potfile " file"
+Append each recovered key to a potfile as
+.IR bin : key : score .
+A capture already present in the potfile is reported and skipped (the hashcat
+result\-reuse model, keyed by capture file name).
+.TP
+.B \-\-json
+Print the final result as a one\-line JSON object on standard output.
+.TP
+.B \-\-benchmark
+Measure key\-search throughput on this machine and exit, without loading a
+capture.
 .TP
 .B \-\-no\-resume
 Ignore any existing checkpoint file and start the search from the beginning.

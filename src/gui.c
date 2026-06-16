@@ -1953,6 +1953,7 @@ static int start_bruteforce(HWND hwnd)
     uint64_t start_key, end_key;
     int threads, samples;
     BruteforceConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));  /* 0-init: gpu_device_count=0 (all GPUs), no seed/resume by default */
 
     if (!read_edit_text(g_app.edit_file, file, sizeof(file))) {
         MessageBoxA(hwnd, g_lang.err_no_bin_selected, APP_TITLE, MB_ICONWARNING);

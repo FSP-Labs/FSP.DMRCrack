@@ -312,7 +312,6 @@ FSP.DMRCrack/
     lang.h / version.h / payload_io.h / updater.h
   src/
     test_strict_score.c    Per-burst scoring validation against known key
-    test_score_windows.c   Score distribution analysis tool
     test_bench.cu          GPU kernel throughput micro-benchmark
   tools/
     dsd-fme.exe                    DSD-FME demodulator (Cygwin DLLs required alongside)

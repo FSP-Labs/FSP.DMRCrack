@@ -246,21 +246,36 @@ set_target_properties(dmrcrack PROPERTIES
 
 # ── Test tools ────────────────────────────────────────────────────────────
 if(BUILD_TESTS)
-    add_executable(test_strict_score
-        tests/test_strict_score.c
-        src/bruteforce.c
-        src/rc4.c
-        src/payload_io.c
-    )
-    target_include_directories(test_strict_score PRIVATE include)
-    if(WIN32)
-        target_link_libraries(test_strict_score PRIVATE user32 gdi32 comdlg32 shell32 advapi32)
-    else()
+    # Host test tools (no GPU toolkit required) -- parity with the Windows
+    # build_test_*.bat helpers. Each links only the host C sources it needs.
+    if(UNIX)
         find_package(Threads REQUIRED)
-        target_link_libraries(test_strict_score PRIVATE Threads::Threads m)
     endif()
-    set_target_properties(test_strict_score PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+
+    # dmrcrack_add_test(<name> [extra sources...]) compiles tests/<name>.c.
+    function(dmrcrack_add_test name)
+        add_executable(${name} tests/${name}.c ${ARGN})
+        target_include_directories(${name} PRIVATE include)
+        if(WIN32)
+            target_link_libraries(${name} PRIVATE user32 gdi32 comdlg32 shell32 advapi32)
+        else()
+            target_link_libraries(${name} PRIVATE Threads::Threads m)
+        endif()
+        set_target_properties(${name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+    endfunction()
+
+    dmrcrack_add_test(test_strict_score    src/bruteforce.c src/rc4.c src/payload_io.c)
+    dmrcrack_add_test(test_score_canonical src/rc4.c src/payload_io.c)
+    dmrcrack_add_test(test_silence_guard   src/payload_io.c)
+    dmrcrack_add_test(test_hytera_ks)
+
+    # test_hytera_ks is a self-contained known-answer test (no external data),
+    # so it can run unattended in CI via `ctest`. The data-dependent tests
+    # (test_strict_score, test_score_canonical, test_silence_guard) build here
+    # but are run manually against a .bin capture (test/ is gitignored).
+    enable_testing()
+    add_test(NAME hytera_ks COMMAND test_hytera_ks)
 endif()
 
 # ── Install targets (used by cmake --install and Debian packaging) ─────────

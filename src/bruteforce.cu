@@ -243,11 +243,19 @@ __device__ __forceinline__ int kpa_silence_check_dev(
 /* Hytera Enhanced Privacy (ALG=0x02) keystream generation.
  * Matches DSD-FME hytera_enhanced_rc4_setup(): RC4 KSA with key5 (drop=0), then
  * kiv-XOR ks[i] = rc4[i] ^ kiv[i%5], where kiv[i] = key5[i] ^ MI[i] for ALL 5
- * bytes (MI is 40-bit, big-endian). All 6 bursts in a superframe share the
- * same 21-byte keystream. */
+ * bytes (MI is 40-bit, big-endian).
+ *
+ * One keystream is generated per superframe and consumed LINEARLY across all
+ * 18 AMBE frames of the superframe (6 bursts x 3 sub-frames). DSD-FME (dsd_mbe.c)
+ * XORs each frame's 49 ambe_d bits then skips 7 bits -> 56 bits = exactly 7
+ * keystream bytes per AMBE frame, byte-aligned. So AMBE frame f (= burst_pos*3 + sf)
+ * uses keystream bytes [f*7 .. f*7+6]. The 18 frames need 18*7 = 126 bytes
+ * (DSD-FME allocates 135). The previous "same 21 bytes for all 6 bursts" was
+ * wrong: only burst 0 was decrypted correctly. */
+#define HYTERA_KS_BYTES 126
 __device__ __forceinline__ void compute_hytera_ks_dev(
     const unsigned char key5[5], uint64_t mi,
-    unsigned char ks_out[21])
+    unsigned char ks_out[HYTERA_KS_BYTES])
 {
     unsigned char kiv[5];
     kiv[0] = key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu);
@@ -260,8 +268,7 @@ __device__ __forceinline__ void compute_hytera_ks_dev(
     rc4_ksa5_dev(&rc4, key5);  /* KSA with key5, drop=0 */
 
     unsigned char ri = 0, rj = 0;
-    #pragma unroll
-    for (int idx = 0; idx < 21; idx++) {
+    for (int idx = 0; idx < HYTERA_KS_BYTES; idx++) {
         ri++;
         rj = (unsigned char)(rj + rc4.S[ri]);
         unsigned char t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
@@ -995,7 +1002,13 @@ void bruteforce_kernel_strict_ilp2(
 #undef BA_GET
 #undef BB_GET
 
-        /* Chi2 final score boost for non-pruned keys */
+        /* Chi2 final score boost for non-pruned keys.
+         * Canonical metric: chi2 / processed_bursts (== bursts_x for a non-pruned
+         * key, which always reaches payload_count). This MUST match the chi2/n term
+         * in bruteforce_kernel_strict (L819), the OpenCL kernel, and the host
+         * scorer -- a prior `chi2 * 0.1f` here silently inflated NVIDIA scores
+         * ~12.6x vs every other backend (recovery unaffected, scores not
+         * comparable). See tests/test_score_canonical.c. */
         if (!pruned_a && bursts_a > 0) {
             float hn = (float)bursts_a * 0.5f;
             float chi2 = 0.0f;
@@ -1003,7 +1016,7 @@ void bruteforce_kernel_strict_ilp2(
                 float d0 = (float)(ba[b] & 0xFFFFu) - hn; chi2 += d0*d0;
                 float d1 = (float)(ba[b] >> 16)     - hn; chi2 += d1*d1;
             }
-            score_a += chi2 * 0.1f;
+            score_a += chi2 / (float)bursts_a;
         }
         if (!pruned_b && bursts_b > 0) {
             float hn = (float)bursts_b * 0.5f;
@@ -1012,7 +1025,7 @@ void bruteforce_kernel_strict_ilp2(
                 float d0 = (float)(bb[b] & 0xFFFFu) - hn; chi2 += d0*d0;
                 float d1 = (float)(bb[b] >> 16)     - hn; chi2 += d1*d1;
             }
-            score_b += chi2 * 0.1f;
+            score_b += chi2 / (float)bursts_b;
         }
 
         if (!pruned_a)                   update_best_packed(score_a, key_a, dev_best_packed);
@@ -1072,18 +1085,21 @@ void bruteforce_kernel_hytera(
             if (sf_base < MAX_CONST_LINES && (d_const_meta_flags[sf_base] & 0x1u))
                 line_mi = d_const_mi[sf_base];
 
-            unsigned char ks[21];
+            unsigned char ks[HYTERA_KS_BYTES];
             compute_hytera_ks_dev(key, line_mi, ks);
 
             for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                 int p = sf_base + burst_pos;
                 if (p >= payload_count) break;
 
+                /* Keystream is consumed linearly across the superframe: AMBE frame
+                 * (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. */
+                int kb = burst_pos * 21;   /* burst_pos*3 frames * 7 bytes */
                 const unsigned char *cp = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
                 unsigned char p0[3], p1[3], p2[3];
-                p0[0]=cp[0]^ks[0];  p0[1]=cp[1]^ks[1];  p0[2]=cp[2]^ks[2];
-                p1[0]=cp[7]^ks[7];  p1[1]=cp[8]^ks[8];  p1[2]=cp[9]^ks[9];
-                p2[0]=cp[14]^ks[14];p2[1]=cp[15]^ks[15];p2[2]=cp[16]^ks[16];
+                p0[0]=cp[0]^ks[kb+0];  p0[1]=cp[1]^ks[kb+1];  p0[2]=cp[2]^ks[kb+2];
+                p1[0]=cp[7]^ks[kb+7];  p1[1]=cp[8]^ks[kb+8];  p1[2]=cp[9]^ks[kb+9];
+                p2[0]=cp[14]^ks[kb+14];p2[1]=cp[15]^ks[kb+15];p2[2]=cp[16]^ks[kb+16];
 
                 int h01 = __popc((unsigned int)(p0[0]^p1[0]))
                         + __popc((unsigned int)(p0[1]^p1[1]))
@@ -1598,7 +1614,7 @@ void bruteforce_kernel(
 static int infer_line_mi_host(const PayloadSet *payloads, int line_idx, uint32_t *out_mi);
 static int is_rc4_alg_host(uint8_t alg);
 static int is_hytera_ep_alg_host(uint8_t alg);
-static void compute_hytera_ks_cpu(const unsigned char key5[5], uint64_t mi, unsigned char ks_out[21]);
+static void compute_hytera_ks_cpu(const unsigned char key5[5], uint64_t mi, unsigned char ks_out[HYTERA_KS_BYTES]);
 
 typedef struct {
     int threads_per_block;
@@ -1770,6 +1786,40 @@ static void rc4_ksa9_4way(
     } \
 } while (0)
 
+/* === Multi-GPU work-queue =============================================== *
+ * Lock-free cursor over the GPU share of the keyspace. Each GPU worker thread
+ * atomically claims a contiguous block of keys; faster GPUs naturally claim
+ * more blocks, so asymmetric multi-GPU rigs self-balance with no scheduler.
+ * For a single GPU the cursor is owned by one thread and the claim sequence is
+ * identical to the old `for (offset ...)` loop -- zero behavioral change. */
+typedef struct {
+    plat_atomic64_t next;   /* next un-claimed offset within the GPU portion */
+    uint64_t        total;  /* size of the GPU portion, in keys */
+} GpuWorkQueue;
+
+/* Claim up to `want` keys. Returns the claimed offset and writes the granted
+ * count to *out_cnt (0 when the queue is drained). The cursor may overshoot
+ * `total`; that is harmless because the next claim sees next >= total. */
+static uint64_t gpu_wq_claim(GpuWorkQueue *wq, uint64_t want, uint64_t *out_cnt)
+{
+    int64_t off = plat_atomic64_fetch_add(&wq->next, (int64_t)want);
+    if ((uint64_t)off >= wq->total) { *out_cnt = 0; return 0; }
+    uint64_t cnt = want;
+    if ((uint64_t)off + cnt > wq->total) cnt = wq->total - (uint64_t)off;
+    *out_cnt = cnt;
+    return (uint64_t)off;
+}
+
+/* Per-GPU worker context. The orchestrator (cuda_launcher_thread) fills one of
+ * these per device and runs cuda_device_worker on its own thread. */
+typedef struct {
+    BruteforceEngine *engine;
+    int               device_id;      /* CUDA/HIP device ordinal */
+    int               device_count;   /* total GPUs this run (1 => single-GPU semantics) */
+    int               publish_status; /* 1 for the device that owns status atomics + checkpoint */
+    GpuWorkQueue     *wq;             /* shared keyspace cursor */
+} CudaDeviceCtx;
+
 /* --- 4-way AVX2 CPU assist worker ---------------------------------------- *
  * Processes 4 candidate keys per outer loop iteration using:
  *   - AVX2 S-box init (8 x 256-bit stores per box, vs 256 byte stores)
@@ -1779,9 +1829,11 @@ static void rc4_ksa9_4way(
  *     then continuous PRGA across all bursts - 6x fewer KSA calls
  *   - P-core pinning via plat_thread_set_affinity(worker_index)
  *
- * Scores keys using the same inter-frame Hamming metric as the GPU kernel
- * (score_burst = 48 - HD(sf0,sf1) - HD(sf1,sf2)) so GPU/CPU best_score are
- * directly comparable.
+ * Scores keys with the canonical strict metric -- inter-frame Hamming
+ * Sum(48 - HD(sf0,sf1) - HD(sf1,sf2)) plus the bit-frequency chi2/processed_bursts
+ * term -- identical to bruteforce_kernel_strict, the ILP-2 kernel, the OpenCL
+ * kernel, and score_candidate_host, so GPU/CPU/OpenCL best_score are directly
+ * comparable in the max-merge.
  *
  * Falls back to scalar score_candidate_host() for legacy mode (mode_policy<2)
  * or when cipher_packs is NULL.
@@ -1812,6 +1864,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
             int batch, sf_base;
             unsigned char key5[4][5];
             double scores[4];
+            long bit_counts[4][24];   /* sub-frame-0 bit-freq, for the chi2/n term */
             int pruned[4], all_pruned_cpu, processed_bursts_cpu;
 
             /* Stop/pause check every 4096 keys */
@@ -1831,6 +1884,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
             key_to_5bytes_cpu(k + (batch > 3 ? 3u : 0u),  key5[3]);
 
             scores[0] = scores[1] = scores[2] = scores[3] = 0.0;
+            memset(bit_counts, 0, sizeof(bit_counts));
 
             /* Pruning state: mark pad slots as already-pruned */
             {
@@ -1849,7 +1903,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                 unsigned char _t;
                 int n, burst, sf;
                 uint64_t mi;   /* 40-bit for Hytera EP; MOTOTRBO uses low 32 bits */
-                unsigned char hytera_ks[4][21];
+                unsigned char hytera_ks[4][HYTERA_KS_BYTES];
 
                 if (n_bursts > 6) n_bursts = 6;
 
@@ -1859,7 +1913,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                      : engine->payloads->global_mi;
 
                 if (ctx->mode_policy == 4) {
-                    /* Hytera EP: pre-compute 21-byte keystream for each of the 4 keys */
+                    /* Hytera EP: pre-compute the per-superframe keystream (126 bytes,
+                     * consumed linearly across the 18 AMBE frames) for each of the 4 keys */
                     for (b = 0; b < 4; b++)
                         compute_hytera_ks_cpu(key5[b], mi, hytera_ks[b]);
                     ia = ja = ib = jb = ic = jc = id = jd = 0u; /* unused */
@@ -1903,12 +1958,15 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         int i;
 
                         if (ctx->mode_policy == 4) {
-                            /* Hytera EP: XOR cipher with precomputed keystream (same for all bursts) */
+                            /* Hytera EP: keystream is consumed linearly across the
+                             * superframe -- AMBE frame (burst*3 + sf) uses bytes
+                             * [burst*21 + sf*7 ..]. */
+                            int kb = burst * 21 + sf * 7;
                             for (n = 0; n < 7; n++) {
-                                pa[n] = cp[n] ^ hytera_ks[0][sf*7+n];
-                                pb[n] = cp[n] ^ hytera_ks[1][sf*7+n];
-                                pc[n] = cp[n] ^ hytera_ks[2][sf*7+n];
-                                pd[n] = cp[n] ^ hytera_ks[3][sf*7+n];
+                                pa[n] = cp[n] ^ hytera_ks[0][kb+n];
+                                pb[n] = cp[n] ^ hytera_ks[1][kb+n];
+                                pc[n] = cp[n] ^ hytera_ks[2][kb+n];
+                                pd[n] = cp[n] ^ hytera_ks[3][kb+n];
                             }
                         } else {
                             /* MOTOTRBO: 7 bytes of keystream per sub-frame (4-way PRGA) */
@@ -1949,6 +2007,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         for (i = 0; i < 24; i++) {
                             h01 += dec24[b][0][i] ^ dec24[b][1][i];
                             h12 += dec24[b][1][i] ^ dec24[b][2][i];
+                            bit_counts[b][i] += dec24[b][0][i]; /* sub-frame-0 bit-freq for chi2 */
                         }
                         scores[b] += (double)(48 - h01 - h12);
                     }
@@ -1973,6 +2032,23 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
 
                 sf_base += n_bursts;
             } /* superframe */
+
+            /* Canonical bit-frequency chi2 term: chi2 / processed_bursts. A
+             * surviving (non-pruned) key always reaches processed_bursts_cpu ==
+             * pcount, so this matches the chi2/n added by every other scorer. */
+            if (processed_bursts_cpu >= 6) {
+                double half_n = (double)processed_bursts_cpu * 0.5;
+                for (b = 0; b < 4; b++) {
+                    double chi2 = 0.0;
+                    int i;
+                    if (pruned[b]) continue;
+                    for (i = 0; i < 24; i++) {
+                        double dev = (double)bit_counts[b][i] - half_n;
+                        chi2 += dev * dev;
+                    }
+                    scores[b] += chi2 / (double)processed_bursts_cpu;
+                }
+            }
 
             /* Update global best only for keys that survived all pruning checks */
             for (b = 0; b < batch; b++) {
@@ -2041,9 +2117,10 @@ static unsigned long long host_unpack_key(unsigned long long packed)
     return packed & 0xFFFFFFFFFFULL;
 }
 
-static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
 {
-    BruteforceEngine *engine = (BruteforceEngine *)arg;
+    CudaDeviceCtx *ctx = (CudaDeviceCtx *)arg;
+    BruteforceEngine *engine = ctx->engine;
     unsigned char *host_payload_flat = NULL;
     unsigned long long host_mi[MAX_CONST_LINES];
     unsigned char host_algid[MAX_CONST_LINES];
@@ -2057,16 +2134,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     /* Pinned host memory for truly async D2H polling */
     struct { unsigned long long keys_tested; unsigned long long best_packed; } *h_poll = NULL;
     cudaError_t cu_err;
-    uint64_t total_keys, chunk_size, offset;
+    uint64_t chunk_size, offset;
     int threadsPerBlock, blocksPerGrid;
     int max_payload_len = 0;
     int bytes_per_line = 27;
     size_t payload_bytes = 0;
     int cuda_sm = 0;
     int use_ilp2 = 0;
-    CpuWorkerCtx *cpu_assist_ctxs = NULL;
-    plat_thread_t *cpu_assist_handles = NULL;
-    int n_cpu_assist = 0;
     unsigned long long last_gpu_kt = 0; /* GPU keys_tested at last poll - for delta-add */
     cudaDeviceProp prop;
 
@@ -2078,11 +2152,23 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     uint64_t global_mi64 = engine->payloads->global_mi;               /* Hytera EP: full 40 bits */
     int mode_policy = 0;
 
-    plat_atomic32_store(&engine->cuda_stage, 0);
+    /* Bind this worker thread to its GPU. The CUDA "current device" is
+     * per-host-thread, so each worker selects its own device before any device
+     * call; all subsequent cudaMemcpyToSymbol / cudaMalloc / kernel launches
+     * then target this device's context in isolation. */
+    cu_err = cudaSetDevice(ctx->device_id);
+    if (cu_err != cudaSuccess) {
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                 "[gpu%d] cudaSetDevice: %s", ctx->device_id, cudaGetErrorString(cu_err));
+        goto cleanup;
+    }
+    if (ctx->publish_status)
+        plat_atomic32_store(&engine->cuda_stage, 0);
     plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
 
-    /* Dictionary phase: test common/default keys before GPU scan */
-    run_dictionary_phase(engine);
+    /* Dictionary phase + CPU-assist + keyspace split are owned by the
+     * orchestrator (cuda_launcher_thread); this worker only scans its claimed
+     * blocks from the shared work-queue. */
     if (plat_atomic32_load(&engine->stop_requested) != 0) goto cleanup;
 
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
@@ -2243,17 +2329,17 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     }
     CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested");
 
-    total_keys = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
-
-    cu_err = cudaGetDeviceProperties(&prop, 0);
+    cu_err = cudaGetDeviceProperties(&prop, ctx->device_id);
     if (cu_err != cudaSuccess) {
-        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaGetDeviceProperties: %s", cudaGetErrorString(cu_err));
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "[gpu%d] cudaGetDeviceProperties: %s", ctx->device_id, cudaGetErrorString(cu_err));
         goto cleanup;
     }
 
-    plat_atomic32_store(&engine->cuda_sm_count, prop.multiProcessorCount);
-    plat_atomic32_store(&engine->cuda_compute_major, prop.major);
-    plat_atomic32_store(&engine->cuda_compute_minor, prop.minor);
+    if (ctx->publish_status) {
+        plat_atomic32_store(&engine->cuda_sm_count, prop.multiProcessorCount);
+        plat_atomic32_store(&engine->cuda_compute_major, prop.major);
+        plat_atomic32_store(&engine->cuda_compute_minor, prop.minor);
+    }
 
     /* ILP-2 kernel: 2 keys/thread, 128 tpb, interleaved shared-memory RC4 chains.
      * It needs 64 KB of dynamic shared memory per block, and both its interleaved
@@ -2354,7 +2440,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         profile.chunk_mult = strict_mode ? 384 : 128;
 
         profile_loaded = load_cuda_launch_profile(&prop, strict_mode, &profile);
-        plat_atomic32_store(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
+        if (ctx->publish_status)
+            plat_atomic32_store(&engine->cuda_profile_cached, profile_loaded ? 1 : 0);
 
         if (!profile_loaded) {
             /* Auto-tune: find the best TPB/BPSM/CHUNK for this specific GPU.
@@ -2376,7 +2463,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             const uint64_t tune_budget_ms = 2500ULL; /* 2.5 s max */
             int skip_benchmark = 0; /* always benchmark when no profile cached */
 
-            plat_atomic32_store(&engine->cuda_stage, 1);
+            if (ctx->publish_status)
+                plat_atomic32_store(&engine->cuda_stage, 1);
 
             if (cudaEventCreate(&ev_start) != cudaSuccess ||
                 cudaEventCreate(&ev_stop)  != cudaSuccess) {
@@ -2477,7 +2565,9 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                                 break;
                             }
                             tuned += cur;
-                            plat_atomic64_store(&engine->keys_tested, (int64_t)tuned);
+                            /* Do not touch engine->keys_tested during autotune:
+                             * with multiple GPUs each worker tunes in parallel and
+                             * absolute stores would clobber the shared counter. */
                             plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
                         }
                         if (skip_benchmark) break;
@@ -2507,9 +2597,11 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
 
         /* ILP-2 kernel is __launch_bounds__(128,4) -- actual tpb is always 128.
          * Report 128 in the status bar so the user sees the real value. */
-        plat_atomic32_store(&engine->cuda_tpb, use_ilp2 ? 128 : profile.threads_per_block);
-        plat_atomic32_store(&engine->cuda_bpsm, profile.blocks_per_sm);
-        plat_atomic32_store(&engine->cuda_chunk_mult, profile.chunk_mult);
+        if (ctx->publish_status) {
+            plat_atomic32_store(&engine->cuda_tpb, use_ilp2 ? 128 : profile.threads_per_block);
+            plat_atomic32_store(&engine->cuda_bpsm, profile.blocks_per_sm);
+            plat_atomic32_store(&engine->cuda_chunk_mult, profile.chunk_mult);
+        }
 
         threadsPerBlock = profile.threads_per_block;
         if (threadsPerBlock < 64) threadsPerBlock = 64;
@@ -2530,98 +2622,18 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         }
     }
 
-    plat_atomic32_store(&engine->cuda_stage, 2);
+    if (ctx->publish_status)
+        plat_atomic32_store(&engine->cuda_stage, 2);
 
-    /* === CPU assist workers: 4-way AVX2 workers cover remaining keyspace ===== *
-     * GPU handles gpu_split_pct% (cfg, default 80); CPU workers cover the rest
-     * using cpu_4way_worker_proc (4-way interleaved KSA + per-superframe PRGA).
-     * Workers are pinned to logical processors 0..n_cpu_assist-1 (P-cores). */
-    {
-        int avail = plat_cpu_count() - 2;
-        if (avail < 1) avail = 1;
-        if (avail > 8) avail = 8;
-        n_cpu_assist = avail;
-
-        int gp = (engine->cfg.gpu_split_pct > 0) ? engine->cfg.gpu_split_pct : 80;
-        if (gp < 50) gp = 50;
-        if (gp > 95) gp = 95;
-        /* CPU-assist: the GPU sweeps the low part of the range; CPU worker threads
-         * sweep the high part in parallel, joined before the final result read.
-         * Re-enabled after fixing the real defect (the result merge): the GPU poll
-         * and final read previously OVERWROTE engine->best with the GPU's best,
-         * discarding a higher-scoring key found on the CPU, so whenever the
-         * recovered key fell in the CPU's share the engine returned a wrong key.
-         * Both now max-merge; the 4-way CPU scorer itself is correct.
-         *
-         * The CPU's share is auto-sized from a quick throughput probe so the much
-         * slower CPU never bottlenecks the GPU. gpu_split_pct is the *maximum* CPU
-         * share (100-gp); the engine uses less when the CPU is slow. */
-        uint64_t gpu_range, cpu_range;
-        {
-            /* Conservative probe: the scalar scorer over all payloads is slower
-             * than the 4-way worker, so cpu_kps is under-estimated and the CPU's
-             * share stays safe (never a bottleneck). */
-            unsigned char kb[5] = { 0x12, 0x34, 0x56, 0x78, 0x9A };
-            const int bench_n = 512;
-            uint64_t t0 = plat_ticks_ms();
-            volatile double acc = 0.0;
-            for (int i = 0; i < bench_n; i++) {
-                kb[4] = (unsigned char)i; kb[3] = (unsigned char)(i >> 8);
-                acc += score_candidate_host(engine->payloads, 0,
-                                            engine->cfg.sample_bytes, kb);
-            }
-            (void)acc;
-            uint64_t dt_ms = plat_ticks_ms() - t0; if (dt_ms == 0) dt_ms = 1;
-            double cpu_kps = ((double)bench_n * 1000.0 / (double)dt_ms)
-                           * (double)n_cpu_assist;
-            const double GPU_RATE_REF = 80.0e6; /* CPU stays a minority contributor */
-            double cpu_frac = cpu_kps / (cpu_kps + GPU_RATE_REF);
-            double cap = (double)(100 - gp) / 100.0;
-            if (cpu_frac > cap) cpu_frac = cap;
-            if (cpu_frac < 0.0) cpu_frac = 0.0;
-            cpu_range = (uint64_t)((double)total_keys * cpu_frac);
-            gpu_range = total_keys - cpu_range;
-        }
-        if (cpu_range > 0 && mode_policy >= 2) {
-            uint64_t cpu_start = engine->cfg.start_key + gpu_range;
-            uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
-
-            cpu_assist_ctxs   = (CpuWorkerCtx *)calloc(n_cpu_assist, sizeof(CpuWorkerCtx));
-            cpu_assist_handles = (plat_thread_t *)calloc(n_cpu_assist, sizeof(plat_thread_t));
-            if (cpu_assist_ctxs && cpu_assist_handles) {
-                for (int t = 0; t < n_cpu_assist; t++) {
-                    cpu_assist_ctxs[t].engine        = engine;
-                    cpu_assist_ctxs[t].start_key     = cpu_start + (uint64_t)t * cpu_chunk;
-                    cpu_assist_ctxs[t].end_key        = (t == n_cpu_assist - 1)
-                                                        ? engine->cfg.start_key + total_keys - 1
-                                                        : cpu_assist_ctxs[t].start_key + cpu_chunk - 1;
-                    cpu_assist_ctxs[t].worker_index  = t;
-                    cpu_assist_ctxs[t].cipher_packs  = host_cipher_packs;
-                    cpu_assist_ctxs[t].payload_count = payload_limit;
-                    cpu_assist_ctxs[t].mode_policy   = mode_policy;
-                    if (plat_thread_create(&cpu_assist_handles[t], cpu_4way_worker_proc,
-                                           &cpu_assist_ctxs[t]) != 0)
-                        { n_cpu_assist = t; break; }
-                }
-                total_keys = gpu_range; /* GPU only covers its share */
-            } else {
-                free(cpu_assist_ctxs);   cpu_assist_ctxs = NULL;
-                free(cpu_assist_handles); cpu_assist_handles = NULL;
-                n_cpu_assist = 0;
-            }
-        } else {
-            n_cpu_assist = 0;
-        }
-    }
-
-    // Batch chunking (TDR-Safe): adjusted by autotune/cache
+    /* Per-device scan reset: zero THIS device's counters only. The shared
+     * engine counters (keys_tested / gpu_keys_tested) and the keyspace/CPU-assist
+     * split are owned by the orchestrator and set once before any worker starts;
+     * resetting them here would clobber sibling GPUs' progress.
+     * (TDR-safe chunking: chunk_size set by autotune/cache above.) */
     {
         CUDA_CHECK(cudaMemset(d_keys_tested, 0, sizeof(unsigned long long)), "cudaMemset keys_tested (scan reset)");
         CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed (scan reset)");
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
-        /* Reset combined counter and GPU baseline so CPU+GPU deltas accumulate correctly */
-        plat_atomic64_store(&engine->keys_tested, 0LL);
-        plat_atomic64_store(&engine->gpu_keys_tested, 0LL);
         last_gpu_kt = 0;
     }
 
@@ -2699,7 +2711,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             } \
         } while(0)
 
-        for (offset = 0; offset < total_keys; offset += chunk_size) {
+        for (;;) {
             /* Pause check */
             while (plat_atomic32_load(&engine->paused) != 0) {
                 plat_event_wait(&engine->pause_event);
@@ -2711,8 +2723,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
                 break;
             }
 
-            uint64_t current_chunk = chunk_size;
-            if (offset + chunk_size > total_keys) current_chunk = total_keys - offset;
+            /* Claim the next block from the shared work-queue. For a single GPU
+             * the cursor is owned by this thread, so the claim sequence is the
+             * same 0, chunk, 2*chunk, ... as the original loop. Faster GPUs in a
+             * multi-GPU run simply claim more blocks -- dynamic load balancing. */
+            uint64_t current_chunk = 0;
+            offset = gpu_wq_claim(ctx->wq, chunk_size, &current_chunk);
+            if (current_chunk == 0) break;   /* keyspace drained */
 
             /* Launch on current stream */
             LAUNCH_CHUNK(active, offset, current_chunk);
@@ -2738,8 +2755,11 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
             have_pending = 1;
             active = 1 - active;
 
-            /* #34: write checkpoint every 30 s so the search can be resumed */
-            if (engine->progress_path[0] != '\0') {
+            /* #34: write checkpoint every 30 s so the search can be resumed.
+             * Single-GPU only: with N GPUs claiming blocks out of order the
+             * scanned region is not contiguous, so the linear `offset=` resume
+             * model does not apply (multi-GPU runs skip mid-run checkpointing). */
+            if (ctx->device_count == 1 && engine->progress_path[0] != '\0') {
                 uint64_t now_ms = plat_ticks_ms();
                 if (now_ms - last_checkpoint_ms >= 30000ULL) {
                     plat_mutex_lock(&engine->lock);
@@ -2775,15 +2795,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         #undef LAUNCH_CHUNK
     }
 
-    /* Wait for CPU assist workers to finish */
-    if (n_cpu_assist > 0 && cpu_assist_handles) {
-        plat_threads_join(cpu_assist_handles, n_cpu_assist);
-        for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_assist_handles[t]);
-    }
-    free(cpu_assist_handles); cpu_assist_handles = NULL;
-    free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
-
-    /* Final result read */
+    /* Final result read (per device; merged into engine->best under the lock).
+     * CPU-assist workers are owned and joined by the orchestrator, not here. */
     {
         unsigned long long final_k = 0, final_bp = 0;
         CUDA_CHECK(cudaMemcpy(&final_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
@@ -2806,28 +2819,14 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         }
     }
 
-    if (plat_atomic32_load(&engine->stop_requested) == 0) {
-        plat_atomic32_store(&engine->search_completed, 1);
-        /* #34: search finished cleanly - delete the progress file */
-        if (engine->progress_path[0] != '\0') {
-            plat_delete_file(engine->progress_path);
-            engine->progress_path[0] = '\0';
-        }
-    }
+    /* search_completed flag + checkpoint deletion are set by the orchestrator
+     * once every GPU worker has joined (see cuda_launcher_thread). */
 
 cleanup:
-    /* Stop and wait for CPU assist workers if still running (e.g. CUDA error path).
-     * Signal stop first: on an error-path goto, stop_requested may not be set, and
-     * the workers only poll it every 4096 keys, so a blind join could hang for the
-     * duration of the CPU's whole keyspace share. */
-    if (n_cpu_assist > 0 && cpu_assist_handles) {
-        plat_atomic32_store(&engine->stop_requested, 1);
-        plat_event_set(&engine->pause_event);
-        plat_threads_join(cpu_assist_handles, n_cpu_assist);
-        for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_assist_handles[t]);
-        free(cpu_assist_handles); cpu_assist_handles = NULL;
-        free(cpu_assist_ctxs);    cpu_assist_ctxs = NULL;
-    }
+    /* Per-device teardown only. If this worker hit a CUDA error it has set
+     * engine->cuda_error and stop_requested is not necessarily set; the
+     * orchestrator detects the early return, signals the other workers, and
+     * owns the running/stage flags + CPU-assist join. */
     if (d_keys_tested) cudaFree(d_keys_tested);
     if (d_best_packed) cudaFree(d_best_packed);
     if (d_stop_requested) cudaFree(d_stop_requested);
@@ -2837,14 +2836,233 @@ cleanup:
     if (compute_stream2) cudaStreamDestroy(compute_stream2);
     if (query_stream) cudaStreamDestroy(query_stream);
 
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
+    PLAT_THREAD_RETURN;
+}
+
+#undef CUDA_CHECK
+
+/* === Multi-GPU orchestrator ============================================= *
+ * Runs once on the engine's launcher thread. Does the device-independent setup
+ * (dictionary phase, mode detection, keyspace/CPU-assist split), enumerates the
+ * GPUs to use (honoring cfg.gpu_device_count), then fans out one
+ * cuda_device_worker per GPU sharing a single work-queue. Faster GPUs claim
+ * more blocks, so an asymmetric multi-GPU rig self-balances. For a single GPU
+ * this collapses to the exact legacy flow: one worker, cursor owned by that
+ * thread, identical claim sequence -- no hot-path or behavioral change. */
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
+{
+    BruteforceEngine *engine = (BruteforceEngine *)arg;
+
+    GpuWorkQueue   wq;
+    CudaDeviceCtx *dctx = NULL;
+    plat_thread_t *dhandles = NULL;
+    int            n_gpu = 1, spawned = 0;
+
+    /* CPU-assist is orchestrator-owned: it needs the shared keyspace split
+     * computed before any GPU worker starts scanning the work-queue. */
+    CpuWorkerCtx  *cpu_ctxs = NULL;
+    plat_thread_t *cpu_handles = NULL;
+    int            n_cpu_assist = 0;
+    unsigned char  host_cipher_packs[MAX_CONST_LINES * DMR_CIPHER_PACK_BYTES];
+
+    int      payload_limit = engine->cfg.sample_lines;
+    uint64_t total_keys = (engine->cfg.end_key - engine->cfg.start_key) + 1ull;
+    uint64_t gpu_range = 0; /* GPU pool's keyspace share; set after the CPU-assist split */
+    int      mode_policy = 0;
+
+    plat_atomic32_store(&engine->cuda_stage, 0);
+    plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
+
+    /* Dictionary phase: test common/default keys before the GPU scan. */
+    run_dictionary_phase(engine);
+    if (plat_atomic32_load(&engine->stop_requested) != 0) goto done;
+
+    if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
+    if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
+    if (payload_limit < 0) payload_limit = 0;
+
+    /* Detect mode_policy (host-side, device-independent) to decide CPU-assist.
+     * Mirrors the per-device detection inside cuda_device_worker. */
+    {
+        int mi_rc4 = 0, mi_hyt = 0;
+        uint8_t g_alg = engine->payloads->global_algid;
+        for (int i = 0; i < payload_limit && (size_t)i < engine->payloads->count; ++i) {
+            int     has_mi = engine->payloads->items[i].has_mi ? 1 : 0;
+            uint8_t alg    = engine->payloads->items[i].has_algid
+                             ? engine->payloads->items[i].algid : g_alg;
+            if (has_mi && is_rc4_alg_host(alg))       mi_rc4++;
+            if (has_mi && is_hytera_ep_alg_host(alg)) mi_hyt++;
+        }
+        if (payload_limit > 0 && mi_hyt * 10 >= payload_limit * 9)      mode_policy = 4;
+        else if (payload_limit > 0 && mi_rc4 * 10 >= payload_limit * 9) mode_policy = 3;
+        else if (payload_limit > 0 && mi_rc4 * 3 >= payload_limit)      mode_policy = 2;
+        else if (!engine->payloads->has_global_mi && mi_rc4 == 0)       mode_policy = 1;
+    }
+
+    /* Enumerate GPUs to use (cap to cfg.gpu_device_count when > 0). */
+    {
+        int devCount = 0;
+        if (cudaGetDeviceCount(&devCount) != cudaSuccess || devCount < 1) devCount = 1;
+        n_gpu = devCount;
+        if (engine->cfg.gpu_device_count > 0 && engine->cfg.gpu_device_count < n_gpu)
+            n_gpu = engine->cfg.gpu_device_count;
+        if (n_gpu < 1) n_gpu = 1;
+    }
+    plat_atomic32_store(&engine->cuda_devices_active, n_gpu);
+
+    /* Reflect the GPU count in the status name ("Nx <device 0 name>"). */
+    if (n_gpu > 1 && engine->cuda_device_name[0]) {
+        char base[128];
+        strncpy(base, engine->cuda_device_name, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
+        snprintf(engine->cuda_device_name, sizeof(engine->cuda_device_name), "%dx %s", n_gpu, base);
+    }
+
+    /* Reset shared counters once, before any worker starts. */
+    plat_atomic64_store(&engine->keys_tested, 0LL);
+    plat_atomic64_store(&engine->gpu_keys_tested, 0LL);
+
+    /* === CPU-assist split (same probe/sizing as the legacy single-GPU path).
+     * The GPU pool sweeps [start, start+gpu_range); CPU workers sweep the high
+     * part in parallel. CPU share is capped at (100 - gpu_split_pct)% and
+     * auto-shrunk from a throughput probe so it never bottlenecks the GPUs. */
+    gpu_range = total_keys;
+    if (mode_policy >= 2) {
+        memset(host_cipher_packs, 0, sizeof(host_cipher_packs));
+        precompute_cipher_packs(engine->payloads, host_cipher_packs, payload_limit);
+
+        int avail = plat_cpu_count() - 2;
+        if (avail < 1) avail = 1;
+        if (avail > 8) avail = 8;
+        n_cpu_assist = avail;
+
+        int gp = (engine->cfg.gpu_split_pct > 0) ? engine->cfg.gpu_split_pct : 80;
+        if (gp < 50) gp = 50;
+        if (gp > 95) gp = 95;
+
+        uint64_t cpu_range;
+        {
+            unsigned char kb[5] = { 0x12, 0x34, 0x56, 0x78, 0x9A };
+            const int bench_n = 512;
+            uint64_t t0 = plat_ticks_ms();
+            volatile double acc = 0.0;
+            for (int i = 0; i < bench_n; i++) {
+                kb[4] = (unsigned char)i; kb[3] = (unsigned char)(i >> 8);
+                acc += score_candidate_host(engine->payloads, 0, engine->cfg.sample_bytes, kb);
+            }
+            (void)acc;
+            uint64_t dt_ms = plat_ticks_ms() - t0; if (dt_ms == 0) dt_ms = 1;
+            double cpu_kps = ((double)bench_n * 1000.0 / (double)dt_ms) * (double)n_cpu_assist;
+            /* Scale the GPU reference rate by the GPU count so the CPU share
+             * shrinks proportionally when more GPUs are present. */
+            const double GPU_RATE_REF = 80.0e6 * (double)n_gpu;
+            double cpu_frac = cpu_kps / (cpu_kps + GPU_RATE_REF);
+            double cap = (double)(100 - gp) / 100.0;
+            if (cpu_frac > cap) cpu_frac = cap;
+            if (cpu_frac < 0.0) cpu_frac = 0.0;
+            cpu_range = (uint64_t)((double)total_keys * cpu_frac);
+            gpu_range = total_keys - cpu_range;
+        }
+
+        if (cpu_range > 0) {
+            uint64_t cpu_start = engine->cfg.start_key + gpu_range;
+            uint64_t cpu_chunk = cpu_range / (uint64_t)n_cpu_assist;
+            cpu_ctxs    = (CpuWorkerCtx *)calloc((size_t)n_cpu_assist, sizeof(CpuWorkerCtx));
+            cpu_handles = (plat_thread_t *)calloc((size_t)n_cpu_assist, sizeof(plat_thread_t));
+            if (cpu_ctxs && cpu_handles) {
+                for (int t = 0; t < n_cpu_assist; t++) {
+                    cpu_ctxs[t].engine        = engine;
+                    cpu_ctxs[t].start_key     = cpu_start + (uint64_t)t * cpu_chunk;
+                    cpu_ctxs[t].end_key       = (t == n_cpu_assist - 1)
+                                                ? engine->cfg.start_key + total_keys - 1
+                                                : cpu_ctxs[t].start_key + cpu_chunk - 1;
+                    cpu_ctxs[t].worker_index  = t;
+                    cpu_ctxs[t].cipher_packs  = host_cipher_packs;
+                    cpu_ctxs[t].payload_count = payload_limit;
+                    cpu_ctxs[t].mode_policy   = mode_policy;
+                    if (plat_thread_create(&cpu_handles[t], cpu_4way_worker_proc, &cpu_ctxs[t]) != 0) {
+                        n_cpu_assist = t;
+                        break;
+                    }
+                }
+            } else {
+                free(cpu_ctxs);    cpu_ctxs = NULL;
+                free(cpu_handles); cpu_handles = NULL;
+                n_cpu_assist = 0;
+            }
+        } else {
+            n_cpu_assist = 0;
+        }
+    }
+
+    /* === Fan out one worker per GPU over the shared work-queue. */
+    plat_atomic64_store(&wq.next, 0LL);
+    wq.total = gpu_range;
+
+    dctx     = (CudaDeviceCtx *)calloc((size_t)n_gpu, sizeof(CudaDeviceCtx));
+    dhandles = (plat_thread_t *)calloc((size_t)n_gpu, sizeof(plat_thread_t));
+    if (dctx == NULL || dhandles == NULL) {
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "OOM allocating GPU worker contexts");
+        goto join_cpu;
+    }
+    for (int d = 0; d < n_gpu; d++) {
+        dctx[d].engine         = engine;
+        dctx[d].device_id      = d;
+        dctx[d].device_count   = n_gpu;
+        dctx[d].publish_status = (d == 0) ? 1 : 0;
+        dctx[d].wq             = &wq;
+        if (plat_thread_create(&dhandles[d], cuda_device_worker, &dctx[d]) != 0) {
+            if (d == 0)
+                snprintf(engine->cuda_error, sizeof(engine->cuda_error),
+                         "Failed to create GPU worker thread");
+            break;
+        }
+        spawned++;
+    }
+
+    /* Join GPU workers (each merges its best into engine->best under the lock). */
+    for (int d = 0; d < spawned; d++) {
+        plat_thread_join(dhandles[d]);
+        plat_thread_close(dhandles[d]);
+    }
+
+join_cpu:
+    /* Join CPU-assist workers. On the error path (no GPU worker started) signal
+     * stop first so they don't run their whole keyspace share before joining. */
+    if (n_cpu_assist > 0 && cpu_handles) {
+        if (spawned == 0) {
+            plat_atomic32_store(&engine->stop_requested, 1);
+            plat_event_set(&engine->pause_event);
+        }
+        plat_threads_join(cpu_handles, n_cpu_assist);
+        for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_handles[t]);
+    }
+    free(cpu_handles); cpu_handles = NULL;
+    free(cpu_ctxs);    cpu_ctxs = NULL;
+    free(dhandles);    dhandles = NULL;
+    free(dctx);        dctx = NULL;
+
+    /* Clean completion: only when at least one GPU ran, no stop was requested,
+     * and no worker reported a CUDA error (matches the legacy single-GPU
+     * semantics where a kernel error left search_completed = 0). */
+    if (spawned > 0
+        && plat_atomic32_load(&engine->stop_requested) == 0
+        && engine->cuda_error[0] == '\0') {
+        plat_atomic32_store(&engine->search_completed, 1);
+        if (engine->progress_path[0] != '\0') {
+            plat_delete_file(engine->progress_path);
+            engine->progress_path[0] = '\0';
+        }
+    }
+
+done:
     plat_atomic32_store(&engine->cuda_stage, 3);
     plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
     plat_atomic32_store(&engine->running, 0);
     plat_event_set(&engine->pause_event);
     PLAT_THREAD_RETURN;
 }
-
-#undef CUDA_CHECK
 
 // ==== CPU FALLBACK WORKER (used when no CUDA GPU is available) ====
 
@@ -3209,6 +3427,7 @@ int bruteforce_start(
     plat_atomic32_store(&engine->cuda_bpsm, 0);
     plat_atomic32_store(&engine->cuda_chunk_mult, 0);
     plat_atomic32_store(&engine->cuda_sm_count, 0);
+    plat_atomic32_store(&engine->cuda_devices_active, 0);
     plat_atomic32_store(&engine->cuda_compute_major, 0);
     plat_atomic32_store(&engine->cuda_compute_minor, 0);
     plat_atomic64_store(&engine->cuda_last_update_ms, (int64_t)plat_ticks_ms());
@@ -3554,10 +3773,10 @@ static int is_hytera_ep_alg_host(uint8_t alg)
 
 static void compute_hytera_ks_cpu(
     const unsigned char key5[5], uint64_t mi,
-    unsigned char ks_out[21])
+    unsigned char ks_out[HYTERA_KS_BYTES])
 {
     /* Single source of truth shared with tests; matches compute_hytera_ks_dev. */
-    hytera_compute_ks(key5, mi, ks_out, 21);
+    hytera_compute_ks(key5, mi, ks_out, HYTERA_KS_BYTES);
 }
 
 static void rc4_init_kmi_host(RC4_CTX *ctx, const unsigned char key[5], uint32_t mi)
@@ -3710,12 +3929,13 @@ static double score_candidate_host(
             uint64_t mi = payloads->items[sf_base].has_mi
                           ? payloads->items[sf_base].mi
                           : payloads->global_mi;
-            unsigned char ks[21];
+            unsigned char ks[HYTERA_KS_BYTES];
             compute_hytera_ks_cpu(key, mi, ks);
 
             for (size_t p = sf_base; p < sf_base + 6 && p < line_count; ++p) {
                 const PayloadLine *line = &payloads->items[p];
                 if (line->len < 33) continue;
+                int burst_pos = (int)(p - sf_base);
 
                 /* Precomputed cipher packs for this line would require precompute_cipher_packs_host.
                  * Instead, re-use score_burst_correct_host but substitute Hytera ks for the RC4 output.
@@ -3753,9 +3973,12 @@ static double score_candidate_host(
                         for (int i2 = 0; i2 < 49; ++i2)
                             cipher7[i2 >> 3] |= (unsigned char)((bits49[i2] & 1u) << (7 - (i2 & 7)));
                     }
-                    /* Hytera EP decrypt: XOR with ks[sf*7..sf*7+6] */
+                    /* Hytera EP decrypt: keystream consumed linearly across the
+                     * superframe -- AMBE frame (burst_pos*3 + sf) uses bytes
+                     * [burst_pos*21 + sf*7 ..]. */
                     unsigned char plain7[7];
-                    for (int j = 0; j < 7; j++) plain7[j] = cipher7[j] ^ ks[sf*7 + j];
+                    int kb = burst_pos * 21 + sf * 7;
+                    for (int j = 0; j < 7; j++) plain7[j] = cipher7[j] ^ ks[kb + j];
                     for (int i2 = 0; i2 < 24; ++i2)
                         dec24[sf][i2] = (unsigned char)((plain7[i2 >> 3] >> (7 - (i2 & 7))) & 1u);
                 }

@@ -133,8 +133,11 @@ inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[
 
 /* Hytera EP keystream: RC4 KSA with key5 (drop=0), then ks[i]=rc4[i]^kiv[i%5].
  * Matches DSD-FME hytera_enhanced_rc4_setup: kiv[i]=key5[i]^MI[i] for all 5 bytes,
- * MI is 40-bit big-endian (MI[0] = bits 39..32). Mirrors include/hytera_ks.h. */
-inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[21])
+ * MI is 40-bit big-endian (MI[0] = bits 39..32). Mirrors include/hytera_ks.h.
+ * One keystream per superframe, consumed linearly across the 18 AMBE frames:
+ * frame (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. Needs 126 bytes. */
+#define HYTERA_KS_BYTES 126
+inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[HYTERA_KS_BYTES])
 {
     uchar kiv[5];
     kiv[0] = key5[0] ^ (uchar)((mi >> 32) & 0xFFu);
@@ -147,7 +150,7 @@ inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[21])
     rc4_ksa5(&rc4, key5);
 
     uchar ri = 0, rj = 0;
-    for (int idx = 0; idx < 21; ++idx) {
+    for (int idx = 0; idx < HYTERA_KS_BYTES; ++idx) {
         ri = (uchar)(ri + 1);
         rj = (uchar)(rj + rc4.S[ri]);
         uchar t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
@@ -285,18 +288,21 @@ __kernel void kernel_hytera(
         ulong mi = global_mi;   /* Hytera EP uses the full 40-bit MI */
         if (meta_flags[sf_base] & 0x1u) mi = line_mi[sf_base];
 
-        uchar ks[21];
+        uchar ks[HYTERA_KS_BYTES];
         compute_hytera_ks(key, mi, ks);
 
         for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
             int p = sf_base + burst_pos;
             if (p >= payload_count) break;
 
+            /* Keystream consumed linearly across the superframe: AMBE frame
+             * (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. */
+            int kb = burst_pos * 21;
             __global const uchar *cp = cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
             uchar p0[3], p1[3], p2[3];
-            p0[0]=cp[0]^ks[0];  p0[1]=cp[1]^ks[1];  p0[2]=cp[2]^ks[2];
-            p1[0]=cp[7]^ks[7];  p1[1]=cp[8]^ks[8];  p1[2]=cp[9]^ks[9];
-            p2[0]=cp[14]^ks[14];p2[1]=cp[15]^ks[15];p2[2]=cp[16]^ks[16];
+            p0[0]=cp[0]^ks[kb+0];  p0[1]=cp[1]^ks[kb+1];  p0[2]=cp[2]^ks[kb+2];
+            p1[0]=cp[7]^ks[kb+7];  p1[1]=cp[8]^ks[kb+8];  p1[2]=cp[9]^ks[kb+9];
+            p2[0]=cp[14]^ks[kb+14];p2[1]=cp[15]^ks[kb+15];p2[2]=cp[16]^ks[kb+16];
 
             int h01 = popc8(p0[0]^p1[0]) + popc8(p0[1]^p1[1]) + popc8(p0[2]^p1[2]);
             int h12 = popc8(p1[0]^p2[0]) + popc8(p1[1]^p2[1]) + popc8(p1[2]^p2[2]);
