@@ -275,10 +275,18 @@ build.bat
 
 Output: `bin\dmrcrack.exe`. The script auto-detects Visual Studio via `vswhere.exe`. Targets sm_75/86/89 natively with a PTX fallback for newer GPUs (JIT-compiled on first run).
 
+### Headless CLI / other backends
+
+```bat
+build_cli.bat            # → bin\dmrcrack-cli.exe       (NVIDIA CUDA, default)
+build_cli.bat opencl     # → bin\dmrcrack-cli-cl.exe    (portable OpenCL)
+build_cli.bat cpu        # → bin\dmrcrack-cli-cpu.exe   (CPU-only, no toolkit)
+```
+
 ### Test tools (MSVC, no CUDA)
 
 ```bat
-build_test.bat       # → bin\test_strict_score.exe
+build_tests.bat          # build all host tests (or: strict | canonical | hytera | silence | dsp)
 ```
 
 ### Installer
