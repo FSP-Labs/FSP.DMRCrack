@@ -234,7 +234,9 @@ static double score_packed_cpu(const unsigned char *packs,
 {
     double total = 0.0;
     int processed = 0;
+    long bit_counts[24];
     size_t sf_base;
+    memset(bit_counts, 0, sizeof(bit_counts));
 
     for (sf_base = 0; sf_base < line_count; sf_base += 6) {
         uint32_t mi = (uint32_t)(payloads->items[sf_base].has_mi
@@ -274,6 +276,10 @@ static double score_packed_cpu(const unsigned char *packs,
             h12 = popcount_byte(d1[0] ^ d2[0]) + popcount_byte(d1[1] ^ d2[1])
                 + popcount_byte(d1[2] ^ d2[2]);
             total += (double)(48 - h01 - h12);
+            { int _b;
+              for (_b = 0; _b < 8; ++_b) bit_counts[_b]      += (d0[0] >> (7 - _b)) & 1;
+              for (_b = 0; _b < 8; ++_b) bit_counts[8 + _b]  += (d0[1] >> (7 - _b)) & 1;
+              for (_b = 0; _b < 8; ++_b) bit_counts[16 + _b] += (d0[2] >> (7 - _b)) & 1; }
             processed++;
 
             if (prune) {
@@ -282,6 +288,14 @@ static double score_packed_cpu(const unsigned char *packs,
                 if (total < floor_v) return -DBL_MAX;
             }
         }
+    }
+    /* Canonical chi2/processed_bursts bit-frequency term (matches the GPU/OpenCL/
+     * host scorers). Pruning above stays Hamming-only, exactly like the kernels. */
+    if (processed >= 6) {
+        double half_n = (double)processed * 0.5, chi2 = 0.0;
+        int _b;
+        for (_b = 0; _b < 24; ++_b) { double dev = (double)bit_counts[_b] - half_n; chi2 += dev * dev; }
+        total += chi2 / (double)processed;
     }
     return total;
 }
@@ -295,7 +309,8 @@ static double score_burst_correct_cpu(
     const unsigned char *payload33,
     const unsigned char key5[5],
     uint32_t mi,
-    int burst_pos)
+    int burst_pos,
+    unsigned char sf0_out[24])
 {
     unsigned char kmi9[9];
     int sf, i, j, bi;
@@ -366,6 +381,10 @@ static double score_burst_correct_cpu(
         }
     }
 
+    /* Expose sub-frame-0 bits (C0+C1) so the caller can accumulate the canonical
+     * chi2 bit-frequency term across bursts. */
+    if (sf0_out) { for (i = 0; i < 24; ++i) sf0_out[i] = dec24[0][i]; }
+
     /* Inter-frame Hamming on first 24 bits (C0+C1) */
     {
         int h01 = 0, h12 = 0;
@@ -406,15 +425,27 @@ static double score_candidate(
         }
     }
 
-    /* Correct pipeline path for payloads with MI */
+    /* Correct pipeline path for payloads with MI. Canonical metric:
+     * Hamming + chi2/processed_bursts (matches the GPU/OpenCL/host scorers). */
     if (mode_policy >= 2) {
+        long bit_counts[24];
+        int processed = 0, b;
+        memset(bit_counts, 0, sizeof(bit_counts));
         for (line_idx = 0; line_idx < line_count; ++line_idx) {
             const PayloadLine *line = &payloads->items[line_idx];
             uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
             int burst_pos = (int)(line_idx % 6);
             if (line->len >= 33) {
-                score += score_burst_correct_cpu(line->data, key, mi, burst_pos);
+                unsigned char sf0[24];
+                score += score_burst_correct_cpu(line->data, key, mi, burst_pos, sf0);
+                for (b = 0; b < 24; ++b) bit_counts[b] += sf0[b];
+                processed++;
             }
+        }
+        if (processed >= 6) {
+            double half_n = (double)processed * 0.5, chi2 = 0.0;
+            for (b = 0; b < 24; ++b) { double dev = (double)bit_counts[b] - half_n; chi2 += dev * dev; }
+            score += chi2 / (double)processed;
         }
         return score;
     }

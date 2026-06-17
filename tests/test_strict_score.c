@@ -104,7 +104,9 @@ static void compute_cipher_packs(const PayloadSet *payloads, unsigned char *out,
 static float score_strict(const PayloadSet *payloads, const unsigned char *cipher_packs,
                           int payload_count, unsigned char key5[5]) {
     float total_score = 0.0f;
-    int sf_base, burst_pos;
+    int sf_base, burst_pos, processed = 0;
+    long bit_counts[24];
+    memset(bit_counts, 0, sizeof(bit_counts));
     for (sf_base = 0; sf_base < payload_count; sf_base += 6) {
         uint32_t mi = payloads->items[sf_base].has_mi ? payloads->items[sf_base].mi : 0;
         unsigned char kmi9[9];
@@ -137,7 +139,19 @@ static float score_strict(const PayloadSet *payloads, const unsigned char *ciphe
             h01 = popcount8(p0[0] ^ p1[0]) + popcount8(p0[1] ^ p1[1]) + popcount8(p0[2] ^ p1[2]);
             h12 = popcount8(p1[0] ^ p2[0]) + popcount8(p1[1] ^ p2[1]) + popcount8(p1[2] ^ p2[2]);
             total_score += (float)(48 - h01 - h12);
+            { int _b;
+              for (_b = 0; _b < 8; ++_b) bit_counts[_b]      += (p0[0] >> (7 - _b)) & 1;
+              for (_b = 0; _b < 8; ++_b) bit_counts[8 + _b]  += (p0[1] >> (7 - _b)) & 1;
+              for (_b = 0; _b < 8; ++_b) bit_counts[16 + _b] += (p0[2] >> (7 - _b)) & 1; }
+            processed++;
         }
+    }
+    /* Canonical chi2/processed_bursts term (matches the GPU/OpenCL/host scorers). */
+    if (processed >= 6) {
+        float half_n = (float)processed * 0.5f, chi2 = 0.0f;
+        int _b;
+        for (_b = 0; _b < 24; ++_b) { float dev = (float)bit_counts[_b] - half_n; chi2 += dev * dev; }
+        total_score += chi2 / (float)processed;
     }
     return total_score;
 }
