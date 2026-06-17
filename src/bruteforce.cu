@@ -276,6 +276,17 @@ __device__ __forceinline__ void compute_hytera_ks_dev(
     }
 }
 
+/* Device mirror of hytera_ks_byte (include/hytera_ks.h): extract 8 keystream
+ * bits at MSB-first bit offset `bit_off`. Hytera EP consumes 49 bits/frame with
+ * no byte alignment, so AMBE frame f decrypts cipher byte n via bit offset
+ * f*49 + n*8. */
+__device__ __forceinline__ unsigned char hytera_ks_byte_dev(const unsigned char *ks, int bit_off)
+{
+    int B = bit_off >> 3;
+    int s = bit_off & 7;
+    return (unsigned char)(s ? ((ks[B] << s) | (ks[B + 1] >> (8 - s))) : ks[B]);
+}
+
 /* KPA pre-filter macros - used inside kernel loops.
  * The strict kernel uses goto next_key; the ILP-2 kernel uses pruned flags. */
 #define KPA_PREFILTER(key5_ptr)                                                   \
@@ -1092,14 +1103,16 @@ void bruteforce_kernel_hytera(
                 int p = sf_base + burst_pos;
                 if (p >= payload_count) break;
 
-                /* Keystream is consumed linearly across the superframe: AMBE frame
-                 * (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. */
-                int kb = burst_pos * 21;   /* burst_pos*3 frames * 7 bytes */
+                /* Keystream is consumed as a BITSTREAM, 49 bits per AMBE frame,
+                 * with NO 7-bit skip (Hytera EP != MOTOTRBO). AMBE frame
+                 * f = burst_pos*3 + sf consumes bits [f*49 ..]; cipher byte n of
+                 * a sub-frame uses bits [f*49 + n*8 ..]. */
+                int f0 = burst_pos * 3, f1 = f0 + 1, f2 = f0 + 2;
                 const unsigned char *cp = d_const_cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
                 unsigned char p0[3], p1[3], p2[3];
-                p0[0]=cp[0]^ks[kb+0];  p0[1]=cp[1]^ks[kb+1];  p0[2]=cp[2]^ks[kb+2];
-                p1[0]=cp[7]^ks[kb+7];  p1[1]=cp[8]^ks[kb+8];  p1[2]=cp[9]^ks[kb+9];
-                p2[0]=cp[14]^ks[kb+14];p2[1]=cp[15]^ks[kb+15];p2[2]=cp[16]^ks[kb+16];
+                p0[0]=cp[0] ^hytera_ks_byte_dev(ks,f0*49+0); p0[1]=cp[1] ^hytera_ks_byte_dev(ks,f0*49+8); p0[2]=cp[2] ^hytera_ks_byte_dev(ks,f0*49+16);
+                p1[0]=cp[7] ^hytera_ks_byte_dev(ks,f1*49+0); p1[1]=cp[8] ^hytera_ks_byte_dev(ks,f1*49+8); p1[2]=cp[9] ^hytera_ks_byte_dev(ks,f1*49+16);
+                p2[0]=cp[14]^hytera_ks_byte_dev(ks,f2*49+0); p2[1]=cp[15]^hytera_ks_byte_dev(ks,f2*49+8); p2[2]=cp[16]^hytera_ks_byte_dev(ks,f2*49+16);
 
                 int h01 = __popc((unsigned int)(p0[0]^p1[0]))
                         + __popc((unsigned int)(p0[1]^p1[1]))
@@ -1958,15 +1971,16 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         int i;
 
                         if (ctx->mode_policy == 4) {
-                            /* Hytera EP: keystream is consumed linearly across the
-                             * superframe -- AMBE frame (burst*3 + sf) uses bytes
-                             * [burst*21 + sf*7 ..]. */
-                            int kb = burst * 21 + sf * 7;
+                            /* Hytera EP: keystream consumed as a BITSTREAM, 49 bits
+                             * per AMBE frame, NO 7-bit skip. Frame f = burst*3 + sf
+                             * decrypts cipher byte n at bit offset f*49 + n*8. */
+                            int f = burst * 3 + sf;
                             for (n = 0; n < 7; n++) {
-                                pa[n] = cp[n] ^ hytera_ks[0][kb+n];
-                                pb[n] = cp[n] ^ hytera_ks[1][kb+n];
-                                pc[n] = cp[n] ^ hytera_ks[2][kb+n];
-                                pd[n] = cp[n] ^ hytera_ks[3][kb+n];
+                                int bo = f * 49 + n * 8;
+                                pa[n] = cp[n] ^ hytera_ks_byte(hytera_ks[0], bo);
+                                pb[n] = cp[n] ^ hytera_ks_byte(hytera_ks[1], bo);
+                                pc[n] = cp[n] ^ hytera_ks_byte(hytera_ks[2], bo);
+                                pd[n] = cp[n] ^ hytera_ks_byte(hytera_ks[3], bo);
                             }
                         } else {
                             /* MOTOTRBO: 7 bytes of keystream per sub-frame (4-way PRGA) */
@@ -3973,12 +3987,12 @@ static double score_candidate_host(
                         for (int i2 = 0; i2 < 49; ++i2)
                             cipher7[i2 >> 3] |= (unsigned char)((bits49[i2] & 1u) << (7 - (i2 & 7)));
                     }
-                    /* Hytera EP decrypt: keystream consumed linearly across the
-                     * superframe -- AMBE frame (burst_pos*3 + sf) uses bytes
-                     * [burst_pos*21 + sf*7 ..]. */
+                    /* Hytera EP decrypt: keystream consumed as a BITSTREAM, 49 bits
+                     * per AMBE frame, NO 7-bit skip. Frame f = burst_pos*3 + sf
+                     * decrypts cipher byte j at bit offset f*49 + j*8. */
                     unsigned char plain7[7];
-                    int kb = burst_pos * 21 + sf * 7;
-                    for (int j = 0; j < 7; j++) plain7[j] = cipher7[j] ^ ks[kb + j];
+                    int f = burst_pos * 3 + sf;
+                    for (int j = 0; j < 7; j++) plain7[j] = cipher7[j] ^ hytera_ks_byte(ks, f * 49 + j * 8);
                     for (int i2 = 0; i2 < 24; ++i2)
                         dec24[sf][i2] = (unsigned char)((plain7[i2 >> 3] >> (7 - (i2 & 7))) & 1u);
                 }

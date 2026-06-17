@@ -160,6 +160,16 @@ inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[HYTERA
 
 inline int popc8(uchar b) { return popcount((uint)b); }
 
+/* Extract 8 keystream bits at MSB-first bit offset bit_off (mirrors
+ * hytera_ks_byte in include/hytera_ks.h). Hytera EP consumes 49 bits/frame with
+ * no byte alignment, so frame f decrypts cipher byte n at bit offset f*49+n*8. */
+inline uchar hytera_ks_byte(const uchar *ks, int bit_off)
+{
+    int B = bit_off >> 3;
+    int s = bit_off & 7;
+    return (uchar)(s ? ((ks[B] << s) | (ks[B + 1] >> (8 - s))) : ks[B]);
+}
+
 #define BCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((uint)(bit)) << (((b)&1u)<<4)
 #define BCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
 
@@ -295,14 +305,15 @@ __kernel void kernel_hytera(
             int p = sf_base + burst_pos;
             if (p >= payload_count) break;
 
-            /* Keystream consumed linearly across the superframe: AMBE frame
-             * (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. */
-            int kb = burst_pos * 21;
+            /* Keystream consumed as a BITSTREAM, 49 bits per AMBE frame, NO 7-bit
+             * skip (Hytera EP != MOTOTRBO). Frame f = burst_pos*3 + sf decrypts
+             * cipher byte n at bit offset f*49 + n*8. */
+            int f0 = burst_pos * 3, f1 = f0 + 1, f2 = f0 + 2;
             __global const uchar *cp = cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
             uchar p0[3], p1[3], p2[3];
-            p0[0]=cp[0]^ks[kb+0];  p0[1]=cp[1]^ks[kb+1];  p0[2]=cp[2]^ks[kb+2];
-            p1[0]=cp[7]^ks[kb+7];  p1[1]=cp[8]^ks[kb+8];  p1[2]=cp[9]^ks[kb+9];
-            p2[0]=cp[14]^ks[kb+14];p2[1]=cp[15]^ks[kb+15];p2[2]=cp[16]^ks[kb+16];
+            p0[0]=cp[0] ^hytera_ks_byte(ks,f0*49+0); p0[1]=cp[1] ^hytera_ks_byte(ks,f0*49+8); p0[2]=cp[2] ^hytera_ks_byte(ks,f0*49+16);
+            p1[0]=cp[7] ^hytera_ks_byte(ks,f1*49+0); p1[1]=cp[8] ^hytera_ks_byte(ks,f1*49+8); p1[2]=cp[9] ^hytera_ks_byte(ks,f1*49+16);
+            p2[0]=cp[14]^hytera_ks_byte(ks,f2*49+0); p2[1]=cp[15]^hytera_ks_byte(ks,f2*49+8); p2[2]=cp[16]^hytera_ks_byte(ks,f2*49+16);
 
             int h01 = popc8(p0[0]^p1[0]) + popc8(p0[1]^p1[1]) + popc8(p0[2]^p1[2]);
             int h12 = popc8(p1[0]^p2[0]) + popc8(p1[1]^p2[1]) + popc8(p1[2]^p2[2]);

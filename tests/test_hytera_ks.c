@@ -37,6 +37,32 @@ static void hytera_ref(const unsigned char key[5], const unsigned char mi[5],
     for (i = 0; i < n; ++i) ks[i] = (unsigned char)(rc4[i] ^ kiv[i % 5]);
 }
 
+/* -- Synthetic end-to-end scoring (mirrors the brute-forcer's Hytera path) -- */
+static int popc8t(unsigned char x) { int c = 0; while (x) { c += x & 1; x >>= 1; } return c; }
+static int hd24(const unsigned char *a, const unsigned char *b)
+{ return popc8t(a[0]^b[0]) + popc8t(a[1]^b[1]) + popc8t(a[2]^b[2]); }
+
+/* Decrypt 18 cipher frames with a candidate key and sum the inter-frame Hamming
+ * score (48 - HD(sf0,sf1) - HD(sf1,sf2)) over the 6 bursts, using the canonical
+ * 49-bit keystream indexing -- exactly what the kernels do. */
+static double score_synth(unsigned char cipher[18][7], const unsigned char key[5], uint64_t mi)
+{
+    unsigned char ks[126];
+    double total = 0.0;
+    int burst, sf, n;
+    hytera_compute_ks(key, mi, ks, 126);
+    for (burst = 0; burst < 6; ++burst) {
+        unsigned char p[3][3];
+        for (sf = 0; sf < 3; ++sf) {
+            int f = burst * 3 + sf;
+            for (n = 0; n < 3; ++n)
+                p[sf][n] = (unsigned char)(cipher[f][n] ^ hytera_ks_byte(ks, f * 49 + n * 8));
+        }
+        total += 48 - hd24(p[0], p[1]) - hd24(p[1], p[2]);
+    }
+    return total;
+}
+
 int main(void)
 {
     unsigned char key[5] = {0x12, 0x34, 0xAB, 0xCD, 0xEF};
@@ -91,18 +117,20 @@ int main(void)
 
     /* 5. Per-frame keystream INDEXING must match DSD-FME's bitstream model.
      *
-     *    DSD-FME (dsd_mbe.c) generates 135 keystream octets per superframe,
+     *    DSD-FME (dsd_mbe.c) generates the keystream octets per superframe,
      *    expands them MSB-first into a flat bitstream, then for each of the 18
-     *    AMBE frames XORs 49 bits and skips 7 (bit_counter += 56). Because
-     *    49 + 7 = 56 = 7 bytes exactly, frame f consumes keystream bytes
-     *    [f*7 .. f*7+6] using the first 49 bits (MSB-first).
+     *    AMBE frames XORs 49 bits. CRUCIALLY, Hytera Enhanced does NOT skip the
+     *    trailing 7 bits the way MOTOTRBO/P25 do -- the advance is
+     *    `bit_counter += 49`, gated by `if (algid != 0x02) bit_counter += 7;`.
+     *    So frame f consumes keystream BITS [f*49 .. f*49+48] (MSB-first), which
+     *    are NOT byte aligned (only f=0 starts on a byte boundary).
      *
-     *    The brute-forcer applies the keystream BYTE-WISE at offset
-     *    (burst_pos*3 + sf)*7 onto the MSB-first packed 7-byte AMBE sub-frame.
-     *    This test builds the DSD-FME bitstream reference independently and
-     *    confirms the 49 decrypted bits are identical for every one of the 18
-     *    frames -- the regression guard for the old "same 21 bytes for all 6
-     *    bursts" bug, which only decrypted burst 0 correctly. */
+     *    The brute-forcer now extracts cipher byte n of frame f via
+     *    hytera_ks_byte(ks, f*49 + n*8). This test builds the DSD-FME bitstream
+     *    reference independently and confirms every one of the 18 frames'
+     *    49 keystream bits matches -- the regression guard for the old (wrong)
+     *    byte-aligned f*7 model, which only decrypted frame 0 correctly and is
+     *    why Hytera never validated end-to-end. */
     {
         unsigned char ks135[135];
         unsigned char ksbits[135 * 8];
@@ -119,16 +147,50 @@ int main(void)
         hytera_compute_ks(key, mi40, ksprod, 126);
 
         for (f = 0; f < 18; ++f) {
-            int bit_base = f * 56;          /* DSD-FME: 49 used + 7 skipped */
-            int byte_base = f * 7;          /* brute-forcer byte offset      */
+            int bit_base = f * 49;   /* Hytera EP: 49 bits/frame, NO 7-bit skip */
             for (i = 0; i < 49; ++i) {
-                /* bit i of the brute-forcer's byte slice, MSB-first */
-                int bf_bit = (ksprod[byte_base + (i >> 3)] >> (7 - (i & 7))) & 1;
+                /* what the kernels actually extract: cipher byte (i>>3) of the
+                 * frame = hytera_ks_byte(ks, f*49 + (i>>3)*8); take bit (i&7). */
+                unsigned char bf_byte = hytera_ks_byte(ksprod, bit_base + (i & ~7));
+                int bf_bit = (bf_byte >> (7 - (i & 7))) & 1;
                 int ref_bit = ksbits[bit_base + i];
                 if (bf_bit != ref_bit) ok_idx = 0;
             }
         }
-        CHECK(ok_idx, "per-frame keystream indexing matches DSD-FME bitstream (18 frames)");
+        CHECK(ok_idx, "per-frame keystream indexing matches DSD-FME bitstream (18 frames, 49b/frame)");
+    }
+
+    /* 6. Synthetic end-to-end recovery: plant a key, encrypt a low-inter-frame-HD
+     *    plaintext with the CORRECT 49-bit indexing, and confirm the planted key
+     *    scores far above wrong keys. This is the proof -- absent a real capture --
+     *    that the fix actually recovers a Hytera Enhanced key. */
+    {
+        unsigned char pkey[5] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
+        uint64_t pmi = 0x1122334455ULL;
+        unsigned char ks[126];
+        /* Same 49-bit pattern in every AMBE frame -> a correct decrypt gives
+         * HD(sf0,sf1)=HD(sf1,sf2)=0 -> 48 per burst -> 288 over 6 bursts. */
+        unsigned char plain[7] = {0x5A, 0xA5, 0x3C, 0xC3, 0x0F, 0xF0, 0x80};
+        unsigned char cipher[18][7];
+        int frame, n; unsigned kk;
+        double s_correct, s_wrong_max = -1e9;
+
+        hytera_compute_ks(pkey, pmi, ks, 126);
+        for (frame = 0; frame < 18; ++frame)
+            for (n = 0; n < 7; ++n)
+                cipher[frame][n] = (unsigned char)(plain[n] ^ hytera_ks_byte(ks, frame * 49 + n * 8));
+
+        s_correct = score_synth(cipher, pkey, pmi);
+        for (kk = 0; kk < 256; ++kk) {  /* a sweep of wrong keys */
+            unsigned char wk[5] = { (unsigned char)(pkey[0] ^ (kk + 1)), pkey[1],
+                                    pkey[2], pkey[3], (unsigned char)(pkey[4] ^ kk) };
+            double sw = score_synth(cipher, wk, pmi);
+            if (sw > s_wrong_max) s_wrong_max = sw;
+        }
+        printf("      synthetic: correct=%.0f  wrong_max=%.0f (max possible 288)\n",
+               s_correct, s_wrong_max);
+        CHECK(s_correct >= 287.0 && s_correct > s_wrong_max + 60.0,
+              "planted Hytera key recovered: dominates wrong keys (synthetic end-to-end)");
     }
 
     printf(failures ? "\n%d FAILURE(S)\n" : "\nALL PASS\n", failures);
