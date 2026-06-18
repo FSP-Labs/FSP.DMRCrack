@@ -44,6 +44,7 @@
 #define cudaGetDeviceCount          hipGetDeviceCount
 #define cudaSetDevice               hipSetDevice
 #define cudaGetDeviceProperties     hipGetDeviceProperties
+#define cudaDeviceGetPCIBusId       hipDeviceGetPCIBusId
 #define cudaFuncSetAttribute        hipFuncSetAttribute
 #define cudaFuncAttributeMaxDynamicSharedMemorySize \
         hipFuncAttributeMaxDynamicSharedMemorySize
