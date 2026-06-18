@@ -1,3 +1,17 @@
+dmrcrack (0.4.1+dfsg-1) unstable; urgency=medium
+
+  * Report the closest candidate (its per-burst Hamming rate and how many bursts
+    it survived) when a full scan finds no key above the recovery threshold,
+    instead of a bare "best candidate 0.00".
+  * Only present a recovered key when the score clears the noise floor; a run
+    that recovers nothing now reports "No key above the recovery threshold".
+  * Windows GUI: add a taskbar progress indicator and an NVML-based GPU
+    temperature read-out with a configurable thermal auto-pause.
+  * Fix a stale comment describing the superseded byte-aligned Hytera keystream
+    model (it is consumed as a 49-bit bitstream).
+
+ -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Thu, 18 Jun 2026 00:00:00 +0000
+
 dmrcrack (0.4.0+dfsg-1) unstable; urgency=medium
 
   * New upstream release 0.4.0.

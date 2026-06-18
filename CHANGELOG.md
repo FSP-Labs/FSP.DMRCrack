@@ -10,6 +10,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.4.1] - 2026-06-18
+
+### Added
+- **Closest-candidate diagnostic** — when a full scan finds no key above the
+  recovery threshold, the GUI and CLI now report the furthest-reaching candidate
+  (its per-burst Hamming rate and how many bursts it survived) instead of a bare
+  `0.00`. A low rate or few bursts points at a noisy capture or a wrong MI rather
+  than a key outside the searched range. It costs nothing on the hot path — the
+  diagnostic atomic runs after the existing best-key update, and the wrong-key
+  score and ILP-2 register footprint are unchanged.
+- **Taskbar progress** — the Windows taskbar button mirrors scan progress: green
+  while scanning, amber when paused, red on error.
+- **GPU temperature and thermal auto-pause** — a monitor thread reads the GPU
+  temperature via NVML (loaded at runtime, no link dependency) and a new `Max C`
+  field pauses the search when the card reaches the limit, resuming once it cools
+  past a hysteresis margin. Sampling runs off the scan loop, so the reading keeps
+  updating while paused.
+
+### Changed
+- The candidate tile, Listen, Copy and auto-listen now require a genuine result
+  (a non-zero key and a score well above the noise floor), so a finished run that
+  recovers nothing shows `No key above the recovery threshold` instead of
+  presenting a junk residual key.
+
+### Fixed
+- Corrected a stale comment that still described the superseded byte-aligned
+  Hytera keystream model — it is consumed as a 49-bit bitstream — in the CUDA and
+  OpenCL backends.
+
+---
+
 ## [0.4.0] - 2026-06-09
 
 ### Added
