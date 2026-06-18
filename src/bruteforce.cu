@@ -245,13 +245,13 @@ __device__ __forceinline__ int kpa_silence_check_dev(
  * kiv-XOR ks[i] = rc4[i] ^ kiv[i%5], where kiv[i] = key5[i] ^ MI[i] for ALL 5
  * bytes (MI is 40-bit, big-endian).
  *
- * One keystream is generated per superframe and consumed LINEARLY across all
- * 18 AMBE frames of the superframe (6 bursts x 3 sub-frames). DSD-FME (dsd_mbe.c)
- * XORs each frame's 49 ambe_d bits then skips 7 bits -> 56 bits = exactly 7
- * keystream bytes per AMBE frame, byte-aligned. So AMBE frame f (= burst_pos*3 + sf)
- * uses keystream bytes [f*7 .. f*7+6]. The 18 frames need 18*7 = 126 bytes
- * (DSD-FME allocates 135). The previous "same 21 bytes for all 6 bursts" was
- * wrong: only burst 0 was decrypted correctly. */
+ * One keystream is generated per superframe and consumed as a bitstream at 49
+ * bits per AMBE frame (6 bursts x 3 sub-frames = 18 frames). Unlike MOTOTRBO/P25,
+ * Hytera EP does NOT skip the trailing 7 bits (dsd_mbe.c suppresses the +7 for
+ * algid 0x02), so frame f (= burst_pos*3 + sf) consumes keystream bits
+ * [f*49 .. f*49+48], MSB-first and not byte-aligned (only f=0 lands on a byte
+ * boundary). Cipher byte n of frame f comes from hytera_ks_byte_dev at bit
+ * offset f*49 + n*8. 126 bytes cover all 18 frames (octet 110 = bit 881). */
 #define HYTERA_KS_BYTES 126
 __device__ __forceinline__ void compute_hytera_ks_dev(
     const unsigned char key5[5], uint64_t mi,
@@ -486,6 +486,26 @@ __device__ __forceinline__ void update_best_packed(
     atomicMax(dev_best_packed, pack_score_key_dev(score, current_key));
 }
 
+/* Tracks the best candidate even when pruning rejects it, so the UI has
+ * something to show when nothing clears the floor. Packed bursts(8)|
+ * rate_milli(16)|key(40): atomicMax ranks by frames survived first, then rate,
+ * because a key that lasted every frame beats one lucky on a couple. The score
+ * is Hamming-only, so the rate is plain inter-frame agreement (0..48). */
+__device__ __forceinline__ void update_diag_packed(
+    float hamming_score, int bursts, uint64_t key,
+    unsigned long long* __restrict__ dev_diag_packed)
+{
+    if (bursts < 6) return;
+    int rate_milli = (int)(hamming_score * (1000.0f / (float)bursts));
+    if (rate_milli < 0) rate_milli = 0;
+    if (rate_milli > 0xFFFF) rate_milli = 0xFFFF;
+    unsigned int bc = (bursts > 255) ? 255u : (unsigned int)bursts;
+    unsigned long long packed = ((unsigned long long)bc << 56)
+                              | ((unsigned long long)rate_milli << 40)
+                              | (key & 0xFFFFFFFFFFULL);
+    atomicMax(dev_diag_packed, packed);
+}
+
 /* De-interleave tables -- values shared via include/dmr_tables.h.
  * Device gets __constant__ storage; the host helpers keep their own copy
  * since host code cannot read __constant__ device symbols directly. */
@@ -711,6 +731,7 @@ void bruteforce_kernel_strict(
     uint32_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
     unsigned long long* __restrict__ dev_best_packed,
+    unsigned long long* __restrict__ dev_diag_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -836,6 +857,8 @@ void bruteforce_kernel_strict(
 #undef BCNT_GET
 
         next_key:
+        /* Record the candidate for the diagnostic readout, pruned or not. */
+        update_diag_packed(total_score, processed_bursts, current_key, dev_diag_packed);
         local_keys++;
         if (local_keys >= LOCAL_KEYS_FLUSH) {
             atomicAdd((unsigned long long int*)dev_keys_tested, LOCAL_KEYS_FLUSH);
@@ -863,6 +886,7 @@ void bruteforce_kernel_strict_ilp2(
     uint32_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
     unsigned long long* __restrict__ dev_best_packed,
+    unsigned long long* __restrict__ dev_diag_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid     = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -1013,6 +1037,10 @@ void bruteforce_kernel_strict_ilp2(
 #undef BA_GET
 #undef BB_GET
 
+        /* Diagnostic readout (Hamming-only rate, before the chi2 boost below). */
+        update_diag_packed(score_a, bursts_a, key_a, dev_diag_packed);
+        if (key_b != key_a) update_diag_packed(score_b, bursts_b, key_b, dev_diag_packed);
+
         /* Chi2 final score boost for non-pruned keys.
          * Canonical metric: chi2 / processed_bursts (== bursts_x for a non-pruned
          * key, which always reaches payload_count). This MUST match the chi2/n term
@@ -1067,6 +1095,7 @@ void bruteforce_kernel_hytera(
     uint64_t global_mi,
     unsigned long long* __restrict__ dev_keys_tested,
     unsigned long long* __restrict__ dev_best_packed,
+    unsigned long long* __restrict__ dev_diag_packed,
     int* __restrict__ dev_stop_requested)
 {
     uint64_t tid = blockIdx.x * (uint64_t)blockDim.x + threadIdx.x;
@@ -1175,6 +1204,7 @@ void bruteforce_kernel_hytera(
 #undef HBCNT_GET
 
         hytera_next_key:
+        update_diag_packed(total_score, processed_bursts, current_key, dev_diag_packed);
         local_keys++;
         if (local_keys >= LOCAL_KEYS_FLUSH) {
             atomicAdd((unsigned long long int*)dev_keys_tested, LOCAL_KEYS_FLUSH);
@@ -1833,6 +1863,21 @@ typedef struct {
     GpuWorkQueue     *wq;             /* shared keyspace cursor */
 } CudaDeviceCtx;
 
+/* Host twin of update_diag_packed for the CPU-assist path. Returns 0 for
+ * candidates too short to mean anything (fewer than 6 frames). */
+static unsigned long long host_pack_diag(double hamming_score, int bursts, uint64_t key)
+{
+    int rate_milli;
+    unsigned int bc;
+    if (bursts < 6) return 0ULL;
+    rate_milli = (int)(hamming_score * 1000.0 / (double)bursts);
+    if (rate_milli < 0) rate_milli = 0;
+    if (rate_milli > 0xFFFF) rate_milli = 0xFFFF;
+    bc = (bursts > 255) ? 255u : (unsigned int)bursts;
+    return ((unsigned long long)bc << 56) | ((unsigned long long)rate_milli << 40)
+           | (key & 0xFFFFFFFFFFULL);
+}
+
 /* --- 4-way AVX2 CPU assist worker ---------------------------------------- *
  * Processes 4 candidate keys per outer loop iteration using:
  *   - AVX2 S-box init (8 x 256-bit stores per box, vs 256 byte stores)
@@ -1860,6 +1905,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
     const unsigned char *cipher_packs = ctx->cipher_packs;
     int pcount = ctx->payload_count;
     uint64_t local_count = 0;
+    unsigned long long local_diag = 0;   /* merged into engine once at thread exit */
     uint64_t k;
     int b;
     /* Match the GPU kernel's pruning gate (enable_prune = total_keys > 2^20):
@@ -2047,6 +2093,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                 sf_base += n_bursts;
             } /* superframe */
 
+            /* Feed the diagnostic on the Hamming-only score, before the chi2
+             * term below, so the rate matches what the kernels record. */
+            for (b = 0; b < batch; b++) {
+                unsigned long long dpk = host_pack_diag(scores[b], processed_bursts_cpu, k + (uint64_t)b);
+                if (dpk > local_diag) local_diag = dpk;
+            }
+
             /* Canonical bit-frequency chi2 term: chi2 / processed_bursts. A
              * surviving (non-pruned) key always reaches processed_bursts_cpu ==
              * pcount, so this matches the chi2/n added by every other scorer. */
@@ -2079,6 +2132,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
             k           += (uint64_t)batch;
             if ((local_count & STOP_POLL_MASK) == 0)
                 plat_atomic64_add(&engine->keys_tested, 1024LL);
+        }
+
+        if (local_diag != 0ULL) {
+            plat_mutex_lock(&engine->lock);
+            if (local_diag > engine->diag_best_packed) engine->diag_best_packed = local_diag;
+            plat_mutex_unlock(&engine->lock);
         }
     } else {
         /* -- Fallback: scalar scoring for legacy mode (mode_policy < 2) -- */
@@ -2119,6 +2178,106 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
     PLAT_THREAD_RETURN;
 }
 
+/* =========================================================================
+ * NVML thermal telemetry. Loaded at runtime from nvml.dll (ships with every
+ * NVIDIA driver) so the build needs no NVML headers or import lib, and a
+ * missing/old driver just yields temp 0 instead of failing to link or launch.
+ * The handle is bound by PCI bus id rather than index because CUDA and NVML
+ * can enumerate devices in different orders.
+ * ========================================================================= */
+typedef struct {
+    void *lib;                                 /* HMODULE / void* from dlopen */
+    int (*p_init)(void);
+    int (*p_shutdown)(void);
+    int (*p_handle_by_bus)(const char *, void **);
+    int (*p_handle_by_index)(unsigned int, void **);
+    int (*p_get_temp)(void *, int, unsigned int *);
+    void *dev;                                 /* nvmlDevice_t (opaque) */
+    int   ok;
+} NvmlCtx;
+
+#if defined(_WIN32)
+static void *nvml_load_library(void) {
+    void *h = (void *)LoadLibraryA("nvml.dll");
+    if (!h) h = (void *)LoadLibraryA("C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
+    return h;
+}
+static void *nvml_sym(void *lib, const char *name) { return (void *)GetProcAddress((HMODULE)lib, name); }
+static void  nvml_unload(void *lib) { if (lib) FreeLibrary((HMODULE)lib); }
+#else
+static void *nvml_load_library(void) { return NULL; } /* Linux NVML: TODO (dlopen libnvidia-ml.so.1) */
+static void *nvml_sym(void *lib, const char *name) { (void)lib; (void)name; return NULL; }
+static void  nvml_unload(void *lib) { (void)lib; }
+#endif
+
+static void nvml_open(NvmlCtx *n, int cuda_device_id) {
+    char bus_id[64];
+    memset(n, 0, sizeof(*n));
+    n->lib = nvml_load_library();
+    if (!n->lib) return;
+
+    n->p_init = (int (*)(void))nvml_sym(n->lib, "nvmlInit_v2");
+    if (!n->p_init) n->p_init = (int (*)(void))nvml_sym(n->lib, "nvmlInit");
+    n->p_shutdown = (int (*)(void))nvml_sym(n->lib, "nvmlShutdown");
+    n->p_handle_by_bus = (int (*)(const char *, void **))nvml_sym(n->lib, "nvmlDeviceGetHandleByPciBusId_v2");
+    n->p_handle_by_index = (int (*)(unsigned int, void **))nvml_sym(n->lib, "nvmlDeviceGetHandleByIndex_v2");
+    if (!n->p_handle_by_index) n->p_handle_by_index = (int (*)(unsigned int, void **))nvml_sym(n->lib, "nvmlDeviceGetHandleByIndex");
+    n->p_get_temp = (int (*)(void *, int, unsigned int *))nvml_sym(n->lib, "nvmlDeviceGetTemperature");
+
+    if (!n->p_init || !n->p_get_temp || n->p_init() != 0) { nvml_unload(n->lib); memset(n, 0, sizeof(*n)); return; }
+
+    /* bind by bus id so the handle is the same physical card CUDA picked */
+    if (n->p_handle_by_bus && cudaDeviceGetPCIBusId(bus_id, (int)sizeof(bus_id), cuda_device_id) == cudaSuccess
+        && n->p_handle_by_bus(bus_id, &n->dev) == 0) {
+        n->ok = 1;
+    } else if (n->p_handle_by_index && n->p_handle_by_index((unsigned int)cuda_device_id, &n->dev) == 0) {
+        n->ok = 1;  /* fallback: index == CUDA ordinal (correct for single-GPU) */
+    }
+    if (!n->ok) { if (n->p_shutdown) n->p_shutdown(); nvml_unload(n->lib); memset(n, 0, sizeof(*n)); }
+}
+
+static int nvml_read_temp_c(NvmlCtx *n) {
+    unsigned int t = 0;
+    if (!n->ok) return 0;
+    if (n->p_get_temp(n->dev, 0 /* NVML_TEMPERATURE_GPU */, &t) != 0) return 0;
+    if (t > 200u) return 0;  /* sanity clamp against bogus readings */
+    return (int)t;
+}
+
+static void nvml_close(NvmlCtx *n) {
+    if (n->lib) {
+        if (n->p_shutdown) n->p_shutdown();
+        nvml_unload(n->lib);
+    }
+    memset(n, 0, sizeof(*n));
+}
+
+/* Runs on its own thread, not the scan loop, so temperature keeps updating
+ * while the engine is paused -- otherwise the GUI could never see the card cool
+ * down and auto-resume. The orchestrator owns it and stops it via ThermalCtx. */
+typedef struct {
+    BruteforceEngine *engine;
+    int               device_id;   /* CUDA ordinal of the card to monitor */
+    volatile int      stop;        /* orchestrator sets this before joining */
+} ThermalCtx;
+
+static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL thermal_monitor_proc(void *arg)
+{
+    ThermalCtx *t = (ThermalCtx *)arg;
+    NvmlCtx n;
+    nvml_open(&n, t->device_id);
+    while (!t->stop && plat_atomic32_load(&t->engine->stop_requested) == 0) {
+        if (n.ok) {
+            int c = nvml_read_temp_c(&n);
+            if (c > 0) plat_atomic32_store(&t->engine->gpu_temp_c, c);
+        }
+        plat_sleep_ms(500);
+    }
+    nvml_close(&n);
+    plat_atomic32_store(&t->engine->gpu_temp_c, 0);  /* clear stale reading on exit */
+    PLAT_THREAD_RETURN;
+}
+
 static float host_unpack_score(unsigned long long packed)
 {
     unsigned int sortable = (unsigned int)(packed >> 40) << 8;
@@ -2131,6 +2290,18 @@ static unsigned long long host_unpack_key(unsigned long long packed)
     return packed & 0xFFFFFFFFFFULL;
 }
 
+/* Decode an update_diag_packed value. Returns 0 (and zeroes outputs) when no
+ * candidate was ever recorded (bursts field == 0). */
+static int host_unpack_diag(unsigned long long packed, uint64_t *key, double *rate, int *bursts)
+{
+    int bc = (int)(packed >> 56);
+    if (bc == 0) { *key = 0; *rate = 0.0; *bursts = 0; return 0; }
+    *bursts = bc;
+    *rate   = (double)((packed >> 40) & 0xFFFFu) / 1000.0;
+    *key    = packed & 0xFFFFFFFFFFULL;
+    return 1;
+}
+
 static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
 {
     CudaDeviceCtx *ctx = (CudaDeviceCtx *)arg;
@@ -2141,6 +2312,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
     unsigned char host_meta_flags[MAX_CONST_LINES];
     unsigned long long *d_keys_tested = NULL;
     unsigned long long *d_best_packed = NULL;
+    unsigned long long *d_diag_packed = NULL;
     int *d_stop_requested = NULL;
     cudaStream_t compute_stream = NULL;
     cudaStream_t compute_stream2 = NULL;  /* double-buffer stream */
@@ -2336,6 +2508,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
     }
     CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed");
 
+    cu_err = cudaMalloc(&d_diag_packed, sizeof(unsigned long long));
+    if (cu_err != cudaSuccess) {
+        snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMalloc diag_packed: %s", cudaGetErrorString(cu_err));
+        goto cleanup;
+    }
+    CUDA_CHECK(cudaMemset(d_diag_packed, 0, sizeof(unsigned long long)), "cudaMemset diag_packed");
+
     cu_err = cudaMalloc(&d_stop_requested, sizeof(int));
     if (cu_err != cudaSuccess) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMalloc stop_requested: %s", cudaGetErrorString(cu_err));
@@ -2510,6 +2689,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
 
                         cudaMemsetAsync(d_keys_tested, 0, sizeof(unsigned long long), compute_stream);
                         cudaMemsetAsync(d_best_packed, 0, sizeof(unsigned long long), compute_stream);
+                        cudaMemsetAsync(d_diag_packed, 0, sizeof(unsigned long long), compute_stream);
                         cudaMemsetAsync(d_stop_requested, 0, sizeof(int), compute_stream);
                         cudaStreamSynchronize(compute_stream);
 
@@ -2534,6 +2714,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
                                     global_mi64,
                                     d_keys_tested,
                                     d_best_packed,
+                                    d_diag_packed,
                                     d_stop_requested
                                 );
                             } else if (use_ilp2) {
@@ -2544,6 +2725,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
                                     global_mi,
                                     d_keys_tested,
                                     d_best_packed,
+                                    d_diag_packed,
                                     d_stop_requested
                                 );
                             } else if (strict_mode) {
@@ -2554,6 +2736,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
                                     global_mi,
                                     d_keys_tested,
                                     d_best_packed,
+                                    d_diag_packed,
                                     d_stop_requested
                                 );
                             } else {
@@ -2647,6 +2830,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
     {
         CUDA_CHECK(cudaMemset(d_keys_tested, 0, sizeof(unsigned long long)), "cudaMemset keys_tested (scan reset)");
         CUDA_CHECK(cudaMemset(d_best_packed, 0, sizeof(unsigned long long)), "cudaMemset best_packed (scan reset)");
+        CUDA_CHECK(cudaMemset(d_diag_packed, 0, sizeof(unsigned long long)), "cudaMemset diag_packed (scan reset)");
         CUDA_CHECK(cudaMemset(d_stop_requested, 0, sizeof(int)), "cudaMemset stop_requested (scan reset)");
         last_gpu_kt = 0;
     }
@@ -2656,8 +2840,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
         cudaStream_t streams[2] = { compute_stream, compute_stream2 };
         int active = 0;
         int have_pending = 0;
-        const int stop_sig = 1;             /* #6: hoisted - stable address for async memcpy */
-        uint64_t last_checkpoint_ms = plat_ticks_ms(); /* #34: periodic checkpoint timer */
+        const int stop_sig = 1;             /* hoisted so the async memcpy has a stable address */
+        uint64_t last_checkpoint_ms = plat_ticks_ms();
 
         /* Helper: poll GPU results into engine using pinned memory */
         #define POLL_GPU_RESULTS() do { \
@@ -2707,15 +2891,15 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
             if (mode_policy == 4) { \
                 bruteforce_kernel_hytera<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi64, \
-                    d_keys_tested, d_best_packed, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_diag_packed, d_stop_requested); \
             } else if (use_ilp2) { \
                 bruteforce_kernel_strict_ilp2<<<blocksPerGrid, 128, 65536, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
-                    d_keys_tested, d_best_packed, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_diag_packed, d_stop_requested); \
             } else if (mode_policy >= 2) { \
                 bruteforce_kernel_strict<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, global_mi, \
-                    d_keys_tested, d_best_packed, d_stop_requested); \
+                    d_keys_tested, d_best_packed, d_diag_packed, d_stop_requested); \
             } else { \
                 bruteforce_kernel<<<blocksPerGrid, threadsPerBlock, 0, streams[stream_idx]>>>( \
                     engine->cfg.start_key + (off), (cnt), payload_limit, bytes_per_line, \
@@ -2769,7 +2953,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
             have_pending = 1;
             active = 1 - active;
 
-            /* #34: write checkpoint every 30 s so the search can be resumed.
+            /* Write checkpoint every 30 s so the search can be resumed.
              * Single-GPU only: with N GPUs claiming blocks out of order the
              * scanned region is not contiguous, so the linear `offset=` resume
              * model does not apply (multi-GPU runs skip mid-run checkpointing). */
@@ -2812,11 +2996,17 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
     /* Final result read (per device; merged into engine->best under the lock).
      * CPU-assist workers are owned and joined by the orchestrator, not here. */
     {
-        unsigned long long final_k = 0, final_bp = 0;
+        unsigned long long final_k = 0, final_bp = 0, final_diag = 0;
         CUDA_CHECK(cudaMemcpy(&final_k,  d_keys_tested, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final keys_tested");
         CUDA_CHECK(cudaMemcpy(&final_bp, d_best_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final best_packed");
+        CUDA_CHECK(cudaMemcpy(&final_diag, d_diag_packed, sizeof(unsigned long long), cudaMemcpyDeviceToHost), "cudaMemcpy final diag_packed");
         plat_atomic64_add(&engine->keys_tested, (int64_t)(final_k - last_gpu_kt));
         plat_atomic64_add(&engine->gpu_keys_tested, (int64_t)(final_k - last_gpu_kt));
+        if (final_diag != 0ULL) {
+            plat_mutex_lock(&engine->lock);
+            if (final_diag > engine->diag_best_packed) engine->diag_best_packed = final_diag;
+            plat_mutex_unlock(&engine->lock);
+        }
         if (final_bp != 0ULL) {
             double   gpu_best_score = (double)host_unpack_score(final_bp);
             uint64_t gpu_best_key   = host_unpack_key(final_bp);
@@ -2843,6 +3033,7 @@ cleanup:
      * owns the running/stage flags + CPU-assist join. */
     if (d_keys_tested) cudaFree(d_keys_tested);
     if (d_best_packed) cudaFree(d_best_packed);
+    if (d_diag_packed) cudaFree(d_diag_packed);
     if (d_stop_requested) cudaFree(d_stop_requested);
     free(host_payload_flat);
     if (h_poll) cudaFreeHost(h_poll);
@@ -2872,6 +3063,11 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     CudaDeviceCtx *dctx = NULL;
     plat_thread_t *dhandles = NULL;
     int            n_gpu = 1, spawned = 0;
+
+    /* Thermal monitor (GPU temperature for the GUI readout + auto-pause). */
+    plat_thread_t  thermal_handle;
+    ThermalCtx     thermal_ctx;
+    int            thermal_spawned = 0;
 
     /* CPU-assist is orchestrator-owned: it needs the shared keyspace split
      * computed before any GPU worker starts scanning the work-queue. */
@@ -2940,7 +3136,11 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     /* === CPU-assist split (same probe/sizing as the legacy single-GPU path).
      * The GPU pool sweeps [start, start+gpu_range); CPU workers sweep the high
      * part in parallel. CPU share is capped at (100 - gpu_split_pct)% and
-     * auto-shrunk from a throughput probe so it never bottlenecks the GPUs. */
+     * auto-shrunk from a throughput probe so it never bottlenecks the GPUs.
+     * The CPU is ~100x slower, so its slice is small and finishes well before
+     * the GPU drains the rest -- the workers then sit idle, which looks like a
+     * stall near the end but is correct. Stealing GPU blocks would add ~1-2% and
+     * void the linear-offset checkpoint, so the workers intentionally stop. */
     gpu_range = total_keys;
     if (mode_policy >= 2) {
         memset(host_cipher_packs, 0, sizeof(host_cipher_packs));
@@ -3010,6 +3210,13 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
         }
     }
 
+    /* Monitor GPU 0 (the status device); a failed open just leaves temp at 0. */
+    thermal_ctx.engine    = engine;
+    thermal_ctx.device_id = 0;
+    thermal_ctx.stop      = 0;
+    if (plat_thread_create(&thermal_handle, thermal_monitor_proc, &thermal_ctx) == 0)
+        thermal_spawned = 1;
+
     /* === Fan out one worker per GPU over the shared work-queue. */
     plat_atomic64_store(&wq.next, 0LL);
     wq.total = gpu_range;
@@ -3052,6 +3259,15 @@ join_cpu:
         plat_threads_join(cpu_handles, n_cpu_assist);
         for (int t = 0; t < n_cpu_assist; t++) plat_thread_close(cpu_handles[t]);
     }
+
+    /* Stop + join the thermal monitor (spawned before the GPU fan-out, so it is
+     * joined on every exit path that reaches here, including `goto join_cpu`). */
+    if (thermal_spawned) {
+        thermal_ctx.stop = 1;
+        plat_thread_join(thermal_handle);
+        plat_thread_close(thermal_handle);
+    }
+
     free(cpu_handles); cpu_handles = NULL;
     free(cpu_ctxs);    cpu_ctxs = NULL;
     free(dhandles);    dhandles = NULL;
@@ -3332,6 +3548,7 @@ int bruteforce_start(
             plat_atomic32_store(&engine->search_completed, 0);
             engine->best_key   = cfg->has_seed_best ? cfg->seed_best_key   : cfg->start_key;
             engine->best_score = cfg->has_seed_best ? cfg->seed_best_score : -DBL_MAX;
+            engine->diag_best_packed = 0;
             plat_hrtimer_now(&engine->qpc_start);
             plat_atomic32_store(&engine->running, 1);
 
@@ -3435,6 +3652,7 @@ int bruteforce_start(
     plat_atomic32_store(&engine->search_completed, 0);
     engine->best_key   = cfg->has_seed_best ? cfg->seed_best_key   : cfg->start_key;
     engine->best_score = cfg->has_seed_best ? cfg->seed_best_score : -DBL_MAX;
+    engine->diag_best_packed = 0;
     plat_atomic32_store(&engine->cuda_stage, 0);
     plat_atomic32_store(&engine->cuda_profile_cached, 0);
     plat_atomic32_store(&engine->cuda_tpb, 0);
@@ -3557,11 +3775,15 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     enter_snapshot_lock(engine);
     out->best_key = engine->best_key;
     out->best_score = engine->best_score;
+    host_unpack_diag(engine->diag_best_packed, &out->diag_best_key,
+                     &out->diag_best_rate, &out->diag_best_bursts);
     leave_snapshot_lock(engine);
     out->elapsed_seconds = elapsed;
     out->running  = (int)plat_atomic32_load((plat_atomic32_t *)&engine->running);
     out->paused   = (int)plat_atomic32_load((plat_atomic32_t *)&engine->paused);
     out->finished = (int)plat_atomic32_load((plat_atomic32_t *)&engine->search_completed);
+    out->gpu_temp_c = (int)plat_atomic32_load((plat_atomic32_t *)&engine->gpu_temp_c);
+    out->cpu_temp_c = (int)plat_atomic32_load((plat_atomic32_t *)&engine->cpu_temp_c);
 
     if (elapsed > 0.0) out->keys_per_second = (double)keys / elapsed;
     else out->keys_per_second = 0.0;

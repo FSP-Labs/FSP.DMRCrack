@@ -34,11 +34,34 @@
 #include "../include/updater.h"
 #include "../include/version.h"
 
+/* COBJMACROS is needed only when this file is compiled as C (nvcc may build it
+ * as C or C++ depending on toolchain); guard it so the C++ path is unaffected. */
+#ifndef __cplusplus
+#  define COBJMACROS
+#endif
+#include <shobjidl.h>   /* ITaskbarList3 - Windows taskbar progress bar */
+
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "ole32.lib")    /* CoInitialize / CoCreateInstance */
+#pragma comment(lib, "uuid.lib")     /* CLSID_TaskbarList / IID_ITaskbarList3 */
 #pragma comment(linker, "\"/manifestdependency:type='win32' " \
     "name='Microsoft.Windows.Common-Controls' version='6.0.0.0' " \
     "processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+
+/* COM call shims so the taskbar code compiles whether gui.c is built as C
+ * (vtable via lpVtbl) or C++ (member calls). */
+#ifdef __cplusplus
+#  define TB_HRINIT(t)                ((t)->HrInit())
+#  define TB_SETPROGRESSVALUE(t,h,c,o)((t)->SetProgressValue((h),(c),(o)))
+#  define TB_SETPROGRESSSTATE(t,h,s)  ((t)->SetProgressState((h),(s)))
+#  define TB_RELEASE(t)               ((t)->Release())
+#else
+#  define TB_HRINIT(t)                ((t)->lpVtbl->HrInit(t))
+#  define TB_SETPROGRESSVALUE(t,h,c,o)((t)->lpVtbl->SetProgressValue((t),(h),(c),(o)))
+#  define TB_SETPROGRESSSTATE(t,h,s)  ((t)->lpVtbl->SetProgressState((t),(h),(s)))
+#  define TB_RELEASE(t)               ((t)->lpVtbl->Release(t))
+#endif
 
 #define APP_CLASS_NAME "FSPDMRCrackWindow"
 #define APP_TITLE "FSP.DMRCrack v" DMRCRACK_VERSION " - RC4 40-bit DMR Brute Forcer"
@@ -77,6 +100,7 @@
 #define LIVE_CAPTURE_POLL_MS       1500
 #define ID_EDIT_GPU_PCT  1028
 #define ID_SPIN_GPU      1029
+#define ID_EDIT_TEMP_LIMIT 1030
 
 #define IDT_UI_REFRESH  2001
 #define WM_APP_DEMOD_DONE        (WM_APP + 1)
@@ -224,6 +248,13 @@ typedef struct {
     int  gpu_split_pct;   /* 50..95, default 80 */
 
     HWND lbl_kpa_badge;  /* "KPA: N silence frames" - visible when n_silence > 0 */
+
+    HWND lbl_temp_limit;
+    HWND edit_temp_limit;
+    int  temp_limit_c;     /* auto-pause threshold in C, 0 = disabled */
+    int  thermal_paused;   /* 1 = we paused for heat (vs the user pausing) */
+
+    ITaskbarList3 *taskbar;  /* NULL if creation failed */
 } AppState;
 
 static AppState g_app;
@@ -271,7 +302,8 @@ static void copy_key_to_clipboard(HWND hwnd)
     HGLOBAL hMem;
     char *pMem;
 
-    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30)
+    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= 1.0
+        || (g_app.snapshot.best_key & 0xFFFFFFFFFFull) == 0)
         return;
 
     snprintf(key_str, sizeof(key_str), "%010llX",
@@ -370,6 +402,9 @@ static void layout_controls(int cw, int ch)
         x += 110;
         if (g_app.lbl_samples)  MoveWindow(g_app.lbl_samples,  x,        y + 2, 60, 18, TRUE);
         if (g_app.edit_samples) MoveWindow(g_app.edit_samples, x + 64,   y,     60, 24, TRUE);
+        x += 128;
+        if (g_app.lbl_temp_limit)  MoveWindow(g_app.lbl_temp_limit,  x,      y + 2, 50, 18, TRUE);
+        if (g_app.edit_temp_limit) MoveWindow(g_app.edit_temp_limit, x + 54, y,     46, 24, TRUE);
     }
     y += 34;
 
@@ -690,23 +725,34 @@ static void draw_all_tiles(HDC hdc)
         } else {
             snprintf(line2, sizeof(line2), "%s", g_lang.tile_cpu_only);
         }
+        /* temp 0 means NVML had nothing to report -- show no line, not "0 C" */
         line3[0] = '\0';
+        if (g_app.snapshot.gpu_temp_c > 0) {
+            if (g_app.thermal_paused)
+                snprintf(line3, sizeof(line3), g_lang.tile_gpu_temp_paused_fmt, g_app.snapshot.gpu_temp_c);
+            else
+                snprintf(line3, sizeof(line3), g_lang.tile_gpu_temp_fmt, g_app.snapshot.gpu_temp_c);
+        }
         draw_tile(hdc, &g_app.tile_throughput_rect, /*big*/0, /*result*/0,
                   g_lang.tile_throughput, primary, line2, line3);
     }
 
     /* === RECOVERED KEY (dominant, left) === */
     {
-        /* A real candidate exists only once the engine has set a non-zero key;
-         * best_score initializes to 0 (finite), so gate on the key itself. */
+        /* A real candidate has a non-zero key and a score well above 1.0 (the
+         * strict metric runs to the hundreds/thousands). A key whose score
+         * rounds to ~0.00 is a residual, not a recovery -- don't present it as one. */
         int has_cand = (isfinite(g_app.snapshot.best_score) &&
-                        g_app.snapshot.best_score > -1e30 &&
+                        g_app.snapshot.best_score > 1.0 &&
                         (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) ? 1 : 0;
         if (!has_cand) {
             strcpy_s(primary, sizeof(primary), "----  ----  --");
             /* Empty / first-run guidance instead of dead zeros */
             if (running)
                 snprintf(line2, sizeof(line2), "%s", g_lang.status_searching);
+            else if (g_app.snapshot.finished && has_payloads)
+                /* finished, nothing crossed the threshold -- say so, don't blank */
+                snprintf(line2, sizeof(line2), "%s", g_lang.no_candidate_hint);
             else if (!has_payloads)
                 snprintf(line2, sizeof(line2), "%s", g_lang.empty_hint);
             else
@@ -717,7 +763,13 @@ static void draw_all_tiles(HDC hdc)
                      (k >> 24) & 0xFFFF, (k >> 8) & 0xFFFF, k & 0xFF);
             snprintf(line2, sizeof(line2), g_lang.tile_score_fmt, g_app.snapshot.best_score);
         }
+        /* With no real candidate, show how close the best key got: a low rate
+         * over few frames means noise or wrong MI, a high rate over every frame
+         * would have cleared the floor. */
         line3[0] = '\0';
+        if (!has_cand && g_app.snapshot.diag_best_bursts > 0)
+            snprintf(line3, sizeof(line3), g_lang.diag_best_fmt,
+                     g_app.snapshot.diag_best_rate, g_app.snapshot.diag_best_bursts);
         draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/1, /*result*/has_cand,
                   g_lang.tile_candidate, primary, line2, line3);
     }
@@ -1449,8 +1501,9 @@ static DWORD WINAPI listen_thread_proc(LPVOID param)
     DWORD proc_exit = 1;
     (void)param;
 
-    /* Recovered key: require a finished/valid candidate */
-    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= -1e30) {
+    /* Recovered key: require a real candidate (a ~0.00 residual is not one) */
+    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= 1.0
+        || (g_app.snapshot.best_key & 0xFFFFFFFFFFull) == 0) {
         SetWindowTextA(g_app.demod_label, g_lang.err_listen_no_key);
         goto done;
     }
@@ -1879,6 +1932,63 @@ static void append_score_sample(double score)
     }
 }
 
+/* Mirror scan progress onto the taskbar button. No-op without a taskbar. */
+static void update_taskbar_progress(void)
+{
+    BruteforceSnapshot *s = &g_app.snapshot;
+    if (!g_app.taskbar || !g_app.hwnd) return;
+
+    if (!s->running) {
+        /* Idle or completed: clear the bar (a found key is signaled via FlashWindowEx). */
+        TB_SETPROGRESSSTATE(g_app.taskbar, g_app.hwnd, TBPF_NOPROGRESS);
+        return;
+    }
+    if (s->total_keys > 0) {
+        ULONGLONG c = (ULONGLONG)s->keys_tested;
+        ULONGLONG t = (ULONGLONG)s->total_keys;
+        if (c > t) c = t;
+        TB_SETPROGRESSVALUE(g_app.taskbar, g_app.hwnd, c, t);
+    }
+    {
+        TBPFLAG st = TBPF_NORMAL;                              /* green: scanning */
+        if (g_app.engine.cuda_error[0])           st = TBPF_ERROR;   /* red */
+        else if (s->paused || g_app.thermal_paused) st = TBPF_PAUSED; /* amber */
+        TB_SETPROGRESSSTATE(g_app.taskbar, g_app.hwnd, st);
+    }
+}
+
+/* Pause when the GPU hits the limit, resume once it cools past the hysteresis
+ * margin. Only ever auto-resumes a pause we started, and hands control back the
+ * moment the user resumes by hand -- so we never fight the pause button. */
+static void apply_thermal_autopause(void)
+{
+    char tbuf[16];
+    int limit = 0, t, resume_at;
+    if (g_app.edit_temp_limit && GetWindowTextA(g_app.edit_temp_limit, tbuf, sizeof(tbuf)) > 0)
+        limit = atoi(tbuf);
+    if (limit < 0)   limit = 0;
+    if (limit > 110) limit = 110;
+    g_app.temp_limit_c = limit;
+
+    if (limit <= 0 || !g_app.snapshot.running) { g_app.thermal_paused = 0; return; }
+
+    t = g_app.snapshot.gpu_temp_c;
+    resume_at = (limit > 7) ? (limit - 7) : 0;   /* hysteresis to avoid flapping */
+
+    if (!g_app.thermal_paused) {
+        if (t >= limit && !g_app.snapshot.paused) {
+            g_app.thermal_paused = 1;
+            bruteforce_pause(&g_app.engine);
+        }
+    } else if (t > 0 && t <= resume_at) {
+        g_app.thermal_paused = 0;
+        bruteforce_resume(&g_app.engine);
+    } else if (!g_app.snapshot.paused) {
+        /* user resumed manually despite the heat -- respect it, drop ownership */
+        g_app.thermal_paused = 0;
+    }
+}
+
 static void refresh_snapshot_and_ui(void)
 {
     LARGE_INTEGER now;
@@ -1915,17 +2025,20 @@ static void refresh_snapshot_and_ui(void)
     else
         SetWindowTextA(g_app.btn_pause, g_lang.btn_pause);
 
-    /* Enable "Listen" once a valid candidate key exists (decrypt source WAV to audio) */
+    /* Enable "Listen" once a real candidate key exists (decrypt source WAV to
+     * audio). Match draw_all_tiles: a ~0.00 residual is not a recovery. */
     if (g_app.btn_listen) {
         BOOL have_key = (isfinite(g_app.snapshot.best_score) &&
-                         g_app.snapshot.best_score > -1e30) ? TRUE : FALSE;
+                         g_app.snapshot.best_score > 1.0 &&
+                         (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) ? TRUE : FALSE;
         EnableWindow(g_app.btn_listen, have_key);
     }
 
     /* Key-found notification: flash taskbar when search completes with a result */
     if (g_app.snapshot.finished && !g_app.notified_completion) {
         g_app.notified_completion = 1;
-        if (isfinite(g_app.snapshot.best_score) && g_app.snapshot.best_score > -1e30) {
+        if (isfinite(g_app.snapshot.best_score) && g_app.snapshot.best_score > 1.0 &&
+            (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) {
             FLASHWINFO fwi;
             fwi.cbSize = sizeof(fwi);
             fwi.hwnd = g_app.hwnd;
@@ -1941,6 +2054,9 @@ static void refresh_snapshot_and_ui(void)
             }
         }
     }
+
+    apply_thermal_autopause();
+    update_taskbar_progress();
 
     InvalidateRect(g_app.hwnd, &g_app.graph_rect, FALSE);
     InvalidateRect(g_app.hwnd, &g_app.score_graph_rect, FALSE);
@@ -2052,7 +2168,7 @@ static int start_bruteforce(HWND hwnd)
       cfg.sample_bytes = (ml >= 33) ? 33 : 27;
     }
 
-    /* #34: checkpoint/resume - check for a .progress sidecar file */
+    /* checkpoint/resume: look for a .progress sidecar file */
     {
         char progress_path[MAX_PATH];
         snprintf(progress_path, sizeof(progress_path), "%s.progress", g_app.loaded_file);
@@ -2254,6 +2370,7 @@ static void apply_language(void)
     SetWindowTextA(g_app.lbl_threads, g_lang.label_threads);
     SetWindowTextA(g_app.lbl_samples, g_lang.label_samples);
     SetWindowTextA(g_app.lbl_gpu_pct, g_lang.label_gpu_pct);
+    SetWindowTextA(g_app.lbl_temp_limit, g_lang.label_temp_limit);
     SetWindowTextA(g_app.btn_demod,    g_lang.btn_demodulate);
     SetWindowTextA(g_app.btn_export,   g_lang.btn_export);
     SetWindowTextA(g_app.btn_help,     g_lang.btn_help);
@@ -2761,6 +2878,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
             600, y, 50, 24, hwnd, (HMENU)ID_EDIT_SAMPLES, NULL, NULL);
 
+        /* GPU auto-pause threshold in C; 0 disables it */
+        g_app.lbl_temp_limit = CreateWindowA("STATIC", g_lang.label_temp_limit,
+            WS_CHILD | WS_VISIBLE | SS_RIGHT, 660, y + 2, 55, 20, hwnd, NULL, NULL, NULL);
+        g_app.edit_temp_limit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "87",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
+            720, y, 50, 24, hwnd, (HMENU)ID_EDIT_TEMP_LIMIT, NULL, NULL);
+        g_app.temp_limit_c = 87;
+
         y += 34;
         g_app.btn_start = CreateWindowA("BUTTON", g_lang.btn_start,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -2777,6 +2902,21 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.btn_copy_key = CreateWindowA("BUTTON", g_lang.btn_copy_key,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             460, y, 70, 30, hwnd, (HMENU)ID_BTN_COPY_KEY, NULL, NULL);
+
+        /* taskbar->NULL if any of this fails; update_taskbar_progress checks */
+        if (SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
+            ITaskbarList3 *tb = NULL;
+#ifdef __cplusplus
+            if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, NULL, CLSCTX_INPROC_SERVER,
+                                           IID_ITaskbarList3, (void **)&tb)) && tb) {
+#else
+            if (SUCCEEDED(CoCreateInstance(&CLSID_TaskbarList, NULL, CLSCTX_INPROC_SERVER,
+                                           &IID_ITaskbarList3, (void **)&tb)) && tb) {
+#endif
+                if (FAILED(TB_HRINIT(tb))) { TB_RELEASE(tb); tb = NULL; }
+            }
+            g_app.taskbar = tb;
+        }
 
         /* Initial layout */
         { RECT rc; GetClientRect(hwnd, &rc);
@@ -2998,6 +3138,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         if (g_app.ui_font_bold)    { DeleteObject(g_app.ui_font_bold); g_app.ui_font_bold = NULL; }
         if (g_app.ui_font_section) { DeleteObject(g_app.ui_font_section); g_app.ui_font_section = NULL; }
         destroy_theme_brushes();
+        if (g_app.taskbar) {
+            TB_SETPROGRESSSTATE(g_app.taskbar, hwnd, TBPF_NOPROGRESS);
+            TB_RELEASE(g_app.taskbar);
+            g_app.taskbar = NULL;
+            CoUninitialize();
+        }
         bruteforce_stop(&g_app.engine);
         bruteforce_engine_destroy(&g_app.engine);
         payload_set_free(&g_app.payloads);

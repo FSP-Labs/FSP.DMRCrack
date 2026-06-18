@@ -134,8 +134,9 @@ inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[
 /* Hytera EP keystream: RC4 KSA with key5 (drop=0), then ks[i]=rc4[i]^kiv[i%5].
  * Matches DSD-FME hytera_enhanced_rc4_setup: kiv[i]=key5[i]^MI[i] for all 5 bytes,
  * MI is 40-bit big-endian (MI[0] = bits 39..32). Mirrors include/hytera_ks.h.
- * One keystream per superframe, consumed linearly across the 18 AMBE frames:
- * frame (burst_pos*3 + sf) uses bytes [(burst_pos*21 + sf*7) ..]. Needs 126 bytes. */
+ * One keystream per superframe, consumed as a bitstream at 49 bits per AMBE
+ * frame (no 7-bit skip, unlike MOTOTRBO): frame f reads bits [f*49 .. f*49+48]
+ * via hytera_ks_byte. 126 bytes cover all 18 frames. */
 #define HYTERA_KS_BYTES 126
 inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[HYTERA_KS_BYTES])
 {

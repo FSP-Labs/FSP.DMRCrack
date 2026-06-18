@@ -33,6 +33,7 @@ typedef struct {
     const char *label_threads;
     const char *label_samples;
     const char *label_gpu_pct;       /* "GPU %:" */
+    const char *label_temp_limit;    /* "Max C:" - GPU auto-pause threshold */
 
     /* ---- Metric tile titles ---- */
     const char *tile_throughput;     /* "THROUGHPUT" */
@@ -44,9 +45,13 @@ typedef struct {
     const char *tile_split_fmt;           /* "GPU  %s  .  CPU  %s" */
     const char *tile_score_fmt;           /* "Score  %.2f" / "Puntuacion  %.2f" */
     const char *tile_progress_meta_fmt;   /* "%s keys   .   ETA  %s   .   elapsed  %s" */
+    const char *tile_gpu_temp_fmt;        /* "GPU  %d C" */
+    const char *tile_gpu_temp_paused_fmt; /* "GPU  %d C - cooling (paused)" */
 
     /* ---- Empty / idle states ---- */
     const char *empty_hint;               /* "Load a .bin or capture live, then Start" */
+    const char *no_candidate_hint;        /* "No key found above threshold" */
+    const char *diag_best_fmt;            /* "best seen  %.1f/burst over %d bursts" */
     const char *status_idle;              /* "Idle" */
     const char *status_searching;         /* "Searching..." */
     const char *graph_waiting;            /* "waiting for data" */

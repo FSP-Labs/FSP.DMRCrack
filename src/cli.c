@@ -694,6 +694,15 @@ int main(int argc, char **argv)
         printf("  (score %.4f)\n", snap.best_score);
     }
 
+    /* The closest any key got regardless of the recovery floor. A low rate or
+     * few bursts points at a noisy capture or the wrong MI rather than a key
+     * just outside the searched range. */
+    if (snap.diag_best_bursts > 0) {
+        printf("Closest candidate: ");
+        print_key(snap.diag_best_key);
+        printf("  (%.1f/burst over %d bursts)\n", snap.diag_best_rate, snap.diag_best_bursts);
+    }
+
     bruteforce_stop(&g_engine);
     bruteforce_engine_destroy(&g_engine);
     payload_set_free(&g_payloads);

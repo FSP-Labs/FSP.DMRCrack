@@ -65,6 +65,16 @@ typedef struct {
     int running;
     int paused;
     int finished;
+    int gpu_temp_c;          /* GPU temperature, C; 0 = unknown */
+    int cpu_temp_c;          /* CPU temperature, C; 0 = unknown/unsupported */
+
+    /* Best candidate the search actually saw, ignoring the recovery threshold.
+     * Lets the UI show something useful when no key clears the floor: a low rate
+     * over few frames means noise/misaligned MI, a high rate over all frames
+     * means a real find. diag_best_bursts == 0 when nothing was sampled yet. */
+    uint64_t diag_best_key;
+    double   diag_best_rate;    /* per-burst Hamming agreement, 0..48 */
+    int      diag_best_bursts;  /* frames the candidate was scored over */
 } BruteforceSnapshot;
 
 typedef struct BruteforceEngine {
@@ -87,6 +97,10 @@ typedef struct BruteforceEngine {
     uint64_t best_key;
     double   best_score;
 
+    /* Best candidate seen regardless of pruning, packed bursts<<56|rate_milli<<40|key.
+     * Merged (max) across GPU and CPU-assist under lock; see update_diag_packed. */
+    uint64_t diag_best_packed;
+
     plat_hrtimer_t qpc_start;
     plat_hrfreq_t  qpc_freq;
 
@@ -104,6 +118,11 @@ typedef struct BruteforceEngine {
     plat_atomic32_t cuda_compute_major;
     plat_atomic32_t cuda_compute_minor;
     plat_atomic64_t cuda_last_update_ms;
+
+    /* Sampled by the thermal monitor thread; the GUI reads them for the
+     * temperature display and auto-pause. 0 = unknown. */
+    plat_atomic32_t gpu_temp_c;
+    plat_atomic32_t cpu_temp_c;
 
     /* CPU-only engine (bruteforce.c) correct-pipeline acceleration.
      * When the capture is MOTOTRBO RC4 + MI (mode_policy >= 2) the

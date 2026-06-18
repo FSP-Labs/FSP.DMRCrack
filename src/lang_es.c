@@ -30,6 +30,7 @@ const Lang g_lang_es = {
     .label_threads    = "Hilos:",
     .label_samples    = "Muestras:",
     .label_gpu_pct    = "GPU %:",
+    .label_temp_limit = "Max C:",
 
     /* Titulos de tiles */
     .tile_throughput     = "VELOCIDAD",
@@ -40,7 +41,11 @@ const Lang g_lang_es = {
     .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
     .tile_score_fmt           = "Puntuaci\xf3n  %.2f",
     .tile_progress_meta_fmt   = "%s claves   \xb7   ETA  %s   \xb7   transcurrido  %s",
+    .tile_gpu_temp_fmt        = "GPU  %d C",
+    .tile_gpu_temp_paused_fmt = "GPU  %d C  \xb7  enfriando, en pausa",
     .empty_hint               = "Carga un .bin o captura en vivo, luego pulsa Start",
+    .no_candidate_hint        = "Sin clave sobre el umbral",
+    .diag_best_fmt            = "mejor visto  %.1f/burst en %d bursts",
     .status_idle              = "En reposo",
     .status_searching         = "Buscando...",
     .graph_waiting            = "esperando datos",

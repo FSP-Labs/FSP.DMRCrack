@@ -189,7 +189,7 @@ static inline int plat_cpu_count(void)
     return (int)si.dwNumberOfProcessors;
 }
 
-/* -- Directory creation (best-effort, no error checking) ---------------- */
+/* -- Directory creation (no error checking) ----------------------------- */
 
 static inline void plat_mkdir(const char *path) { CreateDirectoryA(path, NULL); }
 
@@ -385,7 +385,7 @@ static inline int plat_cpu_count(void)
     return (n > 0) ? (int)n : 1;
 }
 
-/* -- Directory creation (best-effort, no error checking) ---------------- */
+/* -- Directory creation (no error checking) ----------------------------- */
 
 #include <sys/stat.h>
 static inline void plat_mkdir(const char *path) { mkdir(path, 0755); }

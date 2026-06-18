@@ -31,6 +31,7 @@ const Lang g_lang_en = {
     .label_threads    = "Threads:",
     .label_samples    = "Samples:",
     .label_gpu_pct    = "GPU %:",
+    .label_temp_limit = "Max C:",
 
     /* Tile titles */
     .tile_throughput     = "THROUGHPUT",
@@ -41,7 +42,11 @@ const Lang g_lang_en = {
     .tile_split_fmt           = "GPU  %s  \xb7  CPU  %s",
     .tile_score_fmt           = "Score  %.2f",
     .tile_progress_meta_fmt   = "%s keys   \xb7   ETA  %s   \xb7   elapsed  %s",
+    .tile_gpu_temp_fmt        = "GPU  %d C",
+    .tile_gpu_temp_paused_fmt = "GPU  %d C  \xb7  cooling, paused",
     .empty_hint               = "Load a .bin or capture live, then press Start",
+    .no_candidate_hint        = "No key above the recovery threshold",
+    .diag_best_fmt            = "best seen  %.1f/burst over %d bursts",
     .status_idle              = "Idle",
     .status_searching         = "Searching...",
     .graph_waiting            = "waiting for data",
