@@ -13,17 +13,35 @@ if not exist "%VSWHERE%" (
     exit /b 1
 )
 
-REM Prefer the newest CUDA-supported toolset (VS 2019-2022). nvcc rejects the
-REM VS 2026 (v18.0+) host compiler. VS2026_FALLBACK lets the caller force -latest.
+REM Pick a CUDA-supported MSVC host compiler. nvcc (through CUDA 13.x) rejects the
+REM VS 2026 v145 toolset -- its support is "experimental" and NVIDIA warns it can
+REM produce incorrect runtime behaviour, which is unacceptable for a brute-forcer.
+REM
+REM Strategy: prefer a native VS 2019-2022 install (its default toolset is fine);
+REM if only VS 2026 is present, still use it but force the v143 (VS 2022) toolset
+REM via -vcvars_ver. That requires the "MSVC v143 - VS 2022 C++ build tools"
+REM individual component to be installed alongside VS 2026 (it coexists with v145).
 set "VSINSTALL="
-for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "$p=&'%VSWHERE%' -latest -version '[16.0,18.0)' -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath; if(-not $p){$p=&'%VSWHERE%' -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath}; $p"`) do set "VSINSTALL=%%v"
+set "VCVARS_TOOLSET="
+for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "&'%VSWHERE%' -latest -version '[16.0,18.0)' -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath"`) do set "VSINSTALL=%%v"
+if not defined VSINSTALL (
+    REM Fall back to the newest VS (2026+), but select the v143 toolset for nvcc.
+    for /f "usebackq delims=" %%v in (`powershell -NoProfile -Command "&'%VSWHERE%' -latest -requires Microsoft.VisualCpp.Tools.HostX64.TargetX64 -property installationPath"`) do set "VSINSTALL=%%v"
+    set "VCVARS_TOOLSET=-vcvars_ver=14.4"
+)
 if not defined VSINSTALL (
     echo ERROR: No suitable Visual Studio installation found.
     exit /b 1
 )
 
-call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64
-if errorlevel 1 exit /b %errorlevel%
+call "%VSINSTALL%\VC\Auxiliary\Build\vcvarsall.bat" x64 %VCVARS_TOOLSET%
+if errorlevel 1 (
+    echo.
+    echo ERROR: MSVC toolset setup failed.
+    if defined VCVARS_TOOLSET echo   Only VS 2026 was found. nvcc cannot use its v145 toolset -- install the
+    if defined VCVARS_TOOLSET echo   "MSVC v143 - VS 2022 C++ x64/x86 build tools" component in the VS Installer.
+    exit /b %errorlevel%
+)
 
 REM Ensure CUDA paths are available after vcvarsall resets the environment
 if defined CUDA_PATH (

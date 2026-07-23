@@ -49,6 +49,12 @@ const Lang g_lang_es = {
     .status_idle              = "En reposo",
     .status_searching         = "Buscando...",
     .graph_waiting            = "esperando datos",
+    /* Veredicto de confianza de la clave recuperada */
+    .conf_confirmed           = "CONFIRMADA",
+    .conf_unverified          = "SIN VERIFICAR - confirma con DSD-FME",
+    .conf_no_key              = "Sin clave confirmada",
+    .conf_searching           = "Buscando - aun sin clave confirmada",
+    .conf_sigma_fmt           = "  %.1f sigma",
     /* Badge KPA */
     .kpa_silence_fmt          = "KPA: %u tramas de silencio",
     /* Barra de estado */
@@ -195,9 +201,16 @@ const Lang g_lang_es = {
     .graph_score_title = "Mejor puntuacion (evolucion)",
 
     /* ---- Filtros de dialogo de archivo ---- */
-    .dlg_bin_filter   = "Payload BIN (*.bin)\0*.bin\0Todos los archivos (*.*)\0*.*\0",
+    .dlg_bin_filter   = "Payload o DSP (*.bin;*.dsp;*.txt)\0*.bin;*.dsp;*.txt\0"
+                        "Payload BIN (*.bin)\0*.bin\0"
+                        "Volcado DSP de DSD-FME (*.dsp;*.txt)\0*.dsp;*.txt\0"
+                        "Todos los archivos (*.*)\0*.*\0",
     .dlg_audio_filter = "Audio DMR (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0"
                         "WAV (*.wav)\0*.wav\0Todos los archivos (*.*)\0*.*\0",
+
+    /* ---- Conversion automatica de volcado DSP ---- */
+    .dsp_src_prefix   = "DSP \xb7 ",
+    .dsp_no_log_note  = "  \xb7  sin log PI (falta MI/ALG)",
 
     /* ---- Copiar / notificacion ---- */
     .btn_copy_key   = "Copiar",

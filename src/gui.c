@@ -192,6 +192,7 @@ typedef struct {
     PayloadSet payloads;
     BruteforceEngine engine;
     BruteforceSnapshot snapshot;
+    BruteforceConfidence confidence;   /* verdict for snapshot.best_key, refreshed each poll */
 
     /* Instantaneous rate tracking (delta between UI ticks) */
     uint64_t last_snap_keys;
@@ -302,8 +303,10 @@ static void copy_key_to_clipboard(HWND hwnd)
     HGLOBAL hMem;
     char *pMem;
 
-    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= 1.0
-        || (g_app.snapshot.best_key & 0xFFFFFFFFFFull) == 0)
+    /* Copy a confirmed OR unverified key (both are shown on the tile); refuse
+     * when there is no meaningful candidate (NO_SIGNAL / legacy). */
+    if (g_app.confidence.verdict != CONF_LIKELY_REAL &&
+        g_app.confidence.verdict != CONF_UNCERTAIN)
         return;
 
     snprintf(key_str, sizeof(key_str), "%010llX",
@@ -739,38 +742,41 @@ static void draw_all_tiles(HDC hdc)
 
     /* === RECOVERED KEY (dominant, left) === */
     {
-        /* A real candidate has a non-zero key and a score well above 1.0 (the
-         * strict metric runs to the hundreds/thousands). A key whose score
-         * rounds to ~0.00 is a residual, not a recovery -- don't present it as one. */
-        int has_cand = (isfinite(g_app.snapshot.best_score) &&
-                        g_app.snapshot.best_score > 1.0 &&
-                        (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) ? 1 : 0;
-        if (!has_cand) {
+        /* Present the best key by its confidence verdict, not its raw score: the
+         * strict metric runs to the thousands for WRONG keys too, so a dictionary/
+         * statistical latch would otherwise masquerade as a recovery. CONFIRMED =
+         * genuine inter-frame speech signal (amber); UNVERIFIED = weak/uncertain
+         * (neutral, verify externally); anything lower shows "no confirmed key"
+         * plus how close the best key got. */
+        int verdict   = g_app.confidence.verdict;
+        int show_key  = (verdict == CONF_LIKELY_REAL || verdict == CONF_UNCERTAIN);
+        int confirmed = (verdict == CONF_LIKELY_REAL);
+        line3[0] = '\0';
+        if (show_key) {
+            unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
+            char sig[32];
+            snprintf(primary, sizeof(primary), "%04llX %04llX %02llX",
+                     (k >> 24) & 0xFFFF, (k >> 8) & 0xFFFF, k & 0xFF);
+            snprintf(sig, sizeof(sig), g_lang.conf_sigma_fmt, g_app.confidence.sigma);
+            snprintf(line2, sizeof(line2), "%s%s",
+                     confirmed ? g_lang.conf_confirmed : g_lang.conf_unverified, sig);
+        } else {
             strcpy_s(primary, sizeof(primary), "----  ----  --");
-            /* Empty / first-run guidance instead of dead zeros */
             if (running)
-                snprintf(line2, sizeof(line2), "%s", g_lang.status_searching);
+                snprintf(line2, sizeof(line2), "%s", g_lang.conf_searching);
             else if (g_app.snapshot.finished && has_payloads)
-                /* finished, nothing crossed the threshold -- say so, don't blank */
-                snprintf(line2, sizeof(line2), "%s", g_lang.no_candidate_hint);
+                snprintf(line2, sizeof(line2), "%s", g_lang.conf_no_key);
             else if (!has_payloads)
                 snprintf(line2, sizeof(line2), "%s", g_lang.empty_hint);
             else
                 line2[0] = '\0';
-        } else {
-            unsigned long long k = g_app.snapshot.best_key & 0xFFFFFFFFFFull;
-            snprintf(primary, sizeof(primary), "%04llX %04llX %02llX",
-                     (k >> 24) & 0xFFFF, (k >> 8) & 0xFFFF, k & 0xFF);
-            snprintf(line2, sizeof(line2), g_lang.tile_score_fmt, g_app.snapshot.best_score);
+            /* Show how close the best key got: a low rate over few frames means
+             * noise or wrong MI; a high rate over every frame would be CONFIRMED. */
+            if (g_app.snapshot.diag_best_bursts > 0)
+                snprintf(line3, sizeof(line3), g_lang.diag_best_fmt,
+                         g_app.snapshot.diag_best_rate, g_app.snapshot.diag_best_bursts);
         }
-        /* With no real candidate, show how close the best key got: a low rate
-         * over few frames means noise or wrong MI, a high rate over every frame
-         * would have cleared the floor. */
-        line3[0] = '\0';
-        if (!has_cand && g_app.snapshot.diag_best_bursts > 0)
-            snprintf(line3, sizeof(line3), g_lang.diag_best_fmt,
-                     g_app.snapshot.diag_best_rate, g_app.snapshot.diag_best_bursts);
-        draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/1, /*result*/has_cand,
+        draw_tile(hdc, &g_app.tile_candidate_rect, /*big*/1, /*result*/confirmed,
                   g_lang.tile_candidate, primary, line2, line3);
     }
 
@@ -1108,10 +1114,110 @@ static void update_kpa_badge(void)
 }
 
 /* --- File dialogs --- */
+
+static int file_exists(const char *path);   /* defined below */
+
+/* True if every char of s is a hex digit (and s is non-empty). */
+static int is_hex_str(const char *s)
+{
+    if (!*s) return 0;
+    for (; *s; ++s)
+        if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'f') ||
+              (*s >= 'A' && *s <= 'F')))
+            return 0;
+    return 1;
+}
+
+/* Sniff whether a picked file is a DSD-FME -Q DSP dump rather than a .bin.
+ * A DSP line is "<slot> <type_hex> <payload_hex>" with slot exactly 1 or 2;
+ * a .bin payload line is a single space-free hex token, so it can never match
+ * (the slot token would carry the whole hex string). Content-based, so the
+ * extension does not matter (DSD-FME names the dump .dsdsp.txt, .dsp, ...). */
+static int file_is_dsp(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    char line[16384];
+    int scanned = 0, hit = 0;
+    if (!f) return 0;
+    while (scanned < 60 && fgets(line, sizeof(line), f)) {
+        char a[64], b[64], c[2048];
+        if (sscanf(line, "%63s %63s %2047s", a, b, c) == 3 &&
+            (strcmp(a, "1") == 0 || strcmp(a, "2") == 0) &&
+            is_hex_str(b) && is_hex_str(c) && strlen(c) >= 4) {
+            hit = 1;
+            break;
+        }
+        scanned++;
+    }
+    fclose(f);
+    return hit;
+}
+
+/* Try to find a log for DSP dump file name `fn` inside directory `dir_sep`
+ * (which must end with a path separator). Tries the base name and up to two
+ * trailing dotted segments stripped (e.g. "x.fromdsdfme.dsdsp" -> "x") with the
+ * log suffixes the GUI (.dslog.txt) and a plain stderr redirect (.log) use. */
+static int try_dsp_log_in_dir(const char *dir_sep, const char *fn,
+                              const char *dsp, char *out, size_t out_len)
+{
+    static const char *suffixes[] = { ".dslog.txt", ".log" };
+    char base[MAX_PATH];
+    int level;
+    snprintf(base, sizeof(base), "%s%s", dir_sep, fn);
+    for (level = 0; level < 3; ++level) {
+        size_t s;
+        for (s = 0; s < sizeof(suffixes) / sizeof(suffixes[0]); ++s) {
+            snprintf(out, out_len, "%s%s", base, suffixes[s]);
+            if (strcmp(out, dsp) != 0 && file_exists(out)) return 1;
+        }
+        { char *dot = strrchr(base, '.'); if (!dot) break; *dot = '\0'; }
+    }
+    return 0;
+}
+
+/* Look for a DSD-FME stderr log near a DSP dump so the converter can attach
+ * ALG/KID/MI tags. Searches the dump's own directory first, then -- because
+ * dsd-fme writes the DSP into a DSP\ subfolder while the stderr log lands one
+ * level up -- the parent directory when the dump sits inside a "DSP" folder.
+ * Returns 1 and fills out on the first hit. */
+static int find_sibling_dsp_log(const char *dsp, char *out, size_t out_len)
+{
+    char drive[_MAX_DRIVE], dir[_MAX_DIR], fn[_MAX_FNAME], ext[_MAX_EXT];
+    char dirpath[MAX_PATH];
+    char *sep, *sep2;
+    size_t n;
+    _splitpath_s(dsp, drive, sizeof(drive), dir, sizeof(dir),
+                 fn, sizeof(fn), ext, sizeof(ext));
+    snprintf(dirpath, sizeof(dirpath), "%s%s", drive, dir);  /* ends with sep */
+    if (try_dsp_log_in_dir(dirpath, fn, dsp, out, out_len)) return 1;
+
+    n = strlen(dirpath);
+    if (n && (dirpath[n-1] == '\\' || dirpath[n-1] == '/')) dirpath[--n] = '\0';
+    sep  = strrchr(dirpath, '\\');
+    sep2 = strrchr(dirpath, '/');
+    if (sep2 > sep) sep = sep2;
+    if (sep && _stricmp(sep + 1, "DSP") == 0) {
+        *(sep + 1) = '\0';   /* keep separator -> parent dir + sep */
+        if (try_dsp_log_in_dir(dirpath, fn, dsp, out, out_len)) return 1;
+    }
+    return 0;
+}
+
+/* Derive the .bin path written next to a DSP dump (<name>.fromdsp.bin). */
+static void make_dsp_bin_path(const char *dsp, char *out, size_t out_len)
+{
+    char drive[_MAX_DRIVE], dir[_MAX_DIR], fn[_MAX_FNAME], ext[_MAX_EXT];
+    _splitpath_s(dsp, drive, sizeof(drive), dir, sizeof(dir),
+                 fn, sizeof(fn), ext, sizeof(ext));
+    snprintf(out, out_len, "%s%s%s.fromdsp.bin", drive, dir, fn);
+}
+
 static void choose_file(HWND owner)
 {
     OPENFILENAMEA ofn;
     char file[MAX_PATH] = {0};
+    char load_path[MAX_PATH];
+    int from_dsp = 0, dsp_no_log = 0;
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
@@ -1119,31 +1225,55 @@ static void choose_file(HWND owner)
     ofn.lpstrFile = file;
     ofn.nMaxFile = MAX_PATH;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-    if (GetOpenFileNameA(&ofn)) {
-        SetWindowTextA(g_app.edit_file, file);
-        /* Auto-load and validate */
-        {
-            char err[256] = {0};
-            payload_set_free(&g_app.payloads);
-            payload_set_init(&g_app.payloads);
-            if (load_payload_file(file, 0, &g_app.payloads, err, sizeof(err))) {
-                char summary[160], warn_txt[160], plbl[480], cmsg[160];
-                int crackable = 0;
-                validate_payload_set(&g_app.payloads, summary, sizeof(summary),
-                                     warn_txt, sizeof(warn_txt));
-                payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
-                if (warn_txt[0])
-                    snprintf(plbl, sizeof(plbl), "%s  %s  \xb7  %s", summary, warn_txt, cmsg);
-                else
-                    snprintf(plbl, sizeof(plbl), "%s  \xb7  %s", summary, cmsg);
-                SetWindowTextA(g_app.payload_label, plbl);
-                update_kpa_badge();
-                strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), file);
-                EnableWindow(g_app.btn_export, TRUE);
-            } else {
-                SetWindowTextA(g_app.payload_label, err);
-                update_kpa_badge();
-            }
+    if (!GetOpenFileNameA(&ofn)) return;
+
+    strcpy_s(load_path, sizeof(load_path), file);
+
+    /* If the user picked a DSD-FME DSP dump, convert it to a .bin first
+     * (same native converter used by the Demodulate flow). */
+    if (file_is_dsp(file)) {
+        char gen_bin[MAX_PATH], logf[MAX_PATH], cerr[256] = {0};
+        int have_log = find_sibling_dsp_log(file, logf, sizeof(logf));
+        make_dsp_bin_path(file, gen_bin, sizeof(gen_bin));
+        if (!dsp_convert_to_bin(file, gen_bin, have_log ? logf : NULL,
+                                cerr, sizeof(cerr))) {
+            SetWindowTextA(g_app.payload_label,
+                           cerr[0] ? cerr : g_lang.err_dsp_conversion);
+            update_kpa_badge();
+            return;
+        }
+        strcpy_s(load_path, sizeof(load_path), gen_bin);
+        from_dsp = 1;
+        dsp_no_log = !have_log;
+    }
+
+    SetWindowTextA(g_app.edit_file, load_path);
+    /* Auto-load and validate */
+    {
+        char err[256] = {0};
+        payload_set_free(&g_app.payloads);
+        payload_set_init(&g_app.payloads);
+        if (load_payload_file(load_path, 0, &g_app.payloads, err, sizeof(err))) {
+            char summary[160], warn_txt[160], plbl[560], cmsg[160];
+            const char *src   = from_dsp   ? g_lang.dsp_src_prefix  : "";
+            const char *nolog = dsp_no_log ? g_lang.dsp_no_log_note : "";
+            int crackable = 0;
+            validate_payload_set(&g_app.payloads, summary, sizeof(summary),
+                                 warn_txt, sizeof(warn_txt));
+            payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
+            if (warn_txt[0])
+                snprintf(plbl, sizeof(plbl), "%s%s  %s  \xb7  %s%s",
+                         src, summary, warn_txt, cmsg, nolog);
+            else
+                snprintf(plbl, sizeof(plbl), "%s%s  \xb7  %s%s",
+                         src, summary, cmsg, nolog);
+            SetWindowTextA(g_app.payload_label, plbl);
+            update_kpa_badge();
+            strcpy_s(g_app.loaded_file, sizeof(g_app.loaded_file), load_path);
+            EnableWindow(g_app.btn_export, TRUE);
+        } else {
+            SetWindowTextA(g_app.payload_label, err);
+            update_kpa_badge();
         }
     }
 }
@@ -1501,9 +1631,9 @@ static DWORD WINAPI listen_thread_proc(LPVOID param)
     DWORD proc_exit = 1;
     (void)param;
 
-    /* Recovered key: require a real candidate (a ~0.00 residual is not one) */
-    if (!isfinite(g_app.snapshot.best_score) || g_app.snapshot.best_score <= 1.0
-        || (g_app.snapshot.best_key & 0xFFFFFFFFFFull) == 0) {
+    /* Recovered key: require a CONFIRMED candidate (a latch / unverified best is
+     * not offered for decryption). */
+    if (g_app.confidence.verdict != CONF_LIKELY_REAL) {
         SetWindowTextA(g_app.demod_label, g_lang.err_listen_no_key);
         goto done;
     }
@@ -1995,6 +2125,13 @@ static void refresh_snapshot_and_ui(void)
     QueryPerformanceCounter(&now);
     bruteforce_get_snapshot(&g_app.engine, &g_app.snapshot);
 
+    /* Re-score the current best key into a capture-normalized confidence verdict.
+     * Drives whether the UI presents it as a recovered key or as "no confirmed
+     * key" -- a statistical/dictionary latch scores high but verdicts NO_SIGNAL. */
+    bruteforce_confidence(&g_app.payloads, g_app.snapshot.best_key,
+                          g_app.engine.cfg.sample_lines, g_app.engine.cfg.sample_bytes,
+                          &g_app.confidence);
+
     /* Compute instantaneous rates from delta between ticks */
     if (g_app.last_snap_time.QuadPart > 0 && g_app.engine.qpc_freq.val.QuadPart > 0) {
         double dt = (double)(now.QuadPart - g_app.last_snap_time.QuadPart)
@@ -2025,20 +2162,18 @@ static void refresh_snapshot_and_ui(void)
     else
         SetWindowTextA(g_app.btn_pause, g_lang.btn_pause);
 
-    /* Enable "Listen" once a real candidate key exists (decrypt source WAV to
-     * audio). Match draw_all_tiles: a ~0.00 residual is not a recovery. */
+    /* Enable "Listen" only for a CONFIRMED key (decrypt source WAV to audio).
+     * An unverified/low-confidence best is not offered for playback. */
     if (g_app.btn_listen) {
-        BOOL have_key = (isfinite(g_app.snapshot.best_score) &&
-                         g_app.snapshot.best_score > 1.0 &&
-                         (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) ? TRUE : FALSE;
+        BOOL have_key = (g_app.confidence.verdict == CONF_LIKELY_REAL) ? TRUE : FALSE;
         EnableWindow(g_app.btn_listen, have_key);
     }
 
-    /* Key-found notification: flash taskbar when search completes with a result */
+    /* Key-found notification: flash taskbar when search completes with a
+     * CONFIRMED result (not a statistical latch). */
     if (g_app.snapshot.finished && !g_app.notified_completion) {
         g_app.notified_completion = 1;
-        if (isfinite(g_app.snapshot.best_score) && g_app.snapshot.best_score > 1.0 &&
-            (g_app.snapshot.best_key & 0xFFFFFFFFFFull) != 0) {
+        if (g_app.confidence.verdict == CONF_LIKELY_REAL) {
             FLASHWINFO fwi;
             fwi.cbSize = sizeof(fwi);
             fwi.hwnd = g_app.hwnd;

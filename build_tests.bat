@@ -38,31 +38,31 @@ goto end
 
 :strict
 echo [test_strict_score]
-cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fe:bin\test_strict_score.exe tests\test_strict_score.c src\bruteforce.c src\rc4.c src\payload_io.c /Iinclude user32.lib gdi32.lib comdlg32.lib shell32.lib advapi32.lib
+cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fo:bin\ /Fe:bin\test_strict_score.exe tests\test_strict_score.c src\bruteforce.c src\rc4.c src\payload_io.c /Iinclude user32.lib gdi32.lib comdlg32.lib shell32.lib advapi32.lib
 if errorlevel 1 set "FAIL=1"
 exit /b 0
 
 :canonical
 echo [test_score_canonical]
-cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fe:bin\test_score_canonical.exe tests\test_score_canonical.c src\rc4.c src\payload_io.c /Iinclude user32.lib gdi32.lib comdlg32.lib shell32.lib advapi32.lib
+cl /nologo /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /Fo:bin\ /Fe:bin\test_score_canonical.exe tests\test_score_canonical.c src\rc4.c src\payload_io.c /Iinclude user32.lib gdi32.lib comdlg32.lib shell32.lib advapi32.lib
 if errorlevel 1 set "FAIL=1"
 exit /b 0
 
 :hytera
 echo [test_hytera_ks]
-cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fe:bin\test_hytera_ks.exe tests\test_hytera_ks.c /Iinclude
+cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fo:bin\ /Fe:bin\test_hytera_ks.exe tests\test_hytera_ks.c /Iinclude
 if errorlevel 1 set "FAIL=1"
 exit /b 0
 
 :silence
 echo [test_silence_guard]
-cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fe:bin\test_silence_guard.exe tests\test_silence_guard.c src\payload_io.c /Iinclude
+cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fo:bin\ /Fe:bin\test_silence_guard.exe tests\test_silence_guard.c src\payload_io.c /Iinclude
 if errorlevel 1 set "FAIL=1"
 exit /b 0
 
 :dsp
 echo [test_dsp_convert]
-cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fe:bin\test_dsp_convert.exe tests\test_dsp_convert.c src\payload_io.c /Iinclude
+cl /nologo /O2 /W4 /D_CRT_SECURE_NO_WARNINGS /Fo:bin\ /Fe:bin\test_dsp_convert.exe tests\test_dsp_convert.c src\payload_io.c /Iinclude
 if errorlevel 1 set "FAIL=1"
 exit /b 0
 

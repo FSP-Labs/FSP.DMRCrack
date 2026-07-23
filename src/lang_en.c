@@ -50,6 +50,12 @@ const Lang g_lang_en = {
     .status_idle              = "Idle",
     .status_searching         = "Searching...",
     .graph_waiting            = "waiting for data",
+    /* Recovered-key confidence verdict */
+    .conf_confirmed           = "CONFIRMED",
+    .conf_unverified          = "UNVERIFIED - confirm with DSD-FME",
+    .conf_no_key              = "No confirmed key",
+    .conf_searching           = "Searching - no confirmed key yet",
+    .conf_sigma_fmt           = "  %.1f sigma",
     /* KPA badge */
     .kpa_silence_fmt          = "KPA: %u silence frames",
     /* Status strip */
@@ -196,9 +202,16 @@ const Lang g_lang_en = {
     .graph_score_title = "Best score (evolution)",
 
     /* ---- File dialog filters ---- */
-    .dlg_bin_filter   = "BIN payload (*.bin)\0*.bin\0All files (*.*)\0*.*\0",
+    .dlg_bin_filter   = "Payload or DSP (*.bin;*.dsp;*.txt)\0*.bin;*.dsp;*.txt\0"
+                        "BIN payload (*.bin)\0*.bin\0"
+                        "DSD-FME DSP dump (*.dsp;*.txt)\0*.dsp;*.txt\0"
+                        "All files (*.*)\0*.*\0",
     .dlg_audio_filter = "DMR Audio (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0"
                         "WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0",
+
+    /* ---- DSP-dump auto-conversion ---- */
+    .dsp_src_prefix   = "DSP \xb7 ",
+    .dsp_no_log_note  = "  \xb7  no PI log found (MI/ALG missing)",
 
     /* ---- Copy / notification ---- */
     .btn_copy_key   = "Copy",

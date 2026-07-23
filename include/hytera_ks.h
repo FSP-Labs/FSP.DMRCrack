@@ -26,22 +26,16 @@
 
 #include <stdint.h>
 
-/* Generate `n` keystream bytes (n <= 256 of practical use; a full voice
- * superframe needs 126 = 18 AMBE frames x 7 bytes). */
-static inline void hytera_compute_ks(const unsigned char key5[5], uint64_t mi,
-                                     unsigned char *ks_out, int n)
+/* MI-FREE RC4 keystream: KSA(key5) + PRGA -> raw[i] = S[S[a]+S[b]]. This is the
+ * expensive part and it depends ONLY on the 40-bit key -- it is byte-identical
+ * for every superframe of a session. Hot paths compute it ONCE per key and then
+ * apply the cheap per-superframe MI mask with hytera_apply_kiv(). */
+static inline void hytera_compute_raw(const unsigned char key5[5],
+                                      unsigned char *raw, int n)
 {
     unsigned char S[256];
-    unsigned char kiv[5];
     unsigned char j = 0, t, a = 0, b = 0;
     int i;
-
-    kiv[0] = (unsigned char)(key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu));
-    kiv[1] = (unsigned char)(key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu));
-    kiv[2] = (unsigned char)(key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu));
-    kiv[3] = (unsigned char)(key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu));
-    kiv[4] = (unsigned char)(key5[4] ^ (unsigned char)( mi        & 0xFFu));
-
     for (i = 0; i < 256; ++i) S[i] = (unsigned char)i;
     for (i = 0; i < 256; ++i) {
         j = (unsigned char)(j + S[i] + key5[i % 5]);   /* KSA, key5 only, drop=0 */
@@ -51,8 +45,37 @@ static inline void hytera_compute_ks(const unsigned char key5[5], uint64_t mi,
         a = (unsigned char)(a + 1);
         b = (unsigned char)(b + S[a]);
         t = S[a]; S[a] = S[b]; S[b] = t;
-        ks_out[i] = (unsigned char)(kiv[i % 5] ^ S[(unsigned char)(S[a] + S[b])]);
+        raw[i] = S[(unsigned char)(S[a] + S[b])];
     }
+}
+
+/* Apply the per-superframe MI mask: ks[i] = raw[i] ^ (key5[i%5] ^ MI[i%5]), MI
+ * 40-bit big-endian. Cheap (n XORs); call once per superframe over the MI-free
+ * stream from hytera_compute_raw(). */
+static inline void hytera_apply_kiv(const unsigned char *raw,
+                                    const unsigned char key5[5], uint64_t mi,
+                                    unsigned char *ks_out, int n)
+{
+    unsigned char kiv[5];
+    int i;
+    kiv[0] = (unsigned char)(key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu));
+    kiv[1] = (unsigned char)(key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu));
+    kiv[2] = (unsigned char)(key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu));
+    kiv[3] = (unsigned char)(key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu));
+    kiv[4] = (unsigned char)(key5[4] ^ (unsigned char)( mi        & 0xFFu));
+    for (i = 0; i < n; ++i)
+        ks_out[i] = (unsigned char)(raw[i] ^ kiv[i % 5]);
+}
+
+/* Full keystream (raw + MI mask) in one call. Thin wrapper the self-test and any
+ * non-hot-path caller use; behaviour is identical to before the raw/kiv split.
+ * n <= 256 (a full voice superframe needs 126 = 18 AMBE frames x 7 bytes). */
+static inline void hytera_compute_ks(const unsigned char key5[5], uint64_t mi,
+                                     unsigned char *ks_out, int n)
+{
+    unsigned char raw[256];
+    hytera_compute_raw(key5, raw, n);
+    hytera_apply_kiv(raw, key5, mi, ks_out, n);
 }
 
 /* Extract 8 keystream bits starting at MSB-first bit offset `bit_off`, spanning

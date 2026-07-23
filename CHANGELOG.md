@@ -8,6 +8,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Confidence verdict.** The best key is re-scored into a capture-size-normalized
+  significance `Z = (r − 24)·√n / √12` (mean per-burst inter-frame agreement `r`
+  over `n` bursts) and presented as a plain verdict — **CONFIRMED** (Z ≥ 12),
+  **UNVERIFIED** (7 ≤ Z < 12, confirm externally), or **no confirmed key** — in
+  both the GUI candidate tile and the CLI result. A statistical/dictionary latch
+  inflates the chi² term but cannot fake inter-frame agreement, so its Z stays
+  near zero and it is never presented as a recovery (fixes a genuine correct key,
+  e.g. `CAFEBABE00`, being dismissed because a raw score looked like noise). Copy,
+  Listen, potfile and JSON output are gated on the verdict.
+- **Native RTX 50-series (Blackwell) support.** The build now emits native
+  `sm_120` SASS (CUDA 12.8+) alongside sm_75/86/89, so the 50-series no longer
+  depends on PTX JIT. Fixes the CMake target, which pointed at datacenter `sm_100`
+  rather than consumer `sm_120`.
+- **Hytera inter-superframe MI LFSR.** Both converters now advance the 40-bit
+  Hytera MI with its own 5-byte Galois LFSR (taps `12 24 48 22 14`, ported
+  verbatim from DSD-FME), so a capture with a single CRC-valid Hytera PI header
+  tags every subsequent superframe instead of reusing one MI.
+- **Second Hytera algid.** Hytera Enhanced Privacy is recognised under both
+  `ALG=0x02` and `ALG=0x26` (single-sourced `IS_HYTERA_EP_ALG`).
+- **GPU error surfaced to the CLI.** A GPU backend failure (e.g. a kernel
+  launch/JIT failure) is now reported as `error: GPU search failed: …` with a
+  non-zero exit, instead of the misleading `Search interrupted / best key
+  0000000000` that read as a user cancel.
+- `tools/gen_hytera_synth.c` — generates a synthetic ALG=0x02 capture with a
+  planted key so the real GPU/OpenCL Hytera kernel can be exercised end-to-end.
+
+### Changed
+- **Noise-tolerant detection floor.** The per-burst early-reject was re-derived
+  from `33·n − 6.92·√n` (which required ~33/burst and pruned the correct key on
+  noisy over-the-air captures — the "finds nothing / wrong key" bug) to
+  `24·n + 8·√n`, just above the wrong-key random baseline. It rejects wrong keys
+  within a superframe while keeping even a badly degraded correct key. Applied
+  identically across the CUDA, OpenCL and CPU scorers.
+- **Faster Hytera kernel.** The RC4 keystream is MI-independent, so it is now
+  built once per key and only re-masked per superframe (was a full KSA+PRGA per
+  superframe). Measured ~3.4× on an RTX 3050 Ti (~3 → ~10 M keys/s); output is
+  byte-for-byte identical (guarded by `tests/test_hytera_ks.c`).
+- The unsupported-cipher message names the actual DSD-FME algid family (DES,
+  AES-128/256, Kirisun) instead of always guessing "AES".
+- `_vsenv.bat` selects the CUDA-supported MSVC v143 toolset when only VS 2026
+  (v145, which nvcc rejects) is installed.
+
+### Fixed
+- Build no longer litters the repository root with `.obj` files — the `cl`-based
+  build scripts now emit intermediates to `bin/` (`/Fo`).
+
 ---
 
 ## [0.4.1] - 2026-06-18

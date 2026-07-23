@@ -170,18 +170,20 @@ elseif(USE_CUDA)
         )
     endif()
 
-    # sm_100 (Blackwell) — requires CUDA 12.8+
+    # sm_120 (Blackwell consumer, RTX 50xx) — requires CUDA 12.8+.
+    # NOTE: consumer Blackwell is sm_120, NOT sm_100 (that is datacenter B100/B200).
+    # Shipping sm_120 SASS removes the PTX-JIT dependency on the 50-series, which
+    # can silently fail to launch on some driver/toolkit combos.
     if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
         target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_100,code=sm_100>
+            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_120,code=sm_120>
         )
     endif()
 
-    # PTX fallback: JIT-compile for future GPU generations
-    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "12.8")
-        target_compile_options(dmrcrack PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_100,code=compute_100>)
-    elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
+    # PTX fallback: JIT-compile for future / other GPU generations. compute_89 PTX
+    # is forward-compatible with everything >= sm_89 (incl. sm_120), so it covers
+    # Hopper, datacenter Blackwell and any 50xx built on a pre-12.8 toolkit.
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL "11.8")
         target_compile_options(dmrcrack PRIVATE
             $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_89,code=compute_89>)
     else()

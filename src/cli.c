@@ -679,28 +679,56 @@ int main(int argc, char **argv)
     printf("\n\n");
 
     /* -- Result ----------------------------------------------------------- */
-    if (snap.finished) {
-        printf("Search complete.\n");
-        printf("Best key:   ");
-        print_key(snap.best_key);
-        printf("\nBest score: %.4f\n", snap.best_score);
-        printf("  (highest-scoring key over the searched range - the recovered key)\n");
-        potfile_append(potfile, bin_path, snap.best_key, snap.best_score);
-        if (json_out) print_json_result(bin_path, snap.best_key, snap.best_score);
+    int rc = 0;
+    if (!snap.finished && snap.gpu_error[0]) {
+        /* The GPU backend failed (e.g. a kernel launch / PTX-JIT failure on a
+         * new GPU arch). Report it as an error -- NOT as a user interrupt with a
+         * junk "best key 0000000000", which is what happened before this check. */
+        fprintf(stderr, "error: GPU search failed: %s\n", snap.gpu_error);
+        rc = 1;
     } else {
-        printf("Search interrupted. Progress saved to %s\n", progress_path);
-        printf("Best so far: ");
-        print_key(snap.best_key);
-        printf("  (score %.4f)\n", snap.best_score);
-    }
+        /* Gate the "recovered key" claim on a capture-normalized confidence
+         * verdict, not the raw score: a wrong/dictionary key also scores in the
+         * thousands. Only a CONFIRMED key is written to the potfile / JSON. */
+        BruteforceConfidence conf;
+        bruteforce_confidence(&g_payloads, snap.best_key,
+                              cfg.sample_lines, cfg.sample_bytes, &conf);
 
-    /* The closest any key got regardless of the recovery floor. A low rate or
-     * few bursts points at a noisy capture or the wrong MI rather than a key
-     * just outside the searched range. */
-    if (snap.diag_best_bursts > 0) {
-        printf("Closest candidate: ");
-        print_key(snap.diag_best_key);
-        printf("  (%.1f/burst over %d bursts)\n", snap.diag_best_rate, snap.diag_best_bursts);
+        if (snap.finished) {
+            printf("Search complete.\n");
+            if (conf.verdict == CONF_LIKELY_REAL) {
+                printf("Recovered key: ");
+                print_key(snap.best_key);
+                printf("  (CONFIRMED, %.1f sigma)\n", conf.sigma);
+                potfile_append(potfile, bin_path, snap.best_key, snap.best_score);
+                if (json_out) print_json_result(bin_path, snap.best_key, snap.best_score);
+            } else if (conf.verdict == CONF_UNCERTAIN) {
+                printf("Best candidate (UNVERIFIED, %.1f sigma): ", conf.sigma);
+                print_key(snap.best_key);
+                printf("\n  Confirm with DSD-FME before use; not written to potfile.\n");
+            } else {
+                printf("No confirmed key");
+                if (conf.bursts > 0)
+                    printf(" (best %.1f sigma, below the %.0f-sigma bar)",
+                           conf.sigma, (double)CONF_SIGMA_UNCERTAIN);
+                printf(".\n");
+            }
+        } else {
+            printf("Search interrupted. Progress saved to %s\n", progress_path);
+            printf("Best so far: ");
+            print_key(snap.best_key);
+            if (conf.bursts > 0) printf("  (%.1f sigma)", conf.sigma);
+            printf("\n");
+        }
+
+        /* The closest any key got regardless of the recovery floor. A low rate or
+         * few bursts points at a noisy capture or the wrong MI rather than a key
+         * just outside the searched range. */
+        if (snap.diag_best_bursts > 0) {
+            printf("Closest candidate: ");
+            print_key(snap.diag_best_key);
+            printf("  (%.1f/burst over %d bursts)\n", snap.diag_best_rate, snap.diag_best_bursts);
+        }
     }
 
     bruteforce_stop(&g_engine);
@@ -711,7 +739,7 @@ int main(int argc, char **argv)
     for (int i = 0; i < argc; ++i) free(argv[i]);
     free(argv);
 #endif
-    return 0;
+    return rc;
 }
 
 #endif /* NO_GUI / Linux */

@@ -219,12 +219,11 @@ static void precompute_packs_cpu(const PayloadSet *payloads, size_t line_count,
 
 /*
  * Score a candidate key from precomputed packs. Bit-for-bit identical to the
- * mode_policy>=2 branch of score_candidate() for any key, but ~Nx faster.
- * When prune != 0, the per-burst absolute floor (33k - 6.92*sqrt(k), the same
- * threshold the GPU kernel applies via d_abs_floor[]) rejects a key the moment
- * its running score can no longer belong to the correct key; a pruned key
- * returns -DBL_MAX so the caller skips it. With prune == 0 the full score is
- * always returned.
+ * mode_policy>=2 branch of score_candidate() for any key, but ~Nx faster. When
+ * prune != 0, applies the noise-tolerant per-burst early-reject (floor =
+ * 24*n + 8*sqrt(n), mirrors the GPU HFLOOR_* constants) and returns early with a
+ * low partial score for keys that fall below it -- rejecting wrong keys within a
+ * superframe while keeping any near-baseline correct key.
  */
 static double score_packed_cpu(const unsigned char *packs,
                                const PayloadSet *payloads,
@@ -281,16 +280,14 @@ static double score_packed_cpu(const unsigned char *packs,
               for (_b = 0; _b < 8; ++_b) bit_counts[8 + _b]  += (d0[1] >> (7 - _b)) & 1;
               for (_b = 0; _b < 8; ++_b) bit_counts[16 + _b] += (d0[2] >> (7 - _b)) & 1; }
             processed++;
-
-            if (prune) {
-                double floor_v = 33.0 * (double)processed
-                               - 6.92 * sqrt((double)processed);
-                if (total < floor_v) return -DBL_MAX;
+            if (prune && processed >= 6 &&
+                total < 24.0 * processed + 8.0 * sqrt((double)processed)) {
+                return total;   /* below floor: return low partial score, skip rest */
             }
         }
     }
     /* Canonical chi2/processed_bursts bit-frequency term (matches the GPU/OpenCL/
-     * host scorers). Pruning above stays Hamming-only, exactly like the kernels. */
+     * host scorers). */
     if (processed >= 6) {
         double half_n = (double)processed * 0.5, chi2 = 0.0;
         int _b;
@@ -667,9 +664,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL worker_proc(void *arg)
     double local_best_score = -DBL_MAX;
 
     /* Fast path for MOTOTRBO RC4 + MI captures: precomputed packs let the hot
-     * loop run RC4 + Hamming only, with hashcat-style abs_floor pruning. Pruning
-     * is gated on a wide keyspace so narrow ranges (mask/known-prefix) still
-     * score in full and never risk rejecting the sought key. */
+     * loop run RC4 + Hamming with a noise-tolerant early-reject. Pruning is gated
+     * on a wide keyspace so narrow mask/prefix searches score every key in full. */
     const int            correct = engine->cpu_mode_correct;
     const unsigned char *packs   = engine->cpu_cipher_packs;
     const size_t         scn     = (size_t)engine->cfg.sample_lines;
@@ -693,13 +689,6 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL worker_proc(void *arg)
         key_to_5bytes(k, key_bytes);
         if (correct) {
             score = score_packed_cpu(packs, engine->payloads, scn, key_bytes, prune);
-            if (score == -DBL_MAX) {          /* pruned: cannot be the best key */
-                local_count++;
-                if ((local_count & 0x3FFu) == 0)
-                    plat_atomic64_add(&engine->keys_tested, 1024LL);
-                if (k == ctx->end_key) break;
-                continue;
-            }
         } else {
             score = score_candidate(engine->payloads, engine->cfg.sample_lines,
                                     engine->cfg.sample_bytes, key_bytes);
@@ -934,6 +923,15 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     out->paused   = (int)plat_atomic32_load((plat_atomic32_t *)&engine->paused);
     out->finished = (int)plat_atomic32_load((plat_atomic32_t *)&engine->search_completed);
 
+    /* CPU-only engine: no GPU diagnostics; zero the fields the CUDA path fills so
+     * a non-zero-initialized caller snapshot never reads stale data. */
+    out->diag_best_key = 0;
+    out->diag_best_rate = 0.0;
+    out->diag_best_bursts = 0;
+    out->gpu_temp_c = 0;
+    out->cpu_temp_c = 0;
+    out->gpu_error[0] = '\0';
+
     if (elapsed > 0.0) {
         out->keys_per_second = (double)keys / elapsed;
     } else {
@@ -954,4 +952,75 @@ double bruteforce_test_score(
     const unsigned char key[5])
 {
     return score_candidate(payloads, sample_lines, sample_bytes, key);
+}
+
+/* CPU-only twin of the CUDA bruteforce_confidence(): re-scores best_key and
+ * decomposes into the inter-frame Hamming rate + chi2/n needed for the verdict.
+ * Handles the KMI9 (MOTOTRBO RC4 + MI) path; legacy/no-MI captures yield
+ * CONF_NA. (The CPU-only build has no Hytera scorer, so Hytera falls to NA too.) */
+void bruteforce_confidence(
+    const PayloadSet *payloads,
+    uint64_t best_key,
+    int sample_lines,
+    int sample_bytes,
+    BruteforceConfidence *out)
+{
+    unsigned char key5[5];
+    size_t line_count, line_idx;
+    long bit_counts[24];
+    double hamming_sum = 0.0, chi2 = 0.0;
+    int processed = 0, b, mi_rc4_lines = 0;
+
+    (void)sample_bytes;
+    out->hamming_per_burst = 0.0;
+    out->chi2_per_burst    = 0.0;
+    out->bursts            = 0;
+    out->sigma             = 0.0;
+    out->verdict           = CONF_NA;
+
+    if (payloads == NULL || best_key == 0) return;
+
+    line_count = payloads->count;
+    if (sample_lines > 0 && (size_t)sample_lines < line_count)
+        line_count = (size_t)sample_lines;
+
+    for (line_idx = 0; line_idx < line_count; ++line_idx) {
+        const PayloadLine *line = &payloads->items[line_idx];
+        uint8_t alg = line->has_algid ? line->algid : payloads->global_algid;
+        if (line->has_mi && is_rc4_alg_cpu(alg)) mi_rc4_lines++;
+    }
+    if (line_count == 0 || mi_rc4_lines * 3 < (int)line_count) return; /* legacy -> CONF_NA */
+
+    key_to_5bytes(best_key, key5);
+    memset(bit_counts, 0, sizeof(bit_counts));
+    for (line_idx = 0; line_idx < line_count; ++line_idx) {
+        const PayloadLine *line = &payloads->items[line_idx];
+        uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
+        int burst_pos = (int)(line_idx % 6);
+        if (line->len >= 33) {
+            unsigned char sf0[24];
+            hamming_sum += score_burst_correct_cpu(line->data, key5, mi, burst_pos, sf0);
+            for (b = 0; b < 24; ++b) bit_counts[b] += sf0[b];
+            processed++;
+        }
+    }
+    if (processed <= 0) return;
+
+    if (processed >= 6) {
+        double half_n = (double)processed * 0.5;
+        for (b = 0; b < 24; ++b) { double dev = (double)bit_counts[b] - half_n; chi2 += dev * dev; }
+    }
+
+    out->hamming_per_burst = hamming_sum / (double)processed;
+    out->chi2_per_burst    = chi2 / (double)processed;
+    out->bursts            = processed;
+    out->sigma = (out->hamming_per_burst - CONF_RANDOM_BASELINE)
+               * sqrt((double)processed) / CONF_WRONG_STD_PER_BURST;
+
+    if (out->sigma >= CONF_SIGMA_LIKELY && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
+        out->verdict = CONF_LIKELY_REAL;
+    else if (out->sigma >= CONF_SIGMA_UNCERTAIN)
+        out->verdict = CONF_UNCERTAIN;
+    else
+        out->verdict = CONF_NO_SIGNAL;
 }

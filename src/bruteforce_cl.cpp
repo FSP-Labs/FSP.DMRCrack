@@ -45,6 +45,13 @@
 extern "C" {
 #include "rc4.h"
 #include "dmr_tables.h"
+#include "hytera_ks.h"
+
+/* Host-side Hytera keystream length (per-backend constant, matches the CUDA and
+ * embedded-OpenCL definitions): 126 bytes cover all 18 AMBE frames. */
+#ifndef HYTERA_KS_BYTES
+#define HYTERA_KS_BYTES 126
+#endif
 }
 
 #define CL_TARGET_OPENCL_VERSION 120
@@ -105,7 +112,7 @@ static int is_rc4_alg_cpu(uint8_t alg)
 
 static int is_hytera_ep_alg_cpu(uint8_t alg)
 {
-    return alg == 0x02;
+    return IS_HYTERA_EP_ALG(alg);
 }
 
 /* Inter-frame Hamming score for one burst (MOTOTRBO KMI9 pipeline). */
@@ -113,7 +120,8 @@ static double score_burst_correct_cpu(
     const unsigned char *payload33,
     const unsigned char key5[5],
     uint32_t mi,
-    int burst_pos)
+    int burst_pos,
+    unsigned char *out_sf0)   /* optional: 24 sub-frame-0 bits for chi2 (may be NULL) */
 {
     unsigned char kmi9[9];
     int sf, i, j, bi;
@@ -184,6 +192,7 @@ static double score_burst_correct_cpu(
             h01 += dec24[0][i] ^ dec24[1][i];
             h12 += dec24[1][i] ^ dec24[2][i];
         }
+        if (out_sf0) for (i = 0; i < 24; ++i) out_sf0[i] = dec24[0][i];
         return (double)(48 - h01 - h12);
     }
 }
@@ -222,7 +231,7 @@ static double score_candidate(
             uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
             int burst_pos = (int)(line_idx % 6);
             if (line->len >= 33) {
-                score += score_burst_correct_cpu(line->data, key, mi, burst_pos);
+                score += score_burst_correct_cpu(line->data, key, mi, burst_pos, NULL);
             }
         }
         return score;
@@ -1020,6 +1029,21 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     out->keys_per_second = (elapsed > 0.0) ? (double)keys / elapsed : 0.0;
     out->eta_seconds = (out->keys_per_second > 0.0 && total > keys)
                      ? (double)(total - keys) / out->keys_per_second : -1.0;
+
+    /* OpenCL backend has no closest-candidate diag or temperature sensors; zero
+     * them so a non-zero-initialized caller snapshot never reads stale data. The
+     * GPU error string is reported via engine->cuda_error (shared field). */
+    out->gpu_temp_c = 0;
+    out->cpu_temp_c = 0;
+    out->diag_best_key = 0;
+    out->diag_best_rate = 0.0;
+    out->diag_best_bursts = 0;
+    {
+        size_t j;
+        for (j = 0; j + 1 < sizeof(out->gpu_error) && engine->cuda_error[j]; ++j)
+            out->gpu_error[j] = engine->cuda_error[j];
+        out->gpu_error[j] = '\0';
+    }
 }
 
 double bruteforce_test_score(
@@ -1029,6 +1053,128 @@ double bruteforce_test_score(
     const unsigned char key[5])
 {
     return score_candidate(payloads, sample_lines, sample_bytes, key);
+}
+
+/* Re-score best_key and decompose into the inter-frame Hamming rate + chi2/n for
+ * the confidence verdict. Handles KMI9 (mode>=2) and Hytera EP (mode 4); legacy
+ * captures yield CONF_NA. Mirrors bruteforce.cu's score_candidate_host_ex. */
+void bruteforce_confidence(
+    const PayloadSet *payloads,
+    uint64_t best_key,
+    int sample_lines,
+    int sample_bytes,
+    BruteforceConfidence *out)
+{
+    unsigned char key5[5];
+    size_t line_count, p;
+    long bit_counts[24];
+    double hamming_sum = 0.0, chi2 = 0.0;
+    int n = 0, i, j, mode = 0, mi_rc4 = 0, mi_hyt = 0;
+
+    (void)sample_bytes;
+    out->hamming_per_burst = 0.0;
+    out->chi2_per_burst = 0.0;
+    out->bursts = 0;
+    out->sigma = 0.0;
+    out->verdict = CONF_NA;
+
+    if (payloads == NULL || best_key == 0) return;
+
+    line_count = payloads->count;
+    if (sample_lines > 0 && (size_t)sample_lines < line_count)
+        line_count = (size_t)sample_lines;
+
+    for (p = 0; p < line_count; ++p) {
+        const PayloadLine *line = &payloads->items[p];
+        uint8_t alg = line->has_algid ? line->algid : payloads->global_algid;
+        if (!line->has_mi) continue;
+        if (is_rc4_alg_cpu(alg))       mi_rc4++;
+        if (is_hytera_ep_alg_cpu(alg)) mi_hyt++;
+    }
+    if (line_count > 0 && mi_hyt * 10 >= (int)line_count * 9)      mode = 4;
+    else if (line_count > 0 && mi_rc4 * 3 >= (int)line_count)      mode = 2;
+    if (mode < 2) return;   /* legacy / no MI -> CONF_NA */
+
+    key_to_5bytes(best_key, key5);
+    memset(bit_counts, 0, sizeof(bit_counts));
+
+    if (mode == 4) {
+        for (size_t sf_base = 0; sf_base < line_count; sf_base += 6) {
+            uint64_t mi = payloads->items[sf_base].has_mi
+                          ? payloads->items[sf_base].mi : payloads->global_mi;
+            unsigned char ks[HYTERA_KS_BYTES];
+            hytera_compute_ks(key5, mi, ks, HYTERA_KS_BYTES);
+            for (p = sf_base; p < sf_base + 6 && p < line_count; ++p) {
+                const PayloadLine *line = &payloads->items[p];
+                int burst_pos = (int)(p - sf_base);
+                unsigned char dec24[3][24];
+                if (line->len < 33) continue;
+                for (int sf = 0; sf < 3; ++sf) {
+                    unsigned char ambe_fr[4][24];
+                    unsigned char cipher7[7], plain7[7], bits49[49];
+                    int bi = 0, f;
+                    memset(ambe_fr, 0, sizeof(ambe_fr));
+                    for (i = 0; i < 36; ++i) {
+                        int d = sf_dibit_idx_cpu[sf][i];
+                        int byte_idx = d >> 2, shift = (3 - (d & 3)) * 2;
+                        unsigned char dibit = (unsigned char)((line->data[byte_idx] >> shift) & 0x3u);
+                        ambe_fr[rW_cpu[i]][rX_cpu[i]] = (unsigned char)((dibit >> 1) & 1u);
+                        ambe_fr[rY_cpu[i]][rZ_cpu[i]] = (unsigned char)(dibit & 1u);
+                    }
+                    { int foo = 0, pr_val;
+                      for (i = 23; i >= 12; --i) foo = (foo << 1) | (int)ambe_fr[0][i];
+                      pr_val = 16 * foo;
+                      for (j = 22; j >= 0; --j) { pr_val = (173 * pr_val + 13849) & 0xFFFF;
+                          ambe_fr[1][j] ^= (unsigned char)(pr_val >> 15); } }
+                    for (j = 23; j >= 12; --j) bits49[bi++] = ambe_fr[0][j];
+                    for (j = 22; j >= 11; --j) bits49[bi++] = ambe_fr[1][j];
+                    for (j = 10; j >=  0; --j) bits49[bi++] = ambe_fr[2][j];
+                    for (j = 13; j >=  0; --j) bits49[bi++] = ambe_fr[3][j];
+                    memset(cipher7, 0, 7);
+                    for (i = 0; i < 49; ++i)
+                        cipher7[i >> 3] |= (unsigned char)((bits49[i] & 1u) << (7 - (i & 7)));
+                    f = burst_pos * 3 + sf;
+                    for (i = 0; i < 7; ++i) plain7[i] = cipher7[i] ^ hytera_ks_byte(ks, f * 49 + i * 8);
+                    for (i = 0; i < 24; ++i) dec24[sf][i] = (unsigned char)((plain7[i >> 3] >> (7 - (i & 7))) & 1u);
+                }
+                { int h01 = 0, h12 = 0;
+                  for (i = 0; i < 24; ++i) { h01 += dec24[0][i] ^ dec24[1][i];
+                      h12 += dec24[1][i] ^ dec24[2][i]; bit_counts[i] += dec24[0][i]; }
+                  hamming_sum += (double)(48 - h01 - h12); }
+                n++;
+            }
+        }
+    } else {
+        for (p = 0; p < line_count; ++p) {
+            const PayloadLine *line = &payloads->items[p];
+            uint32_t mi = (uint32_t)(line->has_mi ? line->mi : payloads->global_mi);
+            int burst_pos = (int)(p % 6);
+            unsigned char sf0[24];
+            if (line->len < 33) continue;
+            hamming_sum += score_burst_correct_cpu(line->data, key5, mi, burst_pos, sf0);
+            for (i = 0; i < 24; ++i) bit_counts[i] += sf0[i];
+            n++;
+        }
+    }
+
+    if (n <= 0) return;
+    if (n >= 6) {
+        double half_n = (double)n * 0.5;
+        for (i = 0; i < 24; ++i) { double dev = (double)bit_counts[i] - half_n; chi2 += dev * dev; }
+    }
+
+    out->hamming_per_burst = hamming_sum / (double)n;
+    out->chi2_per_burst    = chi2 / (double)n;
+    out->bursts            = n;
+    out->sigma = (out->hamming_per_burst - CONF_RANDOM_BASELINE)
+               * sqrt((double)n) / CONF_WRONG_STD_PER_BURST;
+
+    if (out->sigma >= CONF_SIGMA_LIKELY && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
+        out->verdict = CONF_LIKELY_REAL;
+    else if (out->sigma >= CONF_SIGMA_UNCERTAIN)
+        out->verdict = CONF_UNCERTAIN;
+    else
+        out->verdict = CONF_NO_SIGNAL;
 }
 
 } /* extern "C" */

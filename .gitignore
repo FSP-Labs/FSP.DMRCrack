@@ -1,17 +1,8 @@
-# Compiled binaries
-bin/*.exe
-bin/*.dll
-bin/*.obj
-bin/*.pdb
-bin/*.ilk
-bin/*.exp
-bin/*.lib
-
-# Auto-generated GPU tuning config (created at runtime by autotuning)
-bin/cuda_tune_*.cfg
-
-# Runtime user settings (language preference, etc. — created on first launch)
-bin/*.ini
+# Everything under bin/ is build output: Windows binaries (.exe/.dll/.obj/...),
+# Linux extensionless binaries (dmrcrack, test_*), GPU tuning cfg, runtime .ini,
+# and capture sessions. Only the tracked app manifest is kept.
+bin/*
+!bin/dmrcrack.exe.manifest
 
 # CUDA intermediate files
 *.o
@@ -45,6 +36,10 @@ env/
 
 # Test data (may contain captured radio traffic — do not publish)
 test/
+
+# DSD-FME DSP dumps (raw captured traffic / debug fixtures — do not publish)
+DSP/
+*.dsdsp.txt
 
 # Live-capture session output (runtime; may contain intercepted traffic — do not publish)
 captures/

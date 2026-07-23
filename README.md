@@ -19,7 +19,7 @@ FSP.DMRCrack performs exhaustive 40-bit RC4 key search against captured DMR Enha
 
 DMR Enhanced Privacy (EP) is the encryption layer built into MOTOTRBO, Hytera, and other DMR Tier II/III radios. It uses ARC4 (RC4) with a 40-bit (5-byte) key. At roughly one trillion candidates that keyspace is tractable on a modern GPU in a few hours.
 
-FSP.DMRCrack exploits the structure of AMBE voice coding: valid speech produces predictable inter-frame parameter distributions, so the correct key stands out as a Z-score spike well above the noise floor (Z > 7 threshold). It runs the same pipeline as DSD-FME's own decoder, so what the tool finds actually decrypts the audio.
+FSP.DMRCrack exploits the structure of AMBE voice coding: valid speech produces predictable inter-frame parameter distributions, so the correct key stands out as a significance (Z-score) spike well above the noise floor. The tool reports a plain **CONFIRMED / UNVERIFIED / no-key** verdict rather than a raw number, so a statistical latch is never mistaken for a recovery. It runs the same pipeline as DSD-FME's own decoder, so what the tool finds actually decrypts the audio.
 
 **Intended users:** licensed radio operators auditing their own systems, security researchers, and CTF participants.
 
@@ -32,11 +32,11 @@ FSP.DMRCrack exploits the structure of AMBE voice coding: valid speech produces 
 | Requirement | Details |
 |---|---|
 | OS | Windows 10/11, 64-bit |
-| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx or newer). CPU fallback available but expect days instead of hours — a GPU is strongly recommended. |
+| GPU | NVIDIA sm_75+ (GTX 16xx / RTX 20xx through RTX 50xx). Native SASS for Turing/Ampere/Ada/Blackwell (RTX 50-series); a PTX fallback JIT-covers other archs. CPU fallback available but expect days instead of hours — a GPU is strongly recommended. |
 | Runtime | None — DSD-FME and all Cygwin DLLs are bundled by the installer |
 | Python | 3.8+ (optional, for `verify_decrypt.py` and `diag_decrypt.py`) |
-| CUDA Toolkit | 12.x (build-time only) |
-| Visual Studio | 2022 with Desktop C++ workload (build-time only) |
+| CUDA Toolkit | 12.x (build-time only; 12.8+ needed to emit native RTX 50-series SASS) |
+| Visual Studio | 2022 with Desktop C++ workload (build-time only). VS 2026 works too, but install the **MSVC v143** toolset — nvcc rejects the v145 (VS 2026) compiler; `_vsenv.bat` selects v143 automatically. |
 
 ### Linux (CLI)
 
@@ -200,20 +200,42 @@ Between superframes (every 6 bursts), MI advances by 32 LFSR steps: taps `{31,3,
 
 ### Hytera Enhanced Privacy pipeline (ALG=0x02)
 
-Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA), then a 21-byte keystream is generated and XOR'd with a key-IV (`kiv`) where `kiv[i] = key5[i] XOR MI[i]` over all 5 bytes (40-bit big-endian MI), matching DSD-FME's `hytera_enhanced_rc4_setup`. All 6 bursts in a superframe share the same 21-byte keystream. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads without adding any overhead to MOTOTRBO paths.
+Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA, no keystream discard), then the keystream octets are XOR'd with a key-IV (`kiv`) where `kiv[i] = key5[i] XOR MI[i]` over all 5 bytes (40-bit big-endian MI), matching DSD-FME's `hytera_enhanced_rc4_setup`. One keystream is built per superframe and consumed as a **bitstream at 49 bits per AMBE frame** — and, unlike MOTOTRBO/P25, Hytera does **not** skip the trailing 7 bits, so AMBE frame `f = burst_pos·3 + sf` reads keystream bits `[f·49 … f·49+48]` (MSB-first, not byte-aligned). The keystream is single-sourced in `include/hytera_ks.h` (verified byte-for-byte against DSD-FME's `rc4_block_output` + bitstream model over thousands of random vectors, and end-to-end against a planted-key synthetic capture). Hytera's inter-superframe MI advances with its own 5-byte LFSR (taps `12 24 48 22 14`), so a single decoded PI header now tags a whole capture. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads with zero overhead on MOTOTRBO paths; the MI-independent RC4 keystream is built once per key and re-masked per superframe. Hytera EP is signalled under two algids — `ALG=0x02` and `ALG=0x26` — both recognised.
 
 ### GPU throughput
 
-Measured: an **RTX 3050 Ti laptop GPU (CUDA back-end) sustains ~100 M keys/s**,
-which completes the full 2⁴⁰ keyspace in roughly 3 hours. Throughput scales with
-the GPU, so faster cards finish proportionally sooner; these are the only figures
-verified so far, and other hardware has not yet been benchmarked.
+Measured on an **RTX 3050 Ti laptop GPU** (CUDA back-end, full pipeline with the
+noise-tolerant early-reject):
 
-The portable OpenCL back-end trades some throughput for vendor-neutrality
+| Cipher | Throughput | Full 2⁴⁰ scan |
+|---|---|---|
+| MOTOTRBO (KMI9) | ~38 M keys/s | ~8 h |
+| Hytera EP | ~10 M keys/s | ~30 h |
+
+Throughput scales with the GPU, so faster cards finish proportionally sooner;
+these are the only figures verified so far, and other hardware has not been
+benchmarked. The early-reject rejects wrong keys within one superframe using a
+noise-tolerant floor (`24·n + 8·√n`): it keeps even a heavily degraded correct
+key while pruning the bulk of the keyspace — trading raw speed for the ability to
+recover keys from real, noisy over-the-air captures. Native `sm_120` SASS is
+emitted for the RTX 50-series (Blackwell); a PTX fallback JIT-covers other archs.
+
+The portable OpenCL back-end trades throughput for vendor-neutrality
 (NVIDIA / AMD / Intel) — it omits the CUDA ILP-2 shared-memory kernel — so it is
-expected to be slower than native CUDA on the same card (not yet benchmarked).
-When no GPU device is present it falls back to the multi-threaded CPU scorer.
-Narrow the key range (`--start` / `--end`) whenever you can to cut search time.
+slower than native CUDA on the same card. When no GPU device is present it falls
+back to the multi-threaded CPU scorer. Narrow the key range (`--start` / `--end`)
+whenever you can to cut search time.
+
+### Confidence verdict
+
+Because a wrong or dictionary key can still post a high raw score, the tool does
+not report the top-scoring key as "the key" on its own. It re-scores the best
+candidate into a capture-size-normalized significance `Z = (r − 24)·√n / √12`
+(where `r` is the mean per-burst inter-frame agreement over `n` bursts) and gives
+a verdict: **CONFIRMED** (Z ≥ 12, a genuine recovery), **UNVERIFIED** (7 ≤ Z < 12,
+weak — confirm with DSD-FME), or **no confirmed key** below that. A dictionary
+latch inflates the chi² term but cannot fake inter-frame agreement, so its Z stays
+near zero and it is never presented as a recovery.
 
 ---
 
@@ -273,7 +295,7 @@ Open an **x64 Native Tools Command Prompt for VS** and run:
 build.bat
 ```
 
-Output: `bin\dmrcrack.exe`. The script auto-detects Visual Studio via `vswhere.exe`. Targets sm_75/86/89 natively with a PTX fallback for newer GPUs (JIT-compiled on first run).
+Output: `bin\dmrcrack.exe`. The script auto-detects Visual Studio via `vswhere.exe` (preferring the CUDA-supported v143 toolset even on VS 2026). Targets sm_75/86/89/120 natively — including the RTX 50-series (Blackwell) — with a compute_89 PTX fallback for other GPUs (JIT-compiled on first run).
 
 ### Headless CLI / other backends
 

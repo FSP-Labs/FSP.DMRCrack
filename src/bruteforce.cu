@@ -23,6 +23,7 @@
 #include "../include/platform.h"
 #include "../include/gpu_compat.h"
 #include <float.h>
+#include <math.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -55,9 +56,19 @@ __constant__ unsigned char d_const_cipher_packs[MAX_CONST_LINES * DMR_CIPHER_PAC
 __constant__ unsigned long long d_const_mi[MAX_CONST_LINES];  /* 40-bit MI (Hytera) / 32-bit (MOTOTRBO, low bits) */
 __constant__ unsigned char d_const_algid[MAX_CONST_LINES];
 __constant__ unsigned char d_const_meta_flags[MAX_CONST_LINES];
-__constant__ float d_abs_floor[MAX_CONST_LINES + 1]; // Absolute screening threshold by burst count
 __constant__ uint16_t d_const_silence_idx[64];
 __constant__ int      d_const_n_silence;
+
+/* Per-burst Hamming early-reject floor, noise-tolerant form: floor = 24*n + C*sqrt(n).
+ * A wrong key sits at the random inter-frame baseline (24/burst); the correct key
+ * -- even badly degraded by demod noise -- beats it. This rejects wrong keys within
+ * ~1 superframe (restoring throughput) while tolerating a correct key down to just
+ * above 24/burst. This REPLACES the old 33*n - 6.92*sqrt(n) floor, which required
+ * ~33/burst and pruned the correct key on noisy real captures (the "no key found"
+ * bug). Gated at n>=6 so a slow-starting correct key survives its first superframe. */
+#define HFLOOR_BASE   24.0f   /* wrong-key mean per burst: 48 - HD(12) - HD(12) */
+#define HFLOOR_C       8.0f   /* sqrt(n) coefficient: ~2.3-sigma wrong-key rejection */
+#define HFLOOR_MIN_N   6      /* one full superframe before the floor engages */
 
 typedef struct {
     unsigned char S[RC4_SBOX_SIZE];
@@ -253,17 +264,13 @@ __device__ __forceinline__ int kpa_silence_check_dev(
  * boundary). Cipher byte n of frame f comes from hytera_ks_byte_dev at bit
  * offset f*49 + n*8. 126 bytes cover all 18 frames (octet 110 = bit 881). */
 #define HYTERA_KS_BYTES 126
-__device__ __forceinline__ void compute_hytera_ks_dev(
-    const unsigned char key5[5], uint64_t mi,
-    unsigned char ks_out[HYTERA_KS_BYTES])
+/* MI-free RC4 keystream (KSA(key5)+PRGA). Depends only on the key, so the kernel
+ * computes it ONCE per key and reuses it across every superframe; the cheap MI
+ * mask is applied per superframe by apply_hytera_kiv_dev. Mirror of
+ * hytera_compute_raw (include/hytera_ks.h). */
+__device__ __forceinline__ void compute_hytera_raw_dev(
+    const unsigned char key5[5], unsigned char raw[HYTERA_KS_BYTES])
 {
-    unsigned char kiv[5];
-    kiv[0] = key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu);
-    kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
-    kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
-    kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
-    kiv[4] = key5[4] ^ (unsigned char)( mi        & 0xFFu);
-
     RC4_CTX_DEV rc4;
     rc4_ksa5_dev(&rc4, key5);  /* KSA with key5, drop=0 */
 
@@ -272,8 +279,24 @@ __device__ __forceinline__ void compute_hytera_ks_dev(
         ri++;
         rj = (unsigned char)(rj + rc4.S[ri]);
         unsigned char t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
-        ks_out[idx] = kiv[idx % 5] ^ rc4.S[(unsigned char)(rc4.S[ri] + rc4.S[rj])];
+        raw[idx] = rc4.S[(unsigned char)(rc4.S[ri] + rc4.S[rj])];
     }
+}
+
+/* Per-superframe MI mask: ks[i] = raw[i] ^ (key5[i%5] ^ MI[i%5]). Mirror of
+ * hytera_apply_kiv (include/hytera_ks.h). */
+__device__ __forceinline__ void apply_hytera_kiv_dev(
+    const unsigned char raw[HYTERA_KS_BYTES], const unsigned char key5[5],
+    uint64_t mi, unsigned char ks_out[HYTERA_KS_BYTES])
+{
+    unsigned char kiv[5];
+    kiv[0] = key5[0] ^ (unsigned char)((mi >> 32) & 0xFFu);
+    kiv[1] = key5[1] ^ (unsigned char)((mi >> 24) & 0xFFu);
+    kiv[2] = key5[2] ^ (unsigned char)((mi >> 16) & 0xFFu);
+    kiv[3] = key5[3] ^ (unsigned char)((mi >>  8) & 0xFFu);
+    kiv[4] = key5[4] ^ (unsigned char)( mi        & 0xFFu);
+    for (int idx = 0; idx < HYTERA_KS_BYTES; idx++)
+        ks_out[idx] = kiv[idx % 5] ^ raw[idx];
 }
 
 /* Device mirror of hytera_ks_byte (include/hytera_ks.h): extract 8 keystream
@@ -804,9 +827,13 @@ void bruteforce_kernel_strict(
                 #pragma unroll
                 for (int b = 0; b < 8; b++) BCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
 
-                /* Per-burst absolute pruning: reject wrong keys as early as possible */
-                if (enable_prune && processed_bursts >= 1 &&
-                    total_score < d_abs_floor[processed_bursts]) {
+                /* Noise-tolerant per-burst early-reject (see HFLOOR_* above): rejects
+                 * wrong keys within a superframe while keeping any near-baseline
+                 * correct key. Restores throughput lost when the old 33/burst floor
+                 * was removed, without reintroducing its false negatives. */
+                if (enable_prune && processed_bursts >= HFLOOR_MIN_N &&
+                    total_score < HFLOOR_BASE * (float)processed_bursts
+                                + HFLOOR_C * __fsqrt_rn((float)processed_bursts)) {
                     goto next_key;
                 }
             }
@@ -1002,12 +1029,14 @@ void bruteforce_kernel_strict_ilp2(
                     for (int b=0;b<8;b++) BB_ADD(16+b, (pb0[2]>>(7-b))&1);
                 }
 
-                /* Per-burst floor - applied to both independently */
-                if (enable_prune && bursts_a >= 1 && !pruned_a &&
-                    score_a < d_abs_floor[bursts_a]) pruned_a = 1;
-                if (enable_prune && bursts_b >= 1 && !pruned_b &&
-                    score_b < d_abs_floor[bursts_b]) pruned_b = 1;
-                if (pruned_a && pruned_b) break;
+                /* Noise-tolerant per-burst early-reject (floor = 24*n + C*sqrt(n),
+                 * see HFLOOR_* above) applied to each key independently. */
+                if (enable_prune && bursts_a >= HFLOOR_MIN_N && !pruned_a &&
+                    score_a < HFLOOR_BASE * (float)bursts_a
+                            + HFLOOR_C * __fsqrt_rn((float)bursts_a)) pruned_a = 1;
+                if (enable_prune && bursts_b >= HFLOOR_MIN_N && !pruned_b &&
+                    score_b < HFLOOR_BASE * (float)bursts_b
+                            + HFLOOR_C * __fsqrt_rn((float)bursts_b)) pruned_b = 1;
             }
 
             if (pruned_a && pruned_b) break;
@@ -1082,9 +1111,10 @@ void bruteforce_kernel_strict_ilp2(
 }
 
 /* =========================================================================
- * HYTERA EP KERNEL - Hytera Enhanced Privacy (ALG=0x02, mode_policy=4)
- * Same scoring structure as bruteforce_kernel_strict but uses a fixed
- * 21-byte keystream per superframe instead of KMI9 RC4.
+ * HYTERA EP KERNEL - Hytera Enhanced Privacy (ALG 0x02/0x26, mode_policy=4)
+ * Same scoring structure as bruteforce_kernel_strict but builds one
+ * HYTERA_KS_BYTES keystream per superframe (RC4 over key5, consumed as a 49-bit
+ * bitstream) instead of the KMI9 per-burst RC4.
  * Kept in a separate kernel so the MOTOTRBO kernels carry zero overhead.
  * ========================================================================= */
 __global__ __launch_bounds__(256, 2)
@@ -1117,6 +1147,12 @@ void bruteforce_kernel_hytera(
         #pragma unroll
         for (int k = 0; k < 12; k++) bcnt_p[k] = 0u;
 
+        /* The RC4 keystream is MI-independent, so build it ONCE per key and only
+         * re-apply the cheap per-superframe MI mask below (was a full KSA+PRGA
+         * per superframe -- the dominant cost of this kernel). */
+        unsigned char hraw[HYTERA_KS_BYTES];
+        compute_hytera_raw_dev(key, hraw);
+
 #define HBCNT_ADD(b, bit) bcnt_p[(b)>>1] += ((unsigned int)(bit)) << (((b)&1u)<<4)
 #define HBCNT_GET(b)      ((float)((bcnt_p[(b)>>1] >> (((b)&1u)<<4)) & 0xFFFFu))
 
@@ -1126,7 +1162,7 @@ void bruteforce_kernel_hytera(
                 line_mi = d_const_mi[sf_base];
 
             unsigned char ks[HYTERA_KS_BYTES];
-            compute_hytera_ks_dev(key, line_mi, ks);
+            apply_hytera_kiv_dev(hraw, key, line_mi, ks);
 
             for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
                 int p = sf_base + burst_pos;
@@ -1160,8 +1196,11 @@ void bruteforce_kernel_hytera(
                 #pragma unroll
                 for (int b = 0; b < 8; b++) HBCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
 
-                if (enable_prune && processed_bursts >= 1 &&
-                    total_score < d_abs_floor[processed_bursts]) {
+                /* Noise-tolerant per-burst early-reject (floor = 24*n + C*sqrt(n),
+                 * see HFLOOR_* above; same as bruteforce_kernel_strict). */
+                if (enable_prune && processed_bursts >= HFLOOR_MIN_N &&
+                    total_score < HFLOOR_BASE * (float)processed_bursts
+                                + HFLOOR_C * __fsqrt_rn((float)processed_bursts)) {
                     goto hytera_next_key;
                 }
             }
@@ -1908,11 +1947,6 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
     unsigned long long local_diag = 0;   /* merged into engine once at thread exit */
     uint64_t k;
     int b;
-    /* Match the GPU kernel's pruning gate (enable_prune = total_keys > 2^20):
-     * narrow ranges (e.g. mask searches) score every key in full, so the early
-     * floor never discards the correct key there. */
-    int cpu_enable_prune =
-        ((engine->cfg.end_key - engine->cfg.start_key + 1ULL) > (1ULL << 20));
 
     plat_thread_set_affinity(ctx->worker_index);
 
@@ -2072,18 +2106,19 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cpu_4way_worker_proc(void *arg)
                         scores[b] += (double)(48 - h01 - h12);
                     }
 
-                    /* Per-burst absolute floor (same formula as the GPU kernel's
-                     * d_abs_floor[k] = 33k - 2*3.46*sqrt(k)), gated by
-                     * cpu_enable_prune so narrow/mask ranges score in full. */
+                    /* Noise-tolerant per-burst early-reject (floor = 24*n + C*sqrt(n),
+                     * see HFLOOR_* above; mirrors the GPU kernels). Gated on a wide
+                     * keyspace so narrow mask/prefix searches score every key in full. */
                     processed_bursts_cpu++;
-                    if (cpu_enable_prune) {
-                        float fv = 33.0f * (float)processed_bursts_cpu
-                                 - 6.92f * sqrtf((float)processed_bursts_cpu);
+                    if (processed_bursts_cpu >= HFLOOR_MIN_N &&
+                        (engine->cfg.end_key - engine->cfg.start_key) > (1ULL << 20)) {
+                        double fv = (double)HFLOOR_BASE * processed_bursts_cpu
+                                  + (double)HFLOOR_C * sqrt((double)processed_bursts_cpu);
                         all_pruned_cpu = 1;
                         for (b = 0; b < 4; b++) {
                             if (!pruned[b]) {
-                                if ((float)scores[b] < fv) pruned[b] = 1;
-                                else                       all_pruned_cpu = 0;
+                                if (scores[b] < fv) pruned[b] = 1;
+                                else                all_pruned_cpu = 0;
                             }
                         }
                         if (all_pruned_cpu) break;
@@ -2410,7 +2445,8 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
             if (has_mi && is_rc4_alg_host(alg))    mi_rc4_lines++;
             if (has_mi && is_hytera_ep_alg_host(alg)) mi_hytera_lines++;
         }
-        /* Hytera EP takes priority: if >=90% of payloads have MI + ALG=0x02, use mode 4 */
+        /* Hytera EP takes priority: if >=90% of payloads have MI + Hytera EP algid
+         * (0x02/0x26), use mode 4 */
         if (payload_limit > 0 && mi_hytera_lines * 10 >= payload_limit * 9) {
             mode_policy = 4;
         } else if (payload_limit > 0 && mi_rc4_lines * 10 >= payload_limit * 9) {
@@ -2470,28 +2506,6 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
     if (cu_err != cudaSuccess) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMemcpyToSymbol(flags): %s", cudaGetErrorString(cu_err));
         goto cleanup;
-    }
-
-    /* Precompute absolute screening thresholds (hashcat-style early reject) */
-    {
-        float host_abs_floor[MAX_CONST_LINES + 1];
-        host_abs_floor[0] = -FLT_MAX;
-        for (int k = 1; k <= payload_limit; ++k) {
-            /* Wrong key:   mean=24*k,  sigma~3.46*sqrt(k)
-             * Correct key: mean~44*k  (h01~2, h12~2 -> score~44 per burst)
-             * Floor at 33*k - 2*sigma: rejects ~99.9997% of wrong keys at k=6.
-             * Margin to correct-key mean: +11 per burst -> safe from false negatives. */
-            float sigma_k = 3.46f * sqrtf((float)k);
-            host_abs_floor[k] = 33.0f * (float)k - 2.0f * sigma_k;
-        }
-        for (int k = payload_limit + 1; k <= MAX_CONST_LINES; ++k) {
-            host_abs_floor[k] = -FLT_MAX;
-        }
-        cu_err = cudaMemcpyToSymbol(d_abs_floor, host_abs_floor, sizeof(host_abs_floor));
-        if (cu_err != cudaSuccess) {
-            snprintf(engine->cuda_error, sizeof(engine->cuda_error), "cudaMemcpyToSymbol(abs_floor): %s", cudaGetErrorString(cu_err));
-            goto cleanup;
-        }
     }
 
     cu_err = cudaMalloc(&d_keys_tested, sizeof(unsigned long long));
@@ -3785,6 +3799,16 @@ void bruteforce_get_snapshot(const BruteforceEngine *engine, BruteforceSnapshot 
     out->gpu_temp_c = (int)plat_atomic32_load((plat_atomic32_t *)&engine->gpu_temp_c);
     out->cpu_temp_c = (int)plat_atomic32_load((plat_atomic32_t *)&engine->cpu_temp_c);
 
+    /* Surface the GPU error string so front-ends can distinguish a backend
+     * failure from a user interrupt (a swallowed launch failure otherwise reads
+     * as "interrupted, best key 0000000000"). */
+    {
+        size_t j;
+        for (j = 0; j + 1 < sizeof(out->gpu_error) && engine->cuda_error[j]; ++j)
+            out->gpu_error[j] = engine->cuda_error[j];
+        out->gpu_error[j] = '\0';
+    }
+
     if (elapsed > 0.0) out->keys_per_second = (double)keys / elapsed;
     else out->keys_per_second = 0.0;
 
@@ -4004,7 +4028,7 @@ static int is_rc4_alg_host(uint8_t alg)
 
 static int is_hytera_ep_alg_host(uint8_t alg)
 {
-    return alg == 0x02;
+    return IS_HYTERA_EP_ALG(alg);
 }
 
 static void compute_hytera_ks_cpu(
@@ -4121,15 +4145,27 @@ static double score_burst_correct_host(
     return (double)(48 - h01 - h12);
 }
 
-static double score_candidate_host(
+/* Decomposing variant: when a non-NULL out pointer is supplied it receives the
+ * inter-frame Hamming sum, the chi2 total, and the burst count n for the strict
+ * (mode>=2) / Hytera (mode==4) branches -- the pieces the confidence verdict
+ * needs. Legacy modes leave them at 0. score_candidate_host() below is the thin
+ * NULL wrapper every existing caller uses (behaviour unchanged). */
+static double score_candidate_host_ex(
     const PayloadSet *payloads,
     int sample_lines,
     int sample_bytes,
-    const unsigned char key[5])
+    const unsigned char key[5],
+    double *out_hamming_sum,
+    double *out_chi2,
+    int    *out_n)
 {
     size_t line_count = payloads->count;
     double score = 0.0;
     int mode_policy = 0;
+
+    if (out_hamming_sum) *out_hamming_sum = 0.0;
+    if (out_chi2)        *out_chi2        = 0.0;
+    if (out_n)           *out_n           = 0;
 
     if (sample_lines > 0 && (size_t)sample_lines < line_count) {
         line_count = (size_t)sample_lines;
@@ -4230,6 +4266,8 @@ static double score_candidate_host(
             }
         }
 
+        if (out_hamming_sum) *out_hamming_sum = score;   /* pure Hamming sum here */
+        if (out_n)           *out_n           = n_freq;
         if (n_freq >= 6) {
             double half_n = (double)n_freq * 0.5;
             double chi2 = 0.0;
@@ -4237,6 +4275,7 @@ static double score_candidate_host(
                 double dev = (double)bit_counts[b] - half_n;
                 chi2 += dev * dev;
             }
+            if (out_chi2) *out_chi2 = chi2;
             score += chi2 / (double)n_freq;
         }
         return score;
@@ -4265,6 +4304,8 @@ static double score_candidate_host(
         /* Bit-frequency chi-squared: sum_i (count_i - N/2)^2 / N.
          * Wrong key:   E[result] ~ 6  (uniform distribution, 24 * N/4 / N).
          * Correct key: result >> 6     (non-uniform speech bit distribution). */
+        if (out_hamming_sum) *out_hamming_sum = score;   /* pure Hamming sum here */
+        if (out_n)           *out_n           = n_freq;
         if (n_freq >= 6) {
             double half_n = (double)n_freq * 0.5;
             double chi2 = 0.0;
@@ -4272,6 +4313,7 @@ static double score_candidate_host(
                 double dev = (double)bit_counts[b] - half_n;
                 chi2 += dev * dev;
             }
+            if (out_chi2) *out_chi2 = chi2;
             score += chi2 / (double)n_freq;
         }
 
@@ -4526,6 +4568,54 @@ static double score_candidate_host(
     }
 
     return score;
+}
+
+static double score_candidate_host(
+    const PayloadSet *payloads,
+    int sample_lines,
+    int sample_bytes,
+    const unsigned char key[5])
+{
+    return score_candidate_host_ex(payloads, sample_lines, sample_bytes,
+                                   key, NULL, NULL, NULL);
+}
+
+void bruteforce_confidence(
+    const PayloadSet *payloads,
+    uint64_t best_key,
+    int sample_lines,
+    int sample_bytes,
+    BruteforceConfidence *out)
+{
+    unsigned char key5[5];
+    double hamming_sum = 0.0, chi2 = 0.0;
+    int n = 0;
+
+    out->hamming_per_burst = 0.0;
+    out->chi2_per_burst    = 0.0;
+    out->bursts            = 0;
+    out->sigma             = 0.0;
+    out->verdict           = CONF_NA;
+
+    if (payloads == NULL || best_key == 0) return;
+
+    key_to_5bytes_cpu(best_key, key5);
+    (void)score_candidate_host_ex(payloads, sample_lines, sample_bytes,
+                                  key5, &hamming_sum, &chi2, &n);
+    if (n <= 0) return;   /* legacy mode (no MI) or nothing scored -> CONF_NA */
+
+    out->hamming_per_burst = hamming_sum / (double)n;
+    out->chi2_per_burst    = chi2 / (double)n;
+    out->bursts            = n;
+    out->sigma = (out->hamming_per_burst - CONF_RANDOM_BASELINE)
+               * sqrt((double)n) / CONF_WRONG_STD_PER_BURST;
+
+    if (out->sigma >= CONF_SIGMA_LIKELY && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
+        out->verdict = CONF_LIKELY_REAL;
+    else if (out->sigma >= CONF_SIGMA_UNCERTAIN)
+        out->verdict = CONF_UNCERTAIN;
+    else
+        out->verdict = CONF_NO_SIGNAL;
 }
 
 double bruteforce_test_score(

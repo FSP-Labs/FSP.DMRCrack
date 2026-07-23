@@ -64,6 +64,27 @@ def dmr_mi_lfsr_step(mi: int, steps: int = 1) -> int:
     return mi
 
 
+_HYT_TAPS = (0x12, 0x24, 0x48, 0x22, 0x14)
+
+
+def hytera_mi_lfsr_step(mi_value: int) -> int:
+    """Advance a 40-bit Hytera EP MI by one superframe. Five independent 8-bit
+    Galois LFSRs (one per MI byte, own tap), stepped once per superframe --
+    verbatim from DSD-FME (audio_work) dmr_pi.c hytera_lfsr()."""
+    mi = [(mi_value >> 32) & 0xFF, (mi_value >> 24) & 0xFF, (mi_value >> 16) & 0xFF,
+          (mi_value >> 8) & 0xFF, mi_value & 0xFF]
+    for i in range(5):
+        bit = (mi[i] >> 7) & 1
+        mi[i] = (mi[i] << 1) & 0xFF
+        if bit:
+            mi[i] ^= _HYT_TAPS[i]
+        mi[i] |= bit
+    out = 0
+    for b in mi:
+        out = (out << 8) | b
+    return out
+
+
 def parse_log_pi_sequence(log_path: pathlib.Path):
     """Parse all PI headers from the log IN ORDER, returning per-slot lists.
 
@@ -169,11 +190,12 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
                         extra_sfs = sf_idx - (len(pi_list) - 1)
                         alg = last_pi["alg"]
                         kid = last_pi["kid"]
-                        if alg == 0x02:
-                            # Hytera EP advances the MI with its own LFSR (not modeled
-                            # here); reuse the last decoded MI rather than extrapolate
-                            # with the MOTOTRBO LFSR.
+                        if alg in (0x02, 0x26):
+                            # Hytera EP (algid 0x02/0x26): step its own 5-byte LFSR
+                            # once per superframe past the last decoded PI.
                             mi = last_pi["mi"]
+                            for _ in range(extra_sfs):
+                                mi = hytera_mi_lfsr_step(mi)
                         else:
                             # MOTOTRBO: +32 LFSR steps per superframe.
                             mi = dmr_mi_lfsr_step(last_pi["mi"], 32 * extra_sfs)

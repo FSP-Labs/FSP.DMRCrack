@@ -75,7 +75,43 @@ typedef struct {
     uint64_t diag_best_key;
     double   diag_best_rate;    /* per-burst Hamming agreement, 0..48 */
     int      diag_best_bursts;  /* frames the candidate was scored over */
+
+    /* Last GPU backend error, empty if none. Mirrors engine->cuda_error into the
+     * snapshot so the CLI (which has no engine handle at report time) can tell a
+     * GPU failure apart from a user interrupt instead of printing a junk key. */
+    char     gpu_error[256];
 } BruteforceSnapshot;
+
+/* -- Confidence of a recovered key (strict KMI9 / Hytera modes) ------------
+ * The raw best_score scales with burst count, so it is not comparable across
+ * captures and cannot tell a real key from a statistical/dictionary latch. We
+ * instead evaluate the winning key's inter-frame Hamming agreement as a
+ * capture-size-normalized significance:
+ *     Z = (r - 24) * sqrt(n) / sqrt(12)
+ * where r = mean per-burst Hamming (0..48, wrong-key baseline 24) over n bursts.
+ * This re-derives the project's own "48.5 sigma" figure. A dictionary latch
+ * inflates the chi2 term but cannot fake inter-frame Hamming, so its Z stays ~0.
+ * The luckiest wrong key in a full 2^40 scan peaks near Z ~= sqrt(2*40*ln2) ~= 7.5. */
+#define CONF_WRONG_STD_PER_BURST 3.4641016  /* sqrt(12): per-burst wrong-key std of (48-h01-h12) */
+#define CONF_RANDOM_BASELINE     24.0       /* mean per-burst Hamming for a wrong key */
+#define CONF_SIGMA_LIKELY        12.0       /* Z >= this (and chi2/n floor) => confirmed */
+#define CONF_SIGMA_UNCERTAIN      7.0       /* Z >= this => possible/weak, verify externally */
+#define CONF_CHI2N_LIKELY        20.0       /* chi2/n floor for a confirmed key (wrong~6, correct~212) */
+
+typedef enum {
+    CONF_NA          = 0,   /* legacy mode (no MI): Hamming Z not meaningful     */
+    CONF_NO_SIGNAL   = 1,   /* Z < 7  : best key is just the luckiest wrong key  */
+    CONF_UNCERTAIN   = 2,   /* 7<=Z<12: possible/weak real, needs external check */
+    CONF_LIKELY_REAL = 3    /* Z>=12 (+ chi2/n floor): confirmed recovery        */
+} ConfidenceVerdict;
+
+typedef struct {
+    double hamming_per_burst;   /* r, 0..48 (0 if unavailable)          */
+    double chi2_per_burst;      /* chi2/n bit-frequency term            */
+    int    bursts;              /* n bursts the key was scored over      */
+    double sigma;               /* Z = (r-24)*sqrt(n)/sqrt(12)          */
+    int    verdict;             /* ConfidenceVerdict                     */
+} BruteforceConfidence;
 
 typedef struct BruteforceEngine {
     BruteforceConfig cfg;
@@ -163,6 +199,17 @@ double bruteforce_test_score(
     int sample_lines,
     int sample_bytes,
     const unsigned char key[5]);
+
+/* Evaluate the confidence that best_key is a genuine recovery (not a statistical
+ * latch). Re-scores best_key once, host-side, and fills *out with the decomposed
+ * metrics + verdict. Meaningful only for strict/Hytera captures (MI present);
+ * legacy captures yield CONF_NA. Cheap (one key) -- call at result time. */
+void bruteforce_confidence(
+    const PayloadSet *payloads,
+    uint64_t best_key,
+    int sample_lines,
+    int sample_bytes,
+    BruteforceConfidence *out);
 
 #ifdef __cplusplus
 }

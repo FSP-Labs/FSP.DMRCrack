@@ -27,6 +27,7 @@ nvcc -O3 ^
   -gencode arch=compute_75,code=sm_75 ^
   -gencode arch=compute_86,code=sm_86 ^
   -gencode arch=compute_89,code=sm_89 ^
+  -gencode arch=compute_120,code=sm_120 ^
   -gencode arch=compute_89,code=compute_89 ^
   -cudart static -Iinclude ^
   -DNO_GUI ^
@@ -39,7 +40,7 @@ goto check
 
 :cpu
 echo Building bin\dmrcrack-cli-cpu.exe (CPU-only engine, no toolkit)...
-cl /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /DNO_GUI /Fe:bin\dmrcrack-cli-cpu.exe ^
+cl /O2 /W3 /D_CRT_SECURE_NO_WARNINGS /DNO_GUI /Fo:bin\ /Fe:bin\dmrcrack-cli-cpu.exe ^
    src\cli.c src\bruteforce.c src\rc4.c src\payload_io.c ^
    src\lang.c src\lang_en.c src\lang_es.c ^
    /Iinclude user32.lib advapi32.lib
@@ -57,7 +58,7 @@ echo Building bin\dmrcrack-cli-cl.exe (portable OpenCL)...
 cl /nologo /O2 /W3 /EHsc /D_CRT_SECURE_NO_WARNINGS /DWIN32 /D_WINDOWS /DUSE_OPENCL /DNO_GUI /DCL_TARGET_OPENCL_VERSION=120 ^
    /Iinclude /Ibuild_cl /I"%CUDA_PATH%\include" ^
    src\cli.c src\bruteforce_cl.cpp src\payload_io.c src\rc4.c src\lang.c src\lang_en.c src\lang_es.c ^
-   /Fe:bin\dmrcrack-cli-cl.exe ^
+   /Fo:bin\ /Fe:bin\dmrcrack-cli-cl.exe ^
    /link "%CUDA_PATH%\lib\x64\OpenCL.lib" user32.lib kernel32.lib advapi32.lib
 goto check
 

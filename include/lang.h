@@ -56,6 +56,13 @@ typedef struct {
     const char *status_searching;         /* "Searching..." */
     const char *graph_waiting;            /* "waiting for data" */
 
+    /* ---- Recovered-key confidence verdict (strict KMI9 / Hytera modes) ---- */
+    const char *conf_confirmed;           /* "CONFIRMED" */
+    const char *conf_unverified;          /* "UNVERIFIED - confirm with DSD-FME" */
+    const char *conf_no_key;              /* "No confirmed key" */
+    const char *conf_searching;           /* "Searching - no confirmed key yet" */
+    const char *conf_sigma_fmt;           /* "  %.1f sigma" (appended to the verdict) */
+
     /* ---- KPA silence badge ---- */
     const char *kpa_silence_fmt;     /* "KPA: %u silence frames" / "KPA: %u frames de silencio" */
 
@@ -192,8 +199,12 @@ typedef struct {
     const char *graph_score_title;     /* "Best score (evolution)" */
 
     /* ---- File dialog filters ---- */
-    const char *dlg_bin_filter;        /* "BIN payload (*.bin)\0*.bin\0All files (*.*)\0*.*\0" */
+    const char *dlg_bin_filter;        /* payload picker: ".bin" + DSD-FME DSP dumps */
     const char *dlg_audio_filter;      /* "DMR Audio (*.wav;...)\0...\0All files (*.*)\0*.*\0" */
+
+    /* ---- DSP-dump auto-conversion (payload picker) ---- */
+    const char *dsp_src_prefix;        /* prefix when a payload was converted from a DSP dump */
+    const char *dsp_no_log_note;       /* appended when no PI log was found alongside the DSP  */
 
     /* ---- Copy / notification ---- */
     const char *btn_copy_key;          /* "Copy"                              */

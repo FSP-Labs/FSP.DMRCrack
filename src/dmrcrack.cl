@@ -138,15 +138,10 @@ inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[
  * frame (no 7-bit skip, unlike MOTOTRBO): frame f reads bits [f*49 .. f*49+48]
  * via hytera_ks_byte. 126 bytes cover all 18 frames. */
 #define HYTERA_KS_BYTES 126
-inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[HYTERA_KS_BYTES])
+/* MI-free RC4 keystream (KSA(key5)+PRGA): depends only on the key, so build it
+ * once per key and reuse across superframes. Mirrors hytera_compute_raw. */
+inline void compute_hytera_raw(const uchar key5[5], uchar raw[HYTERA_KS_BYTES])
 {
-    uchar kiv[5];
-    kiv[0] = key5[0] ^ (uchar)((mi >> 32) & 0xFFu);
-    kiv[1] = key5[1] ^ (uchar)((mi >> 24) & 0xFFu);
-    kiv[2] = key5[2] ^ (uchar)((mi >> 16) & 0xFFu);
-    kiv[3] = key5[3] ^ (uchar)((mi >>  8) & 0xFFu);
-    kiv[4] = key5[4] ^ (uchar)( mi        & 0xFFu);
-
     RC4_CTX rc4;
     rc4_ksa5(&rc4, key5);
 
@@ -155,8 +150,23 @@ inline void compute_hytera_ks(const uchar key5[5], ulong mi, uchar ks_out[HYTERA
         ri = (uchar)(ri + 1);
         rj = (uchar)(rj + rc4.S[ri]);
         uchar t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
-        ks_out[idx] = kiv[idx % 5] ^ rc4.S[(uchar)(rc4.S[ri] + rc4.S[rj])];
+        raw[idx] = rc4.S[(uchar)(rc4.S[ri] + rc4.S[rj])];
     }
+}
+
+/* Per-superframe MI mask: ks[i] = raw[i] ^ (key5[i%5] ^ MI[i%5]). Mirrors
+ * hytera_apply_kiv. */
+inline void apply_hytera_kiv(const uchar raw[HYTERA_KS_BYTES], const uchar key5[5],
+                             ulong mi, uchar ks_out[HYTERA_KS_BYTES])
+{
+    uchar kiv[5];
+    kiv[0] = key5[0] ^ (uchar)((mi >> 32) & 0xFFu);
+    kiv[1] = key5[1] ^ (uchar)((mi >> 24) & 0xFFu);
+    kiv[2] = key5[2] ^ (uchar)((mi >> 16) & 0xFFu);
+    kiv[3] = key5[3] ^ (uchar)((mi >>  8) & 0xFFu);
+    kiv[4] = key5[4] ^ (uchar)( mi        & 0xFFu);
+    for (int idx = 0; idx < HYTERA_KS_BYTES; ++idx)
+        ks_out[idx] = kiv[idx % 5] ^ raw[idx];
 }
 
 inline int popc8(uchar b) { return popcount((uint)b); }
@@ -231,8 +241,13 @@ __kernel void kernel_strict(
             for (int b = 0; b < 8; ++b) BCNT_ADD(8+b,  (p0[1] >> (7-b)) & 1);
             for (int b = 0; b < 8; ++b) BCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
 
-            if (enable_prune && processed_bursts >= 1 &&
-                total_score < abs_floor[processed_bursts]) {
+            /* Noise-tolerant per-burst early-reject (floor = 24*n + 8*sqrt(n),
+             * mirrors the CUDA HFLOOR_* constants): rejects wrong keys within a
+             * superframe while keeping a near-baseline correct key. (abs_floor
+             * kernel arg is now unused.) */
+            if (enable_prune && processed_bursts >= 6 &&
+                total_score < 24.0f * (float)processed_bursts
+                            + 8.0f * sqrt((float)processed_bursts)) {
                 return;
             }
         }
@@ -295,12 +310,17 @@ __kernel void kernel_hytera(
     uint bcnt_p[12];
     for (int k = 0; k < 12; ++k) bcnt_p[k] = 0u;
 
+    /* RC4 keystream is MI-independent: build it once per key, re-apply only the
+     * cheap MI mask per superframe (was a full KSA+PRGA per superframe). */
+    uchar hraw[HYTERA_KS_BYTES];
+    compute_hytera_raw(key, hraw);
+
     for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
         ulong mi = global_mi;   /* Hytera EP uses the full 40-bit MI */
         if (meta_flags[sf_base] & 0x1u) mi = line_mi[sf_base];
 
         uchar ks[HYTERA_KS_BYTES];
-        compute_hytera_ks(key, mi, ks);
+        apply_hytera_kiv(hraw, key, mi, ks);
 
         for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
             int p = sf_base + burst_pos;
@@ -325,8 +345,13 @@ __kernel void kernel_hytera(
             for (int b = 0; b < 8; ++b) BCNT_ADD(8+b,  (p0[1] >> (7-b)) & 1);
             for (int b = 0; b < 8; ++b) BCNT_ADD(16+b, (p0[2] >> (7-b)) & 1);
 
-            if (enable_prune && processed_bursts >= 1 &&
-                total_score < abs_floor[processed_bursts]) {
+            /* Noise-tolerant per-burst early-reject (floor = 24*n + 8*sqrt(n),
+             * mirrors the CUDA HFLOOR_* constants): rejects wrong keys within a
+             * superframe while keeping a near-baseline correct key. (abs_floor
+             * kernel arg is now unused.) */
+            if (enable_prune && processed_bursts >= 6 &&
+                total_score < 24.0f * (float)processed_bursts
+                            + 8.0f * sqrt((float)processed_bursts)) {
                 return;
             }
         }

@@ -48,8 +48,8 @@ Both use a **40-bit (5-byte) base key**. Both mix in a per-superframe
 is known to an attacker (MOTOTRBO uses a 32-bit MI, Hytera a 40-bit MI). The
 unknown is only the 5-byte key.
 
-A 2⁴⁰ keyspace at, say, 100 million keys/s finishes in about three hours. The
-search is embarrassingly parallel, which is why this is a GPU problem.
+A 2⁴⁰ keyspace at tens of millions of keys/s finishes in hours. The search is
+embarrassingly parallel, which is why this is a GPU problem.
 
 ---
 
@@ -141,13 +141,20 @@ Accumulate per-bit counts across all frames. A wrong key gives a uniform
 
 ### Why a Z-score
 
-Run the score for every key, take the mean and standard deviation of the
-population, and express the best candidate as a Z-score (sigmas above the mean).
-A spike past **Z > 7** is statistically unmistakable. On the 126-payload test
-capture the correct key reaches:
+Express the best candidate as a capture-size-normalized significance
+`Z = (r − 24)·√n / √12`, where `r` is its mean per-burst inter-frame agreement
+over `n` bursts (a wrong key sits at `r ≈ 24`, so `Z ≈ 0`). The luckiest wrong
+key in a full 2⁴⁰ scan peaks near `Z ≈ √(2·40·ln2) ≈ 7.5`, so the tool reports a
+verdict rather than a raw number:
 
-- Z ≈ 335 (bit-frequency), Z ≈ 38 (Hamming) measured in Python (`verify_decrypt.py`),
-- Z ≈ 48.5 (inter-frame Hamming) measured in the C scorer (`test_strict_score`).
+- **CONFIRMED** — `Z ≥ 12` (and chi²/n ≥ 20): a genuine recovery.
+- **UNVERIFIED** — `7 ≤ Z < 12`: possible but weak; confirm the key with DSD-FME.
+- **no confirmed key** — below that: indistinguishable from the luckiest wrong key.
+
+A dictionary/statistical latch inflates the bit-frequency term but cannot fake
+inter-frame agreement, so its `Z` stays near zero and it is never presented as a
+recovery. On the 126-payload test capture the correct key reaches `Z ≈ 48`
+(inter-frame Hamming) — far above any plausible noise peak.
 
 ---
 
@@ -157,13 +164,26 @@ Hytera Enhanced Privacy uses a different key schedule, handled by a dedicated
 kernel so it adds zero overhead to the MOTOTRBO path:
 
 - RC4 KSA with the **5-byte key only** (no MI in the KSA, drop = 0).
-- Generate a 21-byte keystream and XOR it with a key-IV:
-  `kiv[i] = key5[i] ⊕ MI[i]` over all 5 bytes (40-bit big-endian MI), matching
-  DSD-FME's `hytera_enhanced_rc4_setup`.
-- **All 6 bursts** of a superframe share the same 21-byte keystream.
+- The keystream octets are XOR'd with a key-IV: `kiv[i] = key5[i] ⊕ MI[i]` over
+  all 5 bytes (40-bit big-endian MI), matching DSD-FME's
+  `hytera_enhanced_rc4_setup`.
+- **One keystream per superframe, consumed as a bitstream at 49 bits per AMBE
+  frame.** Unlike MOTOTRBO/P25, Hytera does **not** skip the trailing 7 bits, so
+  frame `f = burst·3 + sf` reads keystream bits `[f·49 … f·49+48]` (MSB-first,
+  not byte-aligned — only frame 0 starts on a byte boundary). This 49-bit
+  indexing is the subtle part; an earlier byte-aligned model decrypted only the
+  first frame correctly, which is why Hytera never validated until it was fixed.
+- Because the RC4 output depends only on the 5-byte key (the MI enters only as
+  the `kiv` mask), the keystream is built **once per key** and re-masked per
+  superframe — the dominant cost of the Hytera kernel, hoisted out of the loop.
+- Between superframes the Hytera MI advances with its own 5-byte Galois LFSR
+  (taps `12 24 48 22 14`), distinct from the MOTOTRBO 32-bit LFSR; one decoded PI
+  header therefore tags a whole capture.
 
-The scoring (inter-frame Hamming + bit-frequency) is identical. The mode is
-auto-selected from the ALG distribution of the loaded capture.
+The keystream is single-sourced in `include/hytera_ks.h` and verified byte-for-byte
+against DSD-FME's model. Hytera EP is signalled under two algids, `0x02` and
+`0x26`. The scoring (inter-frame Hamming + bit-frequency) is identical; the mode
+is auto-selected from the ALG distribution of the loaded capture.
 
 ---
 
@@ -184,12 +204,22 @@ make it fast and correct:
 
 ### Throughput
 
-Measured: an **RTX 3050 Ti laptop GPU (CUDA) sustains about 100 M keys/s**, which
-completes the full 2⁴⁰ space in roughly three hours. This is the **only**
-configuration benchmarked so far. The portable OpenCL path omits the CUDA
-shared-memory ILP-2 kernel and is expected to be slower, but has not been
-measured. Other GPUs and the HIP/ROCm path are not yet benchmarked. Narrow the
-key range whenever you can.
+Measured on an **RTX 3050 Ti laptop GPU (CUDA)**: MOTOTRBO **~38 M keys/s**
+(~8 h for the full 2⁴⁰) and Hytera EP **~10 M keys/s**. The MOTOTRBO figure
+reflects the noise-tolerant early-reject (below) — it trades raw speed for
+recovering keys from real, noisy captures rather than only pristine ones. This is
+the **only** configuration benchmarked so far. The portable OpenCL path omits the
+CUDA shared-memory ILP-2 kernel and is slower; other GPUs and the HIP/ROCm path
+are not yet benchmarked. Narrow the key range whenever you can.
+
+**The early-reject.** A wrong key sits at the random inter-frame baseline
+(24/burst); the correct key beats it. Rather than score all 126 bursts for every
+candidate, the kernel drops a key the moment its running Hamming falls below a
+noise-tolerant floor `24·n + 8·√n` after one superframe (`n ≥ 6`). An earlier,
+tighter floor (`33·n`) was faster but pruned the correct key whenever demod noise
+dragged it below 33/burst — the reason real captures once "found nothing." The
+current floor keeps even a badly degraded correct key while still rejecting the
+bulk of the keyspace within a superframe or two.
 
 ---
 

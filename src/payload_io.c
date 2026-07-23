@@ -437,6 +437,30 @@ static uint32_t lfsr_advance(uint32_t mi, int steps)
     return mi;
 }
 
+/* Advance a 40-bit Hytera EP MI by one superframe. Unlike MOTOTRBO's single
+ * 32-bit LFSR, Hytera runs FIVE independent 8-bit Galois LFSRs -- one per MI
+ * byte, each with its own tap -- stepped once per superframe. Verbatim from
+ * DSD-FME (audio_work) dmr_pi.c hytera_lfsr(), taps {0x12,0x24,0x48,0x22,0x14},
+ * called once per superframe (at VC6, algid 0x02). Lets a converter extrapolate
+ * the MI across a whole capture from a single CRC-valid Hytera PI header. */
+static uint64_t hytera_mi_lfsr_step(uint64_t v)
+{
+    static const uint8_t taps[5] = {0x12, 0x24, 0x48, 0x22, 0x14};
+    uint8_t mi[5];
+    uint64_t o = 0;
+    int i;
+    mi[0] = (uint8_t)(v >> 32); mi[1] = (uint8_t)(v >> 24);
+    mi[2] = (uint8_t)(v >> 16); mi[3] = (uint8_t)(v >> 8); mi[4] = (uint8_t)v;
+    for (i = 0; i < 5; i++) {
+        uint8_t bit = (uint8_t)((mi[i] >> 7) & 1u);
+        mi[i] = (uint8_t)(mi[i] << 1);
+        if (bit) mi[i] ^= taps[i];
+        mi[i] |= bit;
+    }
+    for (i = 0; i < 5; i++) o = (o << 8) | mi[i];
+    return o;
+}
+
 /* Format the MI tag value: 8 hex for a 32-bit MOTOTRBO MI (keeps legacy output
  * byte-identical), 10 hex for a 40-bit Hytera EP MI. */
 static void format_mi_tag(char *buf, size_t n, uint64_t mi)
@@ -619,13 +643,17 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
                 int extra = sf_idx - (pi[si].n - 1);
                 uint8_t last_alg = pi[si].e[pi[si].n - 1].alg;
                 uint64_t last_mi = pi[si].e[pi[si].n - 1].mi;
-                /* MOTOTRBO advances the MI by 32 LFSR steps per superframe. The
-                 * Hytera EP LFSR differs and is not modeled here, so for ALG=0x02
-                 * we reuse the last decoded MI rather than extrapolate incorrectly. */
-                if (last_alg == 0x02)
+                /* Extrapolate the MI one superframe at a time past the last decoded
+                 * PI: MOTOTRBO advances 32 LFSR steps/superframe; Hytera EP steps
+                 * its 5-byte LFSR once/superframe. A single good PI thus tags the
+                 * whole run. */
+                if (IS_HYTERA_EP_ALG(last_alg)) {
+                    int s;
                     mi = last_mi;
-                else
+                    for (s = 0; s < extra; s++) mi = hytera_mi_lfsr_step(mi);
+                } else {
                     mi = lfsr_advance((uint32_t)last_mi, 32 * extra);
+                }
                 alg = last_alg;
                 kid = pi[si].e[pi[si].n - 1].kid;
             }
@@ -704,7 +732,7 @@ void validate_payload_set(const PayloadSet *ps,
                           char *summary, size_t summary_len,
                           char *warn,    size_t warn_len)
 {
-    size_t kmi9 = 0, i;
+    size_t kmi9 = 0, hyt = 0, i;
     unsigned char first_kid = 0;
     int has_kid = 0;
 
@@ -716,15 +744,20 @@ void validate_payload_set(const PayloadSet *ps,
 
     for (i = 0; i < ps->count; i++) {
         const PayloadLine *it = &ps->items[i];
-        if (it->has_mi && it->has_algid && (it->algid == 0x21 || it->algid == 0x01))
-            kmi9++;
+        if (it->has_mi && it->has_algid) {
+            if (it->algid == 0x21 || it->algid == 0x01) kmi9++;
+            else if (IS_HYTERA_EP_ALG(it->algid))       hyt++;
+        }
         if (!has_kid && it->has_mi) {
             first_kid = it->keyid;
             has_kid = 1;
         }
     }
 
-    if (has_kid)
+    if (has_kid && hyt > kmi9)
+        snprintf(summary, summary_len, "%zu payloads  \xb7  Hytera EP: %zu/%zu  \xb7  KID=%02X",
+                 ps->count, hyt, ps->count, (unsigned)first_kid);
+    else if (has_kid)
         snprintf(summary, summary_len, "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
                  ps->count, kmi9, ps->count, (unsigned)first_kid);
     else
@@ -733,6 +766,20 @@ void validate_payload_set(const PayloadSet *ps,
     warn[0] = '\0';
     if (ps->count < 30)
         snprintf(warn, warn_len, "! Only %zu payloads -- low confidence", ps->count);
+}
+
+/* Human name for a non-RC4 PI algid, per DSD-FME's algid table (dmr_le.c). Used
+ * only for the "unsupported cipher" message so it names the real family instead
+ * of always guessing "AES". */
+static const char *alg_family_name(uint8_t alg)
+{
+    switch (alg) {
+        case 0x22: return "DES-56";
+        case 0x24: return "AES-128";
+        case 0x25: return "AES-256";
+        case 0x35: case 0x36: case 0x37: return "Kirisun";
+        default:   return "non-RC4";
+    }
 }
 
 PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
@@ -762,7 +809,7 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
                           : (ps->has_global_algid ? ps->global_algid : 0);
         int has_mi = it->has_mi || ps->has_global_mi;
         int is_rc4 = (alg == 0x21 || alg == 0x01 || ((alg & 0x07u) == 0x01u));
-        int is_hyt = (alg == 0x02);
+        int is_hyt = IS_HYTERA_EP_ALG(alg);
         if (has_mi) {
             with_mi++;
             if      (is_rc4) rc4_mi++;
@@ -788,8 +835,8 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
     } else if (other_mi > rc4_mi && other_mi > hytera_mi) {
         cls = PAYLOAD_CLASS_UNSUPPORTED;
         snprintf(msg, msg_len,
-            "Unsupported cipher (ALG=0x%02X, likely AES) -- NOT crackable by this tool",
-            (unsigned)other_alg);
+            "Unsupported cipher (ALG=0x%02X, %s) -- NOT crackable by this tool",
+            (unsigned)other_alg, alg_family_name(other_alg));
     } else if (rc4_mi > 0) {
         cls = PAYLOAD_CLASS_MOTOTRBO_RC4; ck = 1;
         snprintf(msg, msg_len,
