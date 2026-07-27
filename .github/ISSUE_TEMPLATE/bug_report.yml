@@ -41,7 +41,7 @@ body:
     attributes:
       label: Environment
       description: OS, GPU model, driver/toolkit version, dmrcrack version.
-      placeholder: "Windows 11 / RTX 3060 / CUDA 12.4 / v0.4.1"
+      placeholder: "Windows 11 / RTX 3060 / CUDA 12.4 / v0.5.0"
     validations:
       required: true
   - type: textarea

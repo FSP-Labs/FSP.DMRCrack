@@ -1,3 +1,20 @@
+dmrcrack (0.5.0+dfsg-1) unstable; urgency=medium
+
+  * Re-derive the per-burst detection floor so a noisy real-world capture no
+    longer prunes the correct key; wrong keys are still rejected within a
+    superframe.
+  * Report a CONFIRMED / UNVERIFIED / no-key verdict instead of a raw score, so
+    a dictionary or statistical latch is never presented as a recovered key.
+  * Hytera Enhanced Privacy: build the RC4 keystream once per key instead of
+    once per superframe (about 3.4x faster), and advance the inter-superframe
+    MI with its own LFSR so one decoded PI header tags a whole capture.
+  * Recognise Hytera Enhanced Privacy under both ALG 0x02 and 0x26.
+  * Report a GPU backend failure as an error instead of a misleading
+    "interrupted" result.
+  * Add native sm_120 (RTX 50-series) SASS instead of relying on PTX JIT.
+
+ -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Mon, 27 Jul 2026 00:00:00 +0000
+
 dmrcrack (0.4.1+dfsg-1) unstable; urgency=medium
 
   * Report the closest candidate (its per-burst Hamming rate and how many bursts

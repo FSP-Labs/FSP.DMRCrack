@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] - 2026-07-27
+
 ### Added
 - **Confidence verdict.** The best key is re-scored into a capture-size-normalized
   significance `Z = (r − 24)·√n / √12` (mean per-burst inter-frame agreement `r`
