@@ -4612,7 +4612,7 @@ void bruteforce_confidence(
 
     if (out->sigma >= CONF_SIGMA_LIKELY && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
         out->verdict = CONF_LIKELY_REAL;
-    else if (out->sigma >= CONF_SIGMA_UNCERTAIN)
+    else if (out->sigma >= CONF_SIGMA_UNCERTAIN && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
         out->verdict = CONF_UNCERTAIN;
     else
         out->verdict = CONF_NO_SIGNAL;

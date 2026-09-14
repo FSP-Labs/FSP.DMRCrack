@@ -537,6 +537,41 @@ static int sync_active_slot(const char *line)
     return 0;
 }
 
+/* Parse a DSD-FME late-entry recovery line, e.g.
+ *   "Slot 1 PI/LFSR and Late Entry MI Mismatch - 00000000 : 69EDB979 (CRC OK)"
+ * The second value is the MI recovered from the voice superframe's embedded
+ * signalling; it carries "(CRC OK)" only when it passed CRC, which is what makes
+ * it trustworthy when the PI header's own MI field decoded to zero. Returns 1
+ * (with slot + MI) on a CRC-OK line, 0 otherwise (CRC-ERR lines are rejected).
+ */
+static int parse_late_entry_mi(const char *line, int *slot_out, uint64_t *mi_out)
+{
+    const char *p = strstr(line, "Late Entry MI Mismatch");
+    if (!p) return 0;
+    if (!strstr(line, "(CRC OK)")) return 0;
+
+    const char *s = strstr(line, "Slot ");
+    int slot = 0;
+    if (s) {
+        s += 5;
+        while (*s == ' ') s++;
+        if (*s == '1' || *s == '2') slot = *s - '0';
+    }
+    if (slot != 1 && slot != 2) return 0;
+
+    /* MI is the hex value after the colon in "- <pi_mi> : <late_mi> (CRC OK)". */
+    p = strchr(p, ':');
+    if (!p) return 0;
+    p++;
+    while (*p == ' ') p++;
+    unsigned long long mv;
+    if (sscanf(p, "%llx", &mv) != 1) return 0;
+
+    *slot_out = slot;
+    *mi_out = (uint64_t)mv;
+    return 1;
+}
+
 static void pi_list_push(PiList *pl, uint64_t mi, uint8_t alg, uint8_t kid)
 {
     if (pl->n == pl->cap) {
@@ -571,6 +606,20 @@ static void load_pi_lists(const char *log_path, PiList pi[2])
         uint64_t mi;
         int s = sync_active_slot(line);
         if (s) cur_slot = s;
+        /* Backfill a zeroed PI MI from a following CRC-OK late-entry recovery:
+         * DSD-FME emits the PI header (MI decoded to 0) then, on the next line,
+         * the true MI recovered from the voice superframe. Without this the whole
+         * superframe is scored with MI=0 -- pure noise against the correct key. */
+        {
+            int le_slot;
+            uint64_t le_mi;
+            if (parse_late_entry_mi(line, &le_slot, &le_mi)) {
+                PiList *pl = &pi[le_slot - 1];
+                if (pl->n > 0 && pl->e[pl->n - 1].mi == 0)
+                    pl->e[pl->n - 1].mi = le_mi;
+                continue;
+            }
+        }
         if (!parse_pi_line(line, &slot, &slot_known, &alg, &kid, &mi)) continue;
         if (!slot_known) slot = cur_slot;   /* Hytera PI: use surrounding sync context */
         if (slot < 1 || slot > 2) continue;

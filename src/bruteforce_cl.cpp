@@ -645,6 +645,10 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cl_launcher_proc(void *arg)
         clSetKernelArg(st->kernel, 9, sizeof(cl_mem),   &st->buf_best);
 
         size_t local = st->local_size;
+        /* Per-work-group __local S-box buffer: one 256-byte slice per work-item.
+         * local_size was capped at init so local*256 fits device local memory. */
+        clSetKernelArg(st->kernel, 10, local * 256, NULL);
+
         size_t global = ((this_chunk + local - 1) / local) * local;
 
         cl_int err = clEnqueueNDRangeKernel(st->queue, st->kernel, 1, NULL,
@@ -684,7 +688,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cl_launcher_proc(void *arg)
         }
     }
 
-    if (plat_atomic32_load(&engine->stop_requested) == 0) {
+    /* Only a clean run marks the search complete. A kernel/launch failure sets
+     * cuda_error and breaks out of the loop above; leaving search_completed = 0
+     * lets the CLI/GUI report the GPU error instead of a bogus "no key found"
+     * over 0 keys tested (matches the CUDA orchestrator's guard). */
+    if (plat_atomic32_load(&engine->stop_requested) == 0
+        && engine->cuda_error[0] == '\0') {
         plat_atomic32_store(&engine->search_completed, 1);
         if (engine->progress_path[0] != '\0') {
             plat_delete_file(engine->progress_path);
@@ -870,6 +879,20 @@ int bruteforce_start(
                                                  sizeof(lsz), &lsz, NULL);
                         if (lsz == 0) lsz = 64;
                         if (lsz > 256) lsz = 256;
+                        /* Each work-item owns a 256-byte __local S-box slice, so
+                         * local_size*256 must fit device local memory. Reserve a
+                         * few KB of headroom -- requesting the full reported size
+                         * (e.g. exactly 48KB on NVIDIA) fails the launch with
+                         * CL_OUT_OF_RESOURCES. Then round down to a warp multiple. */
+                        cl_ulong local_mem = 0;
+                        clGetDeviceInfo(st->device, CL_DEVICE_LOCAL_MEM_SIZE,
+                                        sizeof(local_mem), &local_mem, NULL);
+                        if (local_mem > 4096) {
+                            size_t max_by_local = (size_t)((local_mem - 4096) / 256);
+                            if (lsz > max_by_local) lsz = max_by_local;
+                        }
+                        if (lsz >= 32) lsz = (lsz / 32) * 32;
+                        if (lsz == 0) lsz = 1;
                         st->local_size = lsz;
 
                         cl_ulong zero = 0;
@@ -1171,7 +1194,7 @@ void bruteforce_confidence(
 
     if (out->sigma >= CONF_SIGMA_LIKELY && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
         out->verdict = CONF_LIKELY_REAL;
-    else if (out->sigma >= CONF_SIGMA_UNCERTAIN)
+    else if (out->sigma >= CONF_SIGMA_UNCERTAIN && out->chi2_per_burst >= CONF_CHI2N_LIKELY)
         out->verdict = CONF_UNCERTAIN;
     else
         out->verdict = CONF_NO_SIGNAL;

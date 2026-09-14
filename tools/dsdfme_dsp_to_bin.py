@@ -52,6 +52,14 @@ SYNC_SLOT_RE = re.compile(r"\[slot([12])\]", re.IGNORECASE)
 # Inline "Slot N" prefix on a PI header line.
 INLINE_SLOT_RE = re.compile(r"Slot\s+([12])", re.IGNORECASE)
 
+# Late-entry MI recovered from the voice superframe's embedded signalling, e.g.
+# "Slot N PI/LFSR and Late Entry MI Mismatch - AAAA : BBBB (CRC OK)". BBBB passed
+# CRC and is the true MI when the PI header's own MI field decoded to zero.
+LATE_ENTRY_RE = re.compile(
+    r"Slot\s+([12]).*?Late Entry MI Mismatch\s*-\s*[0-9A-Fa-f]+\s*:\s*([0-9A-Fa-f]+)\s*\(CRC OK\)",
+    re.IGNORECASE,
+)
+
 DSP_RE = re.compile(r"^\s*(\d+)\s+([0-9A-Fa-f]{2})\s+([0-9A-Fa-f]+)\s*$")
 
 
@@ -125,6 +133,18 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
                         kid = int(hm.group(2), 16)
                         mi = int(hm.group(3), 16)
                         pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
+                continue
+
+            # Backfill a zeroed PI MI from the CRC-OK late-entry recovery that
+            # DSD-FME prints on the next line; otherwise the whole superframe is
+            # scored with MI=0 (pure noise against the correct key).
+            le = LATE_ENTRY_RE.search(line)
+            if le:
+                slot = int(le.group(1))
+                mi = int(le.group(2), 16)
+                lst = pi_seq[slot]
+                if lst and lst[-1]["mi"] == 0:
+                    lst[-1]["mi"] = mi
 
     return pi_seq
 

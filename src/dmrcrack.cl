@@ -17,8 +17,12 @@
 #define DMR_CIPHER_PACK_BYTES 21
 #define RC4_DISCARD_BYTES     256
 
+/* The 256-byte S-box lives in __local (work-group shared) memory, one slice per
+ * work-item, passed explicitly to each RC4 routine -- NOT in private memory. On
+ * NVIDIA's OpenCL a 256-byte private array does not fit in registers and spills
+ * to global memory, which collapses throughput (~30x); __local keeps it on-chip,
+ * matching what the CUDA kernels do with __shared__. Only i/j stay private. */
 typedef struct {
-    uchar S[256];
     uchar i;
     uchar j;
 } RC4_CTX;
@@ -76,57 +80,57 @@ inline void compose_kmi9(const uchar key5[5], uint mi, uchar out9[9])
     out9[8] = (uchar)( mi        & 0xFFu);
 }
 
-/* RC4 KSA with a 9-byte key (KMI9). */
-inline void rc4_ksa9(RC4_CTX *ctx, const uchar key9[9])
+/* RC4 KSA with a 9-byte key (KMI9). S is this work-item's __local S-box slice. */
+inline void rc4_ksa9(__local uchar *S, RC4_CTX *ctx, const uchar key9[9])
 {
-    for (int i = 0; i < 256; ++i) ctx->S[i] = (uchar)i;
+    for (int i = 0; i < 256; ++i) S[i] = (uchar)i;
     int j = 0, k_idx = 0;
     for (int i = 0; i < 256; ++i) {
-        j = (j + ctx->S[i] + key9[k_idx]) & 0xFF;
-        uchar t = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = t;
+        j = (j + S[i] + key9[k_idx]) & 0xFF;
+        uchar t = S[i]; S[i] = S[j]; S[j] = t;
         if (++k_idx == 9) k_idx = 0;
     }
     ctx->i = 0; ctx->j = 0;
 }
 
 /* RC4 KSA with a 5-byte key (Hytera). */
-inline void rc4_ksa5(RC4_CTX *ctx, const uchar key5[5])
+inline void rc4_ksa5(__local uchar *S, RC4_CTX *ctx, const uchar key5[5])
 {
-    for (int i = 0; i < 256; ++i) ctx->S[i] = (uchar)i;
+    for (int i = 0; i < 256; ++i) S[i] = (uchar)i;
     int j = 0, k_idx = 0;
     for (int i = 0; i < 256; ++i) {
-        j = (j + ctx->S[i] + key5[k_idx]) & 0xFF;
-        uchar t = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = t;
+        j = (j + S[i] + key5[k_idx]) & 0xFF;
+        uchar t = S[i]; S[i] = S[j]; S[j] = t;
         if (++k_idx == 5) k_idx = 0;
     }
     ctx->i = 0; ctx->j = 0;
 }
 
-inline void rc4_discard(RC4_CTX *ctx, int nbytes)
+inline void rc4_discard(__local uchar *S, RC4_CTX *ctx, int nbytes)
 {
     uchar i = ctx->i, j = ctx->j;
     for (int k = 0; k < nbytes; ++k) {
         i = (uchar)(i + 1);
-        j = (uchar)(j + ctx->S[i]);
-        uchar t = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = t;
+        j = (uchar)(j + S[i]);
+        uchar t = S[i]; S[i] = S[j]; S[j] = t;
     }
     ctx->i = i; ctx->j = j;
 }
 
 /* Decrypt the first 3 bytes of a 7-byte sub-frame, advance state over all 7. */
-inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[3])
+inline void rc4_crypt_first3_skip4(__local uchar *S, RC4_CTX *ctx, const uchar in7[7], uchar out3[3])
 {
     uchar i = ctx->i, j = ctx->j;
     for (int k = 0; k < 3; ++k) {
         i = (uchar)(i + 1);
-        j = (uchar)(j + ctx->S[i]);
-        uchar t = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = t;
-        out3[k] = in7[k] ^ ctx->S[(uchar)(ctx->S[i] + ctx->S[j])];
+        j = (uchar)(j + S[i]);
+        uchar t = S[i]; S[i] = S[j]; S[j] = t;
+        out3[k] = in7[k] ^ S[(uchar)(S[i] + S[j])];
     }
     for (int k = 3; k < 7; ++k) {
         i = (uchar)(i + 1);
-        j = (uchar)(j + ctx->S[i]);
-        uchar t = ctx->S[i]; ctx->S[i] = ctx->S[j]; ctx->S[j] = t;
+        j = (uchar)(j + S[i]);
+        uchar t = S[i]; S[i] = S[j]; S[j] = t;
     }
     ctx->i = i; ctx->j = j;
 }
@@ -140,17 +144,17 @@ inline void rc4_crypt_first3_skip4(RC4_CTX *ctx, const uchar in7[7], uchar out3[
 #define HYTERA_KS_BYTES 126
 /* MI-free RC4 keystream (KSA(key5)+PRGA): depends only on the key, so build it
  * once per key and reuse across superframes. Mirrors hytera_compute_raw. */
-inline void compute_hytera_raw(const uchar key5[5], uchar raw[HYTERA_KS_BYTES])
+inline void compute_hytera_raw(__local uchar *S, const uchar key5[5], uchar raw[HYTERA_KS_BYTES])
 {
     RC4_CTX rc4;
-    rc4_ksa5(&rc4, key5);
+    rc4_ksa5(S, &rc4, key5);
 
     uchar ri = 0, rj = 0;
     for (int idx = 0; idx < HYTERA_KS_BYTES; ++idx) {
         ri = (uchar)(ri + 1);
-        rj = (uchar)(rj + rc4.S[ri]);
-        uchar t = rc4.S[ri]; rc4.S[ri] = rc4.S[rj]; rc4.S[rj] = t;
-        raw[idx] = rc4.S[(uchar)(rc4.S[ri] + rc4.S[rj])];
+        rj = (uchar)(rj + S[ri]);
+        uchar t = S[ri]; S[ri] = S[rj]; S[rj] = t;
+        raw[idx] = S[(uchar)(S[ri] + S[rj])];
     }
 }
 
@@ -195,10 +199,14 @@ __kernel void kernel_strict(
     __global const ulong *line_mi,
     __global const uchar *meta_flags,
     __global const float *abs_floor,
-    volatile __global ulong *best_packed)
+    volatile __global ulong *best_packed,
+    __local uchar *sbox)
 {
     ulong gid = get_global_id(0);
     if (gid >= total_keys) return;
+
+    /* This work-item's private 256-byte slice of the work-group S-box buffer. */
+    __local uchar *S = sbox + get_local_id(0) * 256;
 
     ulong current_key = start_key + gid;
     uchar key[5];
@@ -216,8 +224,8 @@ __kernel void kernel_strict(
         uchar kmi9[9];
         compose_kmi9(key, mi, kmi9);
         RC4_CTX rc4;
-        rc4_ksa9(&rc4, kmi9);
-        rc4_discard(&rc4, RC4_DISCARD_BYTES);
+        rc4_ksa9(S, &rc4, kmi9);
+        rc4_discard(S, &rc4, RC4_DISCARD_BYTES);
 
         for (int burst_pos = 0; burst_pos < 6; ++burst_pos) {
             int p = sf_base + burst_pos;
@@ -226,11 +234,11 @@ __kernel void kernel_strict(
             __global const uchar *cp = cipher_packs + (p * DMR_CIPHER_PACK_BYTES);
             uchar in7[7], p0[3], p1[3], p2[3];
             for (int b = 0; b < 7; ++b) in7[b] = cp[b];
-            rc4_crypt_first3_skip4(&rc4, in7, p0);
+            rc4_crypt_first3_skip4(S, &rc4, in7, p0);
             for (int b = 0; b < 7; ++b) in7[b] = cp[7 + b];
-            rc4_crypt_first3_skip4(&rc4, in7, p1);
+            rc4_crypt_first3_skip4(S, &rc4, in7, p1);
             for (int b = 0; b < 7; ++b) in7[b] = cp[14 + b];
-            rc4_crypt_first3_skip4(&rc4, in7, p2);
+            rc4_crypt_first3_skip4(S, &rc4, in7, p2);
 
             int h01 = popc8(p0[0]^p1[0]) + popc8(p0[1]^p1[1]) + popc8(p0[2]^p1[2]);
             int h12 = popc8(p1[0]^p2[0]) + popc8(p1[1]^p2[1]) + popc8(p1[2]^p2[2]);
@@ -296,10 +304,14 @@ __kernel void kernel_hytera(
     __global const ulong *line_mi,
     __global const uchar *meta_flags,
     __global const float *abs_floor,
-    volatile __global ulong *best_packed)
+    volatile __global ulong *best_packed,
+    __local uchar *sbox)
 {
     ulong gid = get_global_id(0);
     if (gid >= total_keys) return;
+
+    /* This work-item's private 256-byte slice of the work-group S-box buffer. */
+    __local uchar *S = sbox + get_local_id(0) * 256;
 
     ulong current_key = start_key + gid;
     uchar key[5];
@@ -313,7 +325,7 @@ __kernel void kernel_hytera(
     /* RC4 keystream is MI-independent: build it once per key, re-apply only the
      * cheap MI mask per superframe (was a full KSA+PRGA per superframe). */
     uchar hraw[HYTERA_KS_BYTES];
-    compute_hytera_raw(key, hraw);
+    compute_hytera_raw(S, key, hraw);
 
     for (int sf_base = 0; sf_base < payload_count; sf_base += 6) {
         ulong mi = global_mi;   /* Hytera EP uses the full 40-bit MI */

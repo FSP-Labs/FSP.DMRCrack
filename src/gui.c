@@ -2127,9 +2127,12 @@ static void refresh_snapshot_and_ui(void)
 
     /* Re-score the current best key into a capture-normalized confidence verdict.
      * Drives whether the UI presents it as a recovered key or as "no confirmed
-     * key" -- a statistical/dictionary latch scores high but verdicts NO_SIGNAL. */
+     * key" -- a statistical/dictionary latch scores high but verdicts NO_SIGNAL.
+     * Always score over ALL payloads (sample_lines=0), not the per-candidate scan
+     * sample cap: Z scales with sqrt(n), so scoring the verdict on a 100-line
+     * subset understates a real key vs the CLI (which uses all) and can hide it. */
     bruteforce_confidence(&g_app.payloads, g_app.snapshot.best_key,
-                          g_app.engine.cfg.sample_lines, g_app.engine.cfg.sample_bytes,
+                          0, g_app.engine.cfg.sample_bytes,
                           &g_app.confidence);
 
     /* Compute instantaneous rates from delta between ticks */

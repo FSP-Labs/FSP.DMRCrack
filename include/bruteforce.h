@@ -95,13 +95,17 @@ typedef struct {
 #define CONF_WRONG_STD_PER_BURST 3.4641016  /* sqrt(12): per-burst wrong-key std of (48-h01-h12) */
 #define CONF_RANDOM_BASELINE     24.0       /* mean per-burst Hamming for a wrong key */
 #define CONF_SIGMA_LIKELY        12.0       /* Z >= this (and chi2/n floor) => confirmed */
-#define CONF_SIGMA_UNCERTAIN      7.0       /* Z >= this => possible/weak, verify externally */
+/* Must sit ABOVE the luckiest-wrong-key ceiling (~7.5 sigma over 2^40, see above),
+ * or a completed scan surfaces pure noise as a candidate. The chi2/n floor below
+ * is also required for UNCERTAIN, which alone rejects that noise (wrong-key chi2/n
+ * ~6 vs the 20 floor) regardless of Z. */
+#define CONF_SIGMA_UNCERTAIN      9.0       /* Z >= this (and chi2/n floor) => possible/weak, verify externally */
 #define CONF_CHI2N_LIKELY        20.0       /* chi2/n floor for a confirmed key (wrong~6, correct~212) */
 
 typedef enum {
     CONF_NA          = 0,   /* legacy mode (no MI): Hamming Z not meaningful     */
-    CONF_NO_SIGNAL   = 1,   /* Z < 7  : best key is just the luckiest wrong key  */
-    CONF_UNCERTAIN   = 2,   /* 7<=Z<12: possible/weak real, needs external check */
+    CONF_NO_SIGNAL   = 1,   /* below the bar: best key is just the luckiest wrong key */
+    CONF_UNCERTAIN   = 2,   /* 9<=Z<12 with chi2/n floor: possible/weak, verify  */
     CONF_LIKELY_REAL = 3    /* Z>=12 (+ chi2/n floor): confirmed recovery        */
 } ConfidenceVerdict;
 
