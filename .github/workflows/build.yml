@@ -9,7 +9,27 @@ on:
 permissions:
   contents: read
 
+# Supersede older runs on the same ref instead of building them all.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  version-check:
+    name: Version / changelog sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # The released version lives in include/version.h and must have a matching
+    # CHANGELOG section, so a forgotten bump fails here (on the PR) rather than
+    # mid-release. release.yml additionally checks it against the tag.
+    steps:
+      - uses: actions/checkout@v4
+      - name: version.h has a CHANGELOG entry
+        run: |
+          ver=$(sed -n 's/^#define[[:space:]][[:space:]]*DMRCRACK_VERSION[[:space:]][[:space:]]*"\([^"]*\)".*/\1/p' include/version.h)
+          echo "version.h = $ver"
+          grep -q "## \[$ver\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no [$ver] section"; exit 1; }
+
   build:
     name: Compile dmrcrack.exe
     # Pinned to windows-2022 (ships VS2022). The windows-latest image moved to a

@@ -72,6 +72,30 @@ def dmr_mi_lfsr_step(mi: int, steps: int = 1) -> int:
     return mi
 
 
+def dmr_mi_lfsr_reverse(mi: int, steps: int = 1) -> int:
+    """Exact inverse of dmr_mi_lfsr_step: step the MI LFSR backward. Used to
+    recover the MI of voice bursts decoded BEFORE the first PI header."""
+    mi &= 0xFFFFFFFF
+    for _ in range(steps):
+        b31 = ((mi & 1) ^ ((mi >> 4) & 1) ^ ((mi >> 2) & 1)) & 1
+        mi = ((mi >> 1) & 0x7FFFFFFF) | (b31 << 31)
+    return mi
+
+
+def superframe_start_kind(line: str) -> int:
+    """Voice superframe-START marker classifier (see the C converter's twin).
+    Repeater/TDMA logs 'VC1'[*] per superframe; simplex/MS logs one bare 'VC*'.
+    Returns 1 (repeater start), 2 (simplex start), or 0."""
+    if "VC1" in line:
+        return 1
+    i = line.find("VC")
+    while i >= 0:
+        if i + 2 < len(line) and line[i + 2] == "*":
+            return 2
+        i = line.find("VC", i + 2)
+    return 0
+
+
 _HYT_TAPS = (0x12, 0x24, 0x48, 0x22, 0x14)
 
 
@@ -101,16 +125,41 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
     is for the next superframe.
     """
     pi_seq = {1: [], 2: []}
+    first_sf = {1: 0, 2: 0}   # true superframe index of each slot's first PI
 
     if not log_path or not log_path.exists():
-        return pi_seq
+        return pi_seq, first_sf
 
     cur_slot = 0  # last active slot seen in a sync line (for Hytera PI attribution)
+    rep_sf = {1: 0, 2: 0}     # repeater superframe starts ("VC1")
+    simp_sf = {1: 0, 2: 0}    # simplex superframe markers ("VC*")
+
+    def cur_sf(slot):
+        # True superframe index of a PI seen right now, from the superframe-start
+        # markers counted so far. DSD-FME often locks onto voice several superframes
+        # before it decodes a clean PI, so PIs are usually NOT at superframe 0.
+        # Repeater's "VC1" precedes the mid-superframe PI (subtract 1); simplex's
+        # "VC*" follows it (use as-is).
+        r, sp = rep_sf[slot], simp_sf[slot]
+        return (r - 1) if r else sp
+
+    def pin_first(slot):
+        if not pi_seq[slot]:  # about to append this slot's FIRST PI
+            first_sf[slot] = cur_sf(slot)
+
     with log_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             sm = SYNC_SLOT_RE.search(line)
             if sm:
                 cur_slot = int(sm.group(1))
+
+            k = superframe_start_kind(line)
+            if k:
+                vs = cur_slot if cur_slot else 1   # simplex/MS -> slot 1
+                if k == 1:
+                    rep_sf[vs] += 1
+                elif k == 2:
+                    simp_sf[vs] += 1
 
             m = PI_RE.search(line)
             if m:
@@ -118,7 +167,8 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
                 alg = int(m.group(2), 16)
                 kid = int(m.group(3), 16)
                 mi = int(m.group(4), 16)
-                pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
+                pin_first(slot)
+                pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi, "sf": cur_sf(slot)})
                 continue
 
             # Hytera Enhanced PI: 40-bit MI. Slot from the inline "Slot N" when
@@ -132,6 +182,7 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
                         alg = int(hm.group(1), 16)
                         kid = int(hm.group(2), 16)
                         mi = int(hm.group(3), 16)
+                        pin_first(slot)
                         pi_seq[slot].append({"alg": alg, "kid": kid, "mi": mi})
                 continue
 
@@ -146,21 +197,21 @@ def parse_log_pi_sequence(log_path: pathlib.Path):
                 if lst and lst[-1]["mi"] == 0:
                     lst[-1]["mi"] = mi
 
-    return pi_seq
+    return pi_seq, first_sf
 
 
 def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path: Optional[pathlib.Path]):
-    pi_seq = parse_log_pi_sequence(log_path) if log_path else {1: [], 2: []}
+    pi_seq, first_sf = (parse_log_pi_sequence(log_path) if log_path
+                        else ({1: [], 2: []}, {1: 0, 2: 0}))
 
     # Per-slot state: tracks current superframe index and burst count within SF
     slot_state = {}
     for slot in (1, 2):
         slot_state[slot] = {
             "pi_list": pi_seq[slot],
+            "first_sf": first_sf[slot],  # superframe index of pi_list[0]
             "burst_count": 0,       # voice bursts emitted so far for this slot
         }
-
-    after_voice_hdr = {1: False, 2: False}
 
     total_lines = 0
     voice_lines = 0
@@ -179,9 +230,10 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
             burst_type = m.group(2).upper()
             payload_hex = m.group(3).strip().upper()
 
-            if burst_type == "98":      # voice header: next voice burst is silence candidate
-                if slot in (1, 2):
-                    after_voice_hdr[slot] = True
+            # Type 98 is the CACH, which DSD-FME emits before EVERY voice burst;
+            # it is not a silence marker. Tagging the next burst SILENCE tagged
+            # nearly every frame and pruned the correct key via the KPA filter.
+            if burst_type == "98":
                 continue
             if burst_type != VOICE_TYPE:
                 continue
@@ -196,29 +248,54 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
                 pi_list = ss["pi_list"]
 
                 if pi_list:
-                    # Determine which superframe this burst belongs to
+                    # Map this burst's superframe to the PI whose OWN superframe
+                    # governs it: the most recent PI with sf <= sf_idx (PIs are in
+                    # ascending superframe order), so each burst anchors to the PI of
+                    # its own transmission. Indexing densely by (sf_idx - first_sf)
+                    # breaks on multi-call captures: a boundary superframe carries two
+                    # PIs (an outgoing C- plus the next call's H-), so a dense index
+                    # runs one ahead per call and misaligns every later MI.
                     sf_idx = ss["burst_count"] // 6
-                    # burst_pos = ss["burst_count"] % 6  # not needed for MI
+                    gi = -1
+                    for j, pe in enumerate(pi_list):
+                        if pe["sf"] <= sf_idx:
+                            gi = j
+                        else:
+                            break   # ascending: no later PI qualifies
 
-                    if sf_idx < len(pi_list):
-                        # Use the PI MI for this superframe directly
-                        mi = pi_list[sf_idx]["mi"]
-                        alg = pi_list[sf_idx]["alg"]
-                        kid = pi_list[sf_idx]["kid"]
+                    if gi < 0:
+                        # Before the first decoded PI: back-extrapolate from pi_list[0].
+                        alg = pi_list[0]["alg"]
+                        kid = pi_list[0]["kid"]
+                        if alg == 0x02:
+                            mi = pi_list[0]["mi"]  # Hytera 5-byte LFSR inverse not modeled
+                        else:
+                            mi = dmr_mi_lfsr_reverse(pi_list[0]["mi"], 32 * (pi_list[0]["sf"] - sf_idx))
+                    elif pi_list[gi]["sf"] == sf_idx:
+                        # Exact match. When two PIs share it (an outgoing C- then a
+                        # new-call H-), prefer the FIRST -- it continues the call
+                        # these bursts belong to; the H- governs from the next
+                        # superframe. A lone H- start is the only entry and wins.
+                        while gi > 0 and pi_list[gi - 1]["sf"] == sf_idx:
+                            gi -= 1
+                        mi = pi_list[gi]["mi"]
+                        alg = pi_list[gi]["alg"]
+                        kid = pi_list[gi]["kid"]
                     else:
-                        last_pi = pi_list[-1]
-                        extra_sfs = sf_idx - (len(pi_list) - 1)
-                        alg = last_pi["alg"]
-                        kid = last_pi["kid"]
-                        if alg in (0x02, 0x26):
-                            # Hytera EP (algid 0x02/0x26): step its own 5-byte LFSR
-                            # once per superframe past the last decoded PI.
-                            mi = last_pi["mi"]
+                        # Gap between PIs: forward-extrapolate from the most recent
+                        # one. A new-call H- re-anchors here, so extrapolation never
+                        # crosses a call boundary. MOTOTRBO advances 32 LFSR steps/SF;
+                        # Hytera steps its own 5-byte LFSR once per superframe.
+                        gov = pi_list[gi]
+                        extra_sfs = sf_idx - gov["sf"]
+                        alg = gov["alg"]
+                        kid = gov["kid"]
+                        if alg == 0x02:
+                            mi = gov["mi"]
                             for _ in range(extra_sfs):
                                 mi = hytera_mi_lfsr_step(mi)
                         else:
-                            # MOTOTRBO: +32 LFSR steps per superframe.
-                            mi = dmr_mi_lfsr_step(last_pi["mi"], 32 * extra_sfs)
+                            mi = dmr_mi_lfsr_step(gov["mi"], 32 * extra_sfs)
 
                     if alg is not None:
                         line_out += f";ALG={alg:02X}"
@@ -228,11 +305,6 @@ def convert_dsp_to_bin(dsp_path: pathlib.Path, out_path: pathlib.Path, log_path:
                     line_out += f";MI={mi:010X}" if mi > 0xFFFFFFFF else f";MI={mi:08X}"
 
                     ss["burst_count"] += 1
-
-            is_silence = after_voice_hdr.get(slot, False)
-            after_voice_hdr[slot] = False   # clear: only first burst after header
-            if is_silence:
-                line_out += ";SILENCE=1"
 
             fout.write(line_out + "\n")
             voice_lines += 1

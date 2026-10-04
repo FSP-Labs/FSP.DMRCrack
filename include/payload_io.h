@@ -86,16 +86,20 @@ typedef enum {
     PAYLOAD_CLASS_NONE              /* no encryption metadata                     */
 } PayloadClass;
 
-/* Hytera Enhanced Privacy (RC4-40) algorithm-ID values as carried in the DMR PI
- * header (Hytera feature set, MFID 0x68). Hytera radios signal the SAME RC4/EP
- * voice cipher under two algid values -- 0x02 and 0x26 -- depending on model and
- * firmware; both decrypt identically (key5 + 40-bit MI). Cross-checked against
- * sdrtrunk's EncryptionAlgorithm table (HYTERA_ENHANCED_PRIVACY 0x02 and
- * HYTERA_ENHANCED_PRIVACY_2 0x26, both labelled "HYTERA RC4/EP") and DSD-FME's
- * MFID-0x68 PI parser. 0x01 is Hytera *Basic* Privacy (an unrelated, unsupported
- * scheme) and is deliberately NOT matched. Single-sourced so every backend
- * (CUDA host, OpenCL host, the classifier gate) recognises the same set. */
-#define IS_HYTERA_EP_ALG(a) ((a) == 0x02 || (a) == 0x26)
+/* Hytera Enhanced Privacy (RC4-40) is carried in the DMR PI header under MFID
+ * 0x68 with algid 0x02 and a 40-bit MI. That is the only value this tool treats
+ * as Hytera EP, and it is the only algid the demodulator decrypts with the RC4
+ * keystream that omits the trailing +7-bit skip.
+ *
+ * 0x01 is Hytera *Basic* Privacy -- a different, unsupported scramble.
+ * 0x26 is NOT Hytera EP: in the demodulator it denotes Caltta Basic Privacy
+ * (DMRA family, MFID 0x10, a 32-bit-MI scramble), and its voice bitstream takes
+ * the +7-bit skip that genuine EP omits, so the RC4-40 no-skip model cannot
+ * decode it. Both fall through to PAYLOAD_CLASS_UNSUPPORTED.
+ *
+ * Single-sourced so every backend (CUDA host, OpenCL host, the classifier gate)
+ * recognises the same value. */
+#define IS_HYTERA_EP_ALG(a) ((a) == 0x02)
 
 /* Classify a loaded set and write a one-line human verdict into msg.
  * crackable (out, optional): 1 if the recommended pipeline can recover a key. */

@@ -10,6 +10,50 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.1] - 2026-10-04
+
+### Fixed
+- **Wrong Message Indicator on multi-transmission captures (the main "finds
+  nothing on a real capture" cause).** The converter indexed the PI list densely,
+  assuming one PI per consecutive superframe. A real repeater recording holds
+  several calls, and each call boundary carries two PIs in one superframe (the
+  outgoing continuation plus the next header), so the index ran one ahead per
+  call and every later superframe got the wrong MI. The per-superframe keystream
+  needs an exact MI -- one LFSR step off scores as noise -- so the correct key
+  looked like noise and the search found nothing. Both converters now map each
+  burst to the PI of its own call. Single-call captures are unchanged.
+- **MI not recovered when voice is decoded before the first PI header.** DSD-FME
+  often locks onto voice several superframes before the first clean PI; the
+  converter treated that PI as superframe 0, offsetting every MI. It now
+  back-extrapolates to the true start of the call.
+- **GPU never ran on the CLI default.** `--samples 0` ("use all payloads", the
+  default) left the per-device payload limit at 0, so every GPU worker bailed
+  with "No payloads for CUDA" and the scan fell back to CPU-only scoring.
+- **Heap-corruption crash on long captures.** Staging payloads for the legacy
+  kernel bounds-checked only each copy's start offset, overflowing an 8 KB buffer
+  past ~249 bursts of 33 bytes (most multi-minute recordings). Now bounds-checked.
+- **`ALG=0x26` misclassified as Hytera Enhanced Privacy.** `0x26` is Caltta Basic
+  Privacy (DMRA family, MFID 0x10), which the RC4-40 model cannot decode (its
+  bitstream keeps the +7-bit skip genuine EP omits). It now classifies as
+  unsupported instead of starting a scan it cannot win; only `ALG=0x02` is EP.
+- **Silence frames over-tagged.** On layouts that emit a CACH marker before every
+  voice burst (`0x98` is per-burst CACH, not silence), the converter tagged
+  nearly every burst as silence, so the KPA pre-filter ran against speech and
+  could discard the correct key. The spurious tagging is removed.
+
+### Changed
+- **Relaxed RAS/CRC gating during capture.** Demodulation and live capture now
+  always pass DSD-FME's `-F`, so a Privacy Indicator whose checksum fails under
+  RAS masking or marginal SNR still surfaces its MI instead of being dropped.
+  Clean captures are unaffected.
+
+### Added
+- **Capture-quality hint.** On load, payload classification reports the number of
+  distinct MIs and the silence-tag fraction, so a weak capture is visible before
+  a run.
+
+---
+
 ## [0.5.0] - 2026-07-27
 
 ### Added

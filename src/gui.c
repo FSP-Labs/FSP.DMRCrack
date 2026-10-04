@@ -475,7 +475,7 @@ static void layout_controls(int cw, int ch)
         g_app.score_graph_rect.bottom = graph_y + graph_h;
     }
 
-    /* Standalone progress bar no longer rendered (merged into progress tile) */
+    /* progress is drawn inside the progress tile, not a standalone bar: zero the rect */
     g_app.progress_rect.left = g_app.progress_rect.right = 0;
     g_app.progress_rect.top  = g_app.progress_rect.bottom = 0;
 }
@@ -1501,9 +1501,15 @@ static DWORD WINAPI demod_thread_proc(LPVOID param)
 
     /* Step 1/2: run dsd-fme.exe directly (no shell), stderr -> log file.
      * -V 3 = both DMR slots. -Q writes the DSP output relative to the
-     * child process CWD (which we set to wav_dir). */
+     * child process CWD (which we set to wav_dir).
+     * -F relaxes the DMR RAS/CRC pass-fail gate so a Privacy Indicator whose
+     * checksum fails (Hytera RAS, or a marginal-SNR burst) still surfaces its
+     * MI to the log instead of being dropped. Without a decoded PI there is no
+     * MI and the capture cannot be cracked, so this only widens what we can
+     * recover; clean captures are unaffected (their CRCs pass either way).
+     * Behavior on real RAS traffic is pending a capture to validate against. */
     SetWindowTextA(g_app.demod_label, g_lang.status_demodulating);
-    snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -i \"%s\" -Q \"%s\" -Z -V 3",
+    snprintf(cmdline, sizeof(cmdline), "\"%s\" -fs -F -i \"%s\" -Q \"%s\" -Z -V 3",
              dsd_path, wav_path, qname);
     if (!run_process_stderr_redirect(cmdline, logfile, wav_dir, &proc_exit) || proc_exit != 0) {
         /* 0xC0000135 = STATUS_DLL_NOT_FOUND -- Cygwin runtime missing */
@@ -1984,9 +1990,11 @@ static void start_capture(HWND hwnd)
              "%s\\session.bin", g_app.capture_session_dir);
     snprintf(logfile, sizeof(logfile), "%s\\live.log", g_app.capture_session_dir);
 
-    /* Continuous capture: -Q structured frames, -6 re-playable 48k recording. */
+    /* Continuous capture: -Q structured frames, -6 re-playable 48k recording.
+     * -F relaxes RAS/CRC gating so RAS-masked or marginal PIs still surface
+     * their MI (see the demod path for the full rationale). */
     snprintf(cmdline, sizeof(cmdline),
-             "\"%s\" -fs -i \"%s\" -Q live.dsp -Z -V 3 -6 \"%s\"",
+             "\"%s\" -fs -F -i \"%s\" -Q live.dsp -Z -V 3 -6 \"%s\"",
              dsd_path, spec, g_app.capture_raw_wav);
 
     InterlockedExchange(&g_app.capture_stop_flag, 0);

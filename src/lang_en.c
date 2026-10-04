@@ -258,7 +258,7 @@ const Lang g_lang_en = {
 "\r\n"
 "  1. Set Start = 0000000000, End = FFFFFFFFFF.\r\n"
 "  2. Click 'Start'.\r\n"
-"  3. When the Best Score spikes (Z > 7), the key is found.\r\n"
+"  3. When the candidate tile shows CONFIRMED, the key is recovered.\r\n"
 "  4. Click 'Copy' to copy the key to the clipboard.\r\n"
 "\r\n"
 "\r\n"

@@ -6,6 +6,10 @@ on:
   schedule:
     - cron: '0 6 * * 1'   # every Monday at 06:00 UTC
 
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   security-events: write

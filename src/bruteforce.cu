@@ -61,11 +61,11 @@ __constant__ int      d_const_n_silence;
 
 /* Per-burst Hamming early-reject floor, noise-tolerant form: floor = 24*n + C*sqrt(n).
  * A wrong key sits at the random inter-frame baseline (24/burst); the correct key
- * -- even badly degraded by demod noise -- beats it. This rejects wrong keys within
- * ~1 superframe (restoring throughput) while tolerating a correct key down to just
- * above 24/burst. This REPLACES the old 33*n - 6.92*sqrt(n) floor, which required
- * ~33/burst and pruned the correct key on noisy real captures (the "no key found"
- * bug). Gated at n>=6 so a slow-starting correct key survives its first superframe. */
+ * -- even badly degraded by demod noise -- beats it, so this rejects wrong keys within
+ * ~1 superframe while still keeping a correct key that scores just above 24/burst.
+ * That baseline is why the floor can't sit much higher: a ~33/burst floor prunes the
+ * correct key on noisy real captures. Gated at n>=6 so a slow-starting correct key
+ * survives its first superframe. */
 #define HFLOOR_BASE   24.0f   /* wrong-key mean per burst: 48 - HD(12) - HD(12) */
 #define HFLOOR_C       8.0f   /* sqrt(n) coefficient: ~2.3-sigma wrong-key rejection */
 #define HFLOOR_MIN_N   6      /* one full superframe before the floor engages */
@@ -226,8 +226,7 @@ __device__ __forceinline__ void rc4_discard_dev(RC4_CTX_DEV *ctx, int nbytes)
 
 /* KPA 24-bit pre-filter for silence frames: decrypt 3 bytes (C0+C1) and verify
  * they equal the AMBE silence pattern (all zeros = unvoiced, zero pitch, all bands
- * unvoiced).  A wrong key passes by chance with probability 2^-24 ~ 60 ppb -
- * ~16 million times stronger than the old single-bit check.
+ * unvoiced). A wrong key passes by chance with probability 2^-24 (~60 ppb).
  * burst_drop = 256 + (silence_idx % 6) * 21 */
 __device__ __forceinline__ int kpa_silence_check_dev(
     const unsigned char key5[5],
@@ -774,8 +773,8 @@ void bruteforce_kernel_strict(
 
         /* Bit-frequency accumulators packed as uint16 pairs in uint32 registers.
          * bcnt_p[k] = (count[2k+1] << 16) | count[2k], max count = MAX_CONST_LINES = 256 < 65535.
-         * 12 uint32 registers vs 24 int previously - saves 12 registers toward the
-         * __launch_bounds__(256,2) target of <=128 regs/thread. */
+         * Packing halves the register footprint (12 uint32 vs 24 ints) to stay under
+         * the __launch_bounds__(256,2) target of <=128 regs/thread. */
         unsigned int bcnt_p[12];
         #pragma unroll
         for (int k = 0; k < 12; k++) bcnt_p[k] = 0u;
@@ -829,8 +828,7 @@ void bruteforce_kernel_strict(
 
                 /* Noise-tolerant per-burst early-reject (see HFLOOR_* above): rejects
                  * wrong keys within a superframe while keeping any near-baseline
-                 * correct key. Restores throughput lost when the old 33/burst floor
-                 * was removed, without reintroducing its false negatives. */
+                 * correct key. */
                 if (enable_prune && processed_bursts >= HFLOOR_MIN_N &&
                     total_score < HFLOOR_BASE * (float)processed_bursts
                                 + HFLOOR_C * __fsqrt_rn((float)processed_bursts)) {
@@ -1111,7 +1109,7 @@ void bruteforce_kernel_strict_ilp2(
 }
 
 /* =========================================================================
- * HYTERA EP KERNEL - Hytera Enhanced Privacy (ALG 0x02/0x26, mode_policy=4)
+ * HYTERA EP KERNEL - Hytera Enhanced Privacy (ALG 0x02, mode_policy=4)
  * Same scoring structure as bruteforce_kernel_strict but builds one
  * HYTERA_KS_BYTES keystream per superframe (RC4 over key5, consumed as a 49-bit
  * bitstream) instead of the KMI9 per-burst RC4.
@@ -1872,8 +1870,8 @@ static void rc4_ksa9_4way(
  * Lock-free cursor over the GPU share of the keyspace. Each GPU worker thread
  * atomically claims a contiguous block of keys; faster GPUs naturally claim
  * more blocks, so asymmetric multi-GPU rigs self-balance with no scheduler.
- * For a single GPU the cursor is owned by one thread and the claim sequence is
- * identical to the old `for (offset ...)` loop -- zero behavioral change. */
+ * For a single GPU one thread owns the cursor and claims blocks in order, so the
+ * scan is just a sequential walk of the keyspace. */
 typedef struct {
     plat_atomic64_t next;   /* next un-claimed offset within the GPU portion */
     uint64_t        total;  /* size of the GPU portion, in keys */
@@ -2392,8 +2390,12 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
      * blocks from the shared work-queue. */
     if (plat_atomic32_load(&engine->stop_requested) != 0) goto cleanup;
 
+    /* sample_lines <= 0 means "use all payloads"; normalize before the cap so the
+     * CLI default (--samples 0) does not bail here (which left the CLI CPU-only
+     * and, with legacy mode, prone to a crash on longer captures). */
+    if (payload_limit <= 0 || (size_t)payload_limit > engine->payloads->count)
+        payload_limit = (int)engine->payloads->count;
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
-    if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
     if (payload_limit <= 0) {
         snprintf(engine->cuda_error, sizeof(engine->cuda_error), "No payloads for CUDA");
         goto cleanup;
@@ -2423,10 +2425,21 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
         goto cleanup;
     }
     memset(host_payload_flat, 0, payload_bytes);
-    for (int i = 0; i < payload_limit && ((size_t)i * bytes_per_line) < 8192; i++) {
-        size_t cp_len = engine->payloads->items[i].len;
-        if (cp_len > (size_t)bytes_per_line) cp_len = (size_t)bytes_per_line;
-        memcpy(host_payload_flat + ((size_t)i * bytes_per_line), engine->payloads->items[i].data, cp_len);
+    for (int i = 0; i < payload_limit; i++) {
+        /* Stage the raw payload for the legacy kernel's d_const_payloads[8192].
+         * Guard the FULL write (start + bytes_per_line), not just the start
+         * offset: host_payload_flat is payload_bytes (<=8192) and each copy writes
+         * up to bytes_per_line, so a start-only check overflowed the malloc by up
+         * to bytes_per_line once payload_limit*bytes_per_line passed 8192 -- e.g.
+         * >=249 payloads of 33 bytes -- a heap-corruption crash on long real
+         * captures. Strict/Hytera modes score from d_const_cipher_packs, not this
+         * buffer, so skipping the overflowing tail here is harmless; the meta/MI/
+         * algid arrays below are [MAX_CONST_LINES] and must still be filled. */
+        if (((size_t)(i + 1) * (size_t)bytes_per_line) <= payload_bytes) {
+            size_t cp_len = engine->payloads->items[i].len;
+            if (cp_len > (size_t)bytes_per_line) cp_len = (size_t)bytes_per_line;
+            memcpy(host_payload_flat + ((size_t)i * bytes_per_line), engine->payloads->items[i].data, cp_len);
+        }
         if (engine->payloads->items[i].has_mi) {
             host_meta_flags[i] |= 0x1u;
             host_mi[i] = engine->payloads->items[i].mi;
@@ -2446,7 +2459,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
             if (has_mi && is_hytera_ep_alg_host(alg)) mi_hytera_lines++;
         }
         /* Hytera EP takes priority: if >=90% of payloads have MI + Hytera EP algid
-         * (0x02/0x26), use mode 4 */
+         * (0x02), use mode 4 */
         if (payload_limit > 0 && mi_hytera_lines * 10 >= payload_limit * 9) {
             mode_policy = 4;
         } else if (payload_limit > 0 && mi_rc4_lines * 10 >= payload_limit * 9) {
@@ -2553,7 +2566,7 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_device_worker(void *arg)
      * S-box layout and its 2-keys/thread latency hiding were tuned and *measured*
      * on NVIDIA (Turing..Ada).
      *
-     * The old gate `(major*10+minor) >= 75` silently misfires on AMD/HIP: there
+     * A naive `(major*10+minor) >= 75` gate would silently misfire on AMD/HIP: there
      * major/minor encode the gfx arch (gfx1030 -> 10.3, gfx906 -> 9.0), so
      * major*10+minor is always >= 75. AMD would then run the NVIDIA-tuned kernel
      * while its 64 KB request pins it to a single workgroup per CU (AMD LDS is
@@ -3102,9 +3115,14 @@ static PLAT_THREAD_RETURN_T PLAT_THREAD_CALL cuda_launcher_thread(void *arg)
     run_dictionary_phase(engine);
     if (plat_atomic32_load(&engine->stop_requested) != 0) goto done;
 
+    /* sample_lines <= 0 means "use all payloads" (the CLI's --samples default is
+     * 0). Normalize to the payload count BEFORE the MAX_CONST_LINES cap: leaving
+     * it at 0 made this orchestrator select legacy mode_policy=1 and every
+     * per-device worker bail with "No payloads for CUDA", so the GPU never ran on
+     * the CLI default and the scan fell back to CPU-only legacy scoring. */
+    if (payload_limit <= 0 || (size_t)payload_limit > engine->payloads->count)
+        payload_limit = (int)engine->payloads->count;
     if (payload_limit > MAX_CONST_LINES) payload_limit = MAX_CONST_LINES;
-    if ((size_t)payload_limit > engine->payloads->count) payload_limit = (int)engine->payloads->count;
-    if (payload_limit < 0) payload_limit = 0;
 
     /* Detect mode_policy (host-side, device-independent) to decide CPU-assist.
      * Mirrors the per-device detection inside cuda_device_worker. */

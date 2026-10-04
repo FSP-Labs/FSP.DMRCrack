@@ -424,8 +424,8 @@ int load_payload_file(const char *file_path, size_t max_lines, PayloadSet *out_s
 
 #define MAX_PI_PER_SLOT 8192
 
-typedef struct { uint64_t mi; uint8_t alg; uint8_t kid; } PiEntry;
-typedef struct { PiEntry *e; int n; int cap; } PiList;
+typedef struct { uint64_t mi; uint8_t alg; uint8_t kid; int sf; } PiEntry;
+typedef struct { PiEntry *e; int n; int cap; int first_sf; } PiList;
 
 static uint32_t lfsr_advance(uint32_t mi, int steps)
 {
@@ -433,6 +433,21 @@ static uint32_t lfsr_advance(uint32_t mi, int steps)
     for (i = 0; i < steps; i++) {
         uint32_t bit = ((mi >> 31) ^ (mi >> 3) ^ (mi >> 1)) & 1u;
         mi = (mi << 1) | bit;
+    }
+    return mi;
+}
+
+/* Exact inverse of lfsr_advance: step the MOTOTRBO MI LFSR backward. Used to
+ * recover the MI of voice bursts decoded BEFORE the first PI header (DSD-FME
+ * often locks onto voice several superframes before it decodes a clean PI).
+ * Derivation: forward is cur = (prev<<1)|bit with bit = XOR(prev bits 31,3,1);
+ * prev's dropped high bit is b31 = (cur&1) ^ (cur>>4 &1) ^ (cur>>2 &1). */
+static uint32_t lfsr_reverse(uint32_t mi, int steps)
+{
+    int i;
+    for (i = 0; i < steps; i++) {
+        uint32_t b31 = ((mi & 1u) ^ ((mi >> 4) & 1u) ^ ((mi >> 2) & 1u)) & 1u;
+        mi = ((mi >> 1) & 0x7FFFFFFFu) | (b31 << 31);
     }
     return mi;
 }
@@ -537,6 +552,28 @@ static int sync_active_slot(const char *line)
     return 0;
 }
 
+/* Classify a DSD-FME log line as a voice superframe-START marker, so the
+ * converter can locate the first PI's true superframe. The marker differs by
+ * capture mode: repeater/TDMA logs "VC1*..VC6" (six per superframe, only the
+ * "VCn*" first burst carries the '*' sync flag), while simplex/MS logs a single
+ * "VC*" per superframe. Returns 1 for a repeater start ("VCn*"), 2 for a simplex
+ * start ("VC*"), 0 otherwise. "VC2".."VC6" (no '*') are NOT starts. */
+static int superframe_start_kind(const char *line)
+{
+    const char *p;
+    /* Repeater/TDMA: every superframe's first burst logs "VC1" (the '*' sync
+     * flag only appears on the initial lock / re-syncs, so match VC1 with or
+     * without it). "VC2".."VC6" are mid-superframe and must NOT count. */
+    if (strstr(line, "VC1")) return 1;
+    /* Simplex/MS: one bare "VC*" per superframe (VC immediately followed by *). */
+    p = strstr(line, "VC");
+    while (p) {
+        if (p[2] == '*') return 2;
+        p = strstr(p + 2, "VC");
+    }
+    return 0;
+}
+
 /* Parse a DSD-FME late-entry recovery line, e.g.
  *   "Slot 1 PI/LFSR and Late Entry MI Mismatch - 00000000 : 69EDB979 (CRC OK)"
  * The second value is the MI recovered from the voice superframe's embedded
@@ -572,7 +609,7 @@ static int parse_late_entry_mi(const char *line, int *slot_out, uint64_t *mi_out
     return 1;
 }
 
-static void pi_list_push(PiList *pl, uint64_t mi, uint8_t alg, uint8_t kid)
+static void pi_list_push(PiList *pl, uint64_t mi, uint8_t alg, uint8_t kid, int sf)
 {
     if (pl->n == pl->cap) {
         int new_cap = pl->cap ? pl->cap * 2 : 64;
@@ -584,6 +621,7 @@ static void pi_list_push(PiList *pl, uint64_t mi, uint8_t alg, uint8_t kid)
     pl->e[pl->n].mi  = mi;
     pl->e[pl->n].alg = alg;
     pl->e[pl->n].kid = kid;
+    pl->e[pl->n].sf  = sf;
     pl->n++;
 }
 
@@ -594,18 +632,34 @@ static void load_pi_lists(const char *log_path, PiList pi[2])
 
     pi[0].e = pi[1].e = NULL;
     pi[0].n = pi[1].n = pi[0].cap = pi[1].cap = 0;
+    pi[0].first_sf = pi[1].first_sf = 0;
 
     if (!log_path || !*log_path) return;
     f = fopen(log_path, "r");
     if (!f) return;
 
-    int cur_slot = 0;   /* last active slot seen in a sync line */
+    int cur_slot = 0;         /* last active slot seen in a sync line          */
+    int rep_sf[2] = {0, 0};   /* repeater superframe starts ("VCn*") per slot  */
+    int simp_sf[2] = {0, 0};  /* simplex superframe markers ("VC*") per slot   */
     while (fgets(line, sizeof(line), f)) {
         int slot = 0, slot_known = 0;
         uint8_t alg, kid;
         uint64_t mi;
         int s = sync_active_slot(line);
         if (s) cur_slot = s;
+        /* Count voice superframe-start markers so we can learn WHICH superframe
+         * the first decoded PI belongs to -- DSD-FME often locks onto voice
+         * several superframes before it decodes a clean PI header, so pi.e[0] is
+         * usually NOT superframe 0. Repeater and simplex mark superframes
+         * differently (see superframe_start_kind), so count each kind. */
+        {
+            int k = superframe_start_kind(line);
+            int vslot = s ? s : (cur_slot ? cur_slot : 1);  /* simplex/MS -> slot 1 */
+            if (vslot >= 1 && vslot <= 2) {
+                if      (k == 1) rep_sf[vslot - 1]++;
+                else if (k == 2) simp_sf[vslot - 1]++;
+            }
+        }
         /* Backfill a zeroed PI MI from a following CRC-OK late-entry recovery:
          * DSD-FME emits the PI header (MI decoded to 0) then, on the next line,
          * the true MI recovered from the voice superframe. Without this the whole
@@ -623,8 +677,19 @@ static void load_pi_lists(const char *log_path, PiList pi[2])
         if (!parse_pi_line(line, &slot, &slot_known, &alg, &kid, &mi)) continue;
         if (!slot_known) slot = cur_slot;   /* Hytera PI: use surrounding sync context */
         if (slot < 1 || slot > 2) continue;
-        if (pi[slot-1].n < MAX_PI_PER_SLOT)
-            pi_list_push(&pi[slot-1], mi, alg, kid);
+        {
+            /* Pin EACH PI's true superframe index (not just the first one). A
+             * repeater "VCn*" start precedes the mid-superframe PI, so the running
+             * count includes the PI's own superframe (subtract 1); a simplex "VC*"
+             * follows the PI, so the count is the superframes fully before it (use
+             * as-is). Per-PI superframes are what let a burst find the PI of its own
+             * transmission on multi-call captures (see the mapping below). */
+            int r = rep_sf[slot-1], sp = simp_sf[slot-1];
+            int cur_sf = r ? (r - 1) : sp;
+            if (pi[slot-1].n == 0) pi[slot-1].first_sf = cur_sf;
+            if (pi[slot-1].n < MAX_PI_PER_SLOT)
+                pi_list_push(&pi[slot-1], mi, alg, kid, cur_sf);
+        }
     }
     fclose(f);
 }
@@ -638,8 +703,6 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
     PiList pi[2];
     int burst_count[2] = {0, 0};
     int voice_count = 0;
-
-    int after_voice_hdr[2] = {0, 0};
 
     load_pi_lists(log_path, pi);
 
@@ -669,10 +732,13 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
         /* DSP line: "<slot> <type_hex> <payload_hex>" */
         if (sscanf(line, "%d %x %16383s", &slot, &burst_type, hex) != 3) continue;
         if (slot < 1 || slot > 2) continue;
-        if (burst_type == 0x98) {          /* voice header: next 0x10 is silence candidate */
-            if (slot >= 1 && slot <= 2) after_voice_hdr[slot-1] = 1;
-            continue;
-        }
+        /* Type 0x98 is the CACH, which DSD-FME emits before EVERY voice burst --
+         * it is not a silence marker. An earlier heuristic tagged the following
+         * burst SILENCE, which tagged (nearly) every frame and, via the KPA
+         * pre-filter, pruned the correct key. There is no reliable silence signal
+         * in the -Q dump (encrypted voice cannot be classified without the key),
+         * so we skip the CACH and never emit SILENCE from the converter. */
+        if (burst_type == 0x98) continue;
         if (burst_type != 0x10) continue;  /* skip everything else */
 
         hexlen = strlen(hex);
@@ -683,49 +749,61 @@ int dsp_convert_to_bin(const char *dsp_path, const char *out_path,
 
         si = slot - 1;
         if (pi[si].n > 0) {
+            /* Map this burst's superframe to the PI whose OWN superframe governs it:
+             * the most recent PI with e[j].sf <= sf_idx (PIs are in ascending superframe
+             * order), so each burst anchors to the PI of its own transmission. Indexing
+             * densely by (sf_idx - first_sf) breaks on multi-call captures: a boundary
+             * superframe carries two PIs (an outgoing C- plus the next call's H-), so a
+             * dense index runs one ahead per call and misaligns every later MI. */
+            int j, gi = -1;
             sf_idx = burst_count[si] / 6;
-            if (sf_idx < pi[si].n) {
-                mi  = pi[si].e[sf_idx].mi;
-                alg = pi[si].e[sf_idx].alg;
-                kid = pi[si].e[sf_idx].kid;
+            for (j = 0; j < pi[si].n; j++) {
+                if (pi[si].e[j].sf <= sf_idx) gi = j;
+                else break;                       /* ascending: no later PI qualifies */
+            }
+            if (gi < 0) {
+                /* Bursts before the first decoded PI: back-extrapolate from e[0]. */
+                int back = pi[si].e[0].sf - sf_idx;
+                alg = pi[si].e[0].alg;
+                kid = pi[si].e[0].kid;
+                if (IS_HYTERA_EP_ALG(alg))
+                    mi = pi[si].e[0].mi;   /* Hytera 5-byte LFSR inverse not modeled */
+                else
+                    mi = lfsr_reverse((uint32_t)pi[si].e[0].mi, 32 * back);
+            } else if (pi[si].e[gi].sf == sf_idx) {
+                /* Exact superframe match. When two PIs share it (an outgoing C- then
+                 * a new-call H-), prefer the FIRST -- it continues the call these
+                 * bursts belong to; the H- governs from the next superframe. A lone
+                 * H- start is the only entry and wins by default. */
+                while (gi > 0 && pi[si].e[gi - 1].sf == sf_idx) gi--;
+                mi  = pi[si].e[gi].mi;
+                alg = pi[si].e[gi].alg;
+                kid = pi[si].e[gi].kid;
             } else {
-                int extra = sf_idx - (pi[si].n - 1);
-                uint8_t last_alg = pi[si].e[pi[si].n - 1].alg;
-                uint64_t last_mi = pi[si].e[pi[si].n - 1].mi;
-                /* Extrapolate the MI one superframe at a time past the last decoded
-                 * PI: MOTOTRBO advances 32 LFSR steps/superframe; Hytera EP steps
-                 * its 5-byte LFSR once/superframe. A single good PI thus tags the
-                 * whole run. */
-                if (IS_HYTERA_EP_ALG(last_alg)) {
-                    int s;
-                    mi = last_mi;
-                    for (s = 0; s < extra; s++) mi = hytera_mi_lfsr_step(mi);
+                /* Gap between PIs: forward-extrapolate from the most recent one. A
+                 * new-call H- re-anchors here, so extrapolation never crosses a call
+                 * boundary. MOTOTRBO advances 32 LFSR steps/superframe; Hytera steps
+                 * its 5-byte LFSR once/superframe. */
+                int extra = sf_idx - pi[si].e[gi].sf;
+                alg = pi[si].e[gi].alg;
+                kid = pi[si].e[gi].kid;
+                if (IS_HYTERA_EP_ALG(alg)) {
+                    int s2;
+                    mi = pi[si].e[gi].mi;
+                    for (s2 = 0; s2 < extra; s2++) mi = hytera_mi_lfsr_step(mi);
                 } else {
-                    mi = lfsr_advance((uint32_t)last_mi, 32 * extra);
+                    mi = lfsr_advance((uint32_t)pi[si].e[gi].mi, 32 * extra);
                 }
-                alg = last_alg;
-                kid = pi[si].e[pi[si].n - 1].kid;
             }
             has_meta = 1;
         }
 
-        {
-            int is_silence = (si >= 0 && si < 2) ? after_voice_hdr[si] : 0;
-            if (si >= 0 && si < 2) after_voice_hdr[si] = 0;  /* clear: only first burst */
-
-            if (has_meta) {
-                char mibuf[16];
-                format_mi_tag(mibuf, sizeof(mibuf), mi);
-                if (is_silence)
-                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%s;SILENCE=1\n", hex, alg, kid, mibuf);
-                else
-                    fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%s\n", hex, alg, kid, mibuf);
-            } else {
-                if (is_silence)
-                    fprintf(fout, "%s;SILENCE=1\n", hex);
-                else
-                    fprintf(fout, "%s\n", hex);
-            }
+        if (has_meta) {
+            char mibuf[16];
+            format_mi_tag(mibuf, sizeof(mibuf), mi);
+            fprintf(fout, "%s;ALG=%02X;KID=%02X;MI=%s\n", hex, alg, kid, mibuf);
+        } else {
+            fprintf(fout, "%s\n", hex);
         }
 
         burst_count[si]++;
@@ -840,6 +918,13 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
     PayloadClass cls;
     int ck = 0;
     char scratch[1];
+    /* Capture-quality signals: an all-"silence" capture or one with too few
+     * distinct MI cannot yield a verifiable key even when the cipher is
+     * supported -- the two failure modes behind most "it found nothing" reports.
+     * Counted here so the verdict can name them up front. */
+    size_t silence_n = 0;
+    uint64_t seen_mi[64];
+    int distinct_mi = 0, distinct_capped = 0;
 
     /* msg is an optional out-param; route writes to a throwaway when NULL so the
      * snprintf calls below never dereference a null pointer. */
@@ -866,6 +951,16 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
             else if (it->has_algid || ps->has_global_algid) {
                 other_mi++;
                 if (!other_alg) other_alg = alg;
+            }
+        }
+        if (it->silence_candidate) silence_n++;
+        if (has_mi && !distinct_capped) {
+            uint64_t m = it->has_mi ? it->mi : ps->global_mi;
+            int seen = 0, k;
+            for (k = 0; k < distinct_mi; k++) if (seen_mi[k] == m) { seen = 1; break; }
+            if (!seen) {
+                if (distinct_mi < 64) seen_mi[distinct_mi++] = m;
+                else distinct_capped = 1;
             }
         }
     }
@@ -898,6 +993,22 @@ PayloadClass payload_classify(const PayloadSet *ps, int *crackable,
     } else {
         cls = PAYLOAD_CLASS_NONE;
         snprintf(msg, msg_len, "No recognizable Enhanced Privacy metadata");
+    }
+
+    /* Append the capture-quality suffix whenever MI metadata is present, so the
+     * user sees the two most common failure signals before a long run: a low
+     * distinct-MI count (weak validation) and a high silence-tag fraction (an
+     * over-tagged capture, which also disables the KPA cache). */
+    if (with_mi > 0) {
+        size_t used = strlen(msg);
+        char micount[8];
+        if (distinct_capped) snprintf(micount, sizeof(micount), "64+");
+        else                 snprintf(micount, sizeof(micount), "%d", distinct_mi);
+        if (used < msg_len)
+            snprintf(msg + used, msg_len - used,
+                     " [MI %s, sil %d%%%s]", micount,
+                     (int)((silence_n * 100 + total / 2) / total),
+                     (silence_n * 2 > total) ? " over-tag" : "");
     }
 
     if (crackable) *crackable = ck;

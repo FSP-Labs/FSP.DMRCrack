@@ -6,7 +6,7 @@
  *     MI[0] is the most significant byte).
  *   - ks[i] = rc4[i] ^ kiv[i % 5].
  *   - ONE keystream per superframe, consumed as a BITSTREAM, 49 bits per AMBE
- *     frame, across the 18 frames (6 bursts x 3 sub-frames). CRUCIALLY, Hytera EP
+ *     frame, across the 18 frames (6 bursts x 3 sub-frames). Hytera EP
  *     does NOT skip the trailing 7 bits the way MOTOTRBO/P25 do: in DSD-FME
  *     (dsd_mbe.c) the per-frame advance is `bit_counter += 49`, gated by
  *     `if (algid != 0x02) bit_counter += 7;` -- so the +7 skip is suppressed for

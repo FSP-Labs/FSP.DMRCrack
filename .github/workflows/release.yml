@@ -30,6 +30,27 @@ jobs:
           Write-Host "Version: $ver"
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
 
+      # ── Version guard ─────────────────────────────────────────────────────────
+      # The binary compiles DMRCRACK_VERSION from include/version.h; WinSparkle
+      # compares that against the appcast. If version.h lags the tag, the installed
+      # build reports the old version and the updater re-offers this release
+      # forever. Fail fast (before the ~30 min build) if they disagree, and if the
+      # CHANGELOG has no section for this version.
+      - name: Verify version.h and CHANGELOG match the tag
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.VERSION }}"
+          $vh  = (Select-String -Path include/version.h -Pattern '#define\s+DMRCRACK_VERSION\s+"([^"]+)"').Matches[0].Groups[1].Value
+          if ($vh -ne $tag) {
+            Write-Error "include/version.h is $vh but the tag is v$tag -- bump version.h to match before tagging"
+            exit 1
+          }
+          if (-not (Select-String -Path CHANGELOG.md -SimpleMatch -Quiet -Pattern "[$tag]")) {
+            Write-Error "CHANGELOG.md has no [$tag] section"
+            exit 1
+          }
+          Write-Host "version.h and CHANGELOG both match $tag"
+
       # ── CUDA ─────────────────────────────────────────────────────────────────
       - name: Cache CUDA Toolkit
         id: cache-cuda
