@@ -89,7 +89,7 @@ back-ends.
 3. Click **Demodulate** — DSD-FME runs automatically, extracts encrypted voice payloads, and writes a `.bin` file.
 4. Click **Start** in the **Brute-force** section to begin the GPU search.
 5. Monitor progress: keys/sec graph, best-score evolution, ETA.
-6. The correct key produces a sharp score spike well above the noise floor.
+6. When the key is recovered, the candidate tile shows **CONFIRMED**; a wrong or dictionary key never reaches that verdict.
 7. Click **Listen** to re-run DSD-FME with the recovered key, decrypt the capture to a plain WAV, and play it back.
 
 ### Live capture (experimental)
@@ -200,7 +200,7 @@ Between superframes (every 6 bursts), MI advances by 32 LFSR steps: taps `{31,3,
 
 ### Hytera Enhanced Privacy pipeline (ALG=0x02)
 
-Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA, no keystream discard), then the keystream octets are XOR'd with a key-IV (`kiv`) where `kiv[i] = key5[i] XOR MI[i]` over all 5 bytes (40-bit big-endian MI), matching DSD-FME's `hytera_enhanced_rc4_setup`. One keystream is built per superframe and consumed as a **bitstream at 49 bits per AMBE frame** — and, unlike MOTOTRBO/P25, Hytera does **not** skip the trailing 7 bits, so AMBE frame `f = burst_pos·3 + sf` reads keystream bits `[f·49 … f·49+48]` (MSB-first, not byte-aligned). The keystream is single-sourced in `include/hytera_ks.h` (verified byte-for-byte against DSD-FME's `rc4_block_output` + bitstream model over thousands of random vectors, and end-to-end against a planted-key synthetic capture). Hytera's inter-superframe MI advances with its own 5-byte LFSR (taps `12 24 48 22 14`), so a single decoded PI header now tags a whole capture. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads with zero overhead on MOTOTRBO paths; the MI-independent RC4 keystream is built once per key and re-masked per superframe. Hytera EP is signalled under two algids — `ALG=0x02` and `ALG=0x26` — both recognised.
+Hytera EP uses a different key schedule: RC4 KSA with the 5-byte key only (no MI in the KSA, no keystream discard), then the keystream octets are XOR'd with a key-IV (`kiv`) where `kiv[i] = key5[i] XOR MI[i]` over all 5 bytes (40-bit big-endian MI), matching DSD-FME's `hytera_enhanced_rc4_setup`. One keystream is built per superframe and consumed as a **bitstream at 49 bits per AMBE frame** — and, unlike MOTOTRBO/P25, Hytera does **not** skip the trailing 7 bits, so AMBE frame `f = burst_pos·3 + sf` reads keystream bits `[f·49 … f·49+48]` (MSB-first, not byte-aligned). The keystream is single-sourced in `include/hytera_ks.h` (verified byte-for-byte against DSD-FME's `rc4_block_output` + bitstream model over thousands of random vectors, and end-to-end against a planted-key synthetic capture). Hytera's inter-superframe MI advances with its own 5-byte LFSR (taps `12 24 48 22 14`), so a single decoded PI header now tags a whole capture. The scoring algorithm is identical to MOTOTRBO (inter-frame Hamming + bit-frequency chi-squared). A dedicated `bruteforce_kernel_hytera` kernel handles these payloads with zero overhead on MOTOTRBO paths; the MI-independent RC4 keystream is built once per key and re-masked per superframe. Only `ALG=0x02` is Hytera EP; `ALG=0x26` is Caltta Basic Privacy — a different, unsupported scheme that the RC4-40 model cannot decode — and is rejected rather than mis-decoded.
 
 ### GPU throughput
 
