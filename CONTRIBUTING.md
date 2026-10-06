@@ -9,8 +9,10 @@
 
 **Linux:**
 - GCC or Clang
-- CMake >= 3.18
-- CUDA Toolkit 12.x (or ROCm 5.7+ for AMD, with `-DUSE_HIP=ON`)
+- CMake >= 3.21
+- A GPU back-end (any one): portable OpenCL (`opencl-headers` + an ICD loader,
+  `-DUSE_OPENCL=ON`), NVIDIA CUDA Toolkit 12.x (default), or AMD ROCm 6.x
+  (`-DUSE_HIP=ON`). Builds CPU-only when no GPU toolkit is present.
 
 Python 3.8+ is optional; only needed for the conversion and verification scripts in `tools/`.
 
@@ -19,9 +21,13 @@ Python 3.8+ is optional; only needed for the conversion and verification scripts
 ### Linux
 
 ```bash
-cmake -S . -B build -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
+# Portable OpenCL (what the Debian/Kali package builds; NVIDIA / AMD / Intel)
+cmake -S . -B build -DUSE_OPENCL=ON -DNO_GUI=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ```
+
+Omit `-DUSE_OPENCL=ON` for the NVIDIA CUDA back-end, or pass `-DUSE_HIP=ON` for
+AMD ROCm. The three GPU back-ends are mutually exclusive.
 
 ### Windows (GUI)
 
@@ -33,11 +39,13 @@ build.bat
 
 Output: `bin\dmrcrack.exe`
 
-### Test tools (no CUDA required)
+### Test tools (MSVC, no CUDA required)
 
 ```bat
-build_test.bat       # builds bin\test_strict_score.exe
+build_tests.bat      # all host tests (or: strict | canonical | hytera | silence | dsp)
 ```
+
+On Linux the same tests build and run via `cmake -DBUILD_TESTS=ON` + `ctest`.
 
 ## Code style
 
@@ -51,7 +59,7 @@ build_test.bat       # builds bin\test_strict_score.exe
 
 1. Fork and create a feature branch
 2. Make your changes; `build.bat` (Windows) or CMake (Linux) should succeed without new warnings
-3. If you touched scoring logic, run `bin\test_strict_score.exe` and `tools\verify_decrypt.py` against the test data in `test/aaaaa/`
+3. If you touched scoring logic, run `build_tests.bat` (at least `strict` and `canonical`) and `tools\verify_decrypt.py` against the test data in `test/aaaaa/`. Keep all scorers on the canonical strict metric — GPU, OpenCL, CPU and host paths must agree.
 4. Open a PR with a description of what changed and why
 
 ## Reporting issues
