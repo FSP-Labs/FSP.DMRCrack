@@ -16,7 +16,8 @@ DSD-FME (Digital Speech Decoder - FM Enthusiasts Edition)
 
 Cygwin Runtime Libraries (cygwin1.dll and dependencies in tools/)
   Homepage : https://cygwin.com
-  License  : GNU Lesser General Public License v2.1 or later (LGPL-2.1+)
+  License  : GNU Lesser General Public License v3 or later (LGPLv3+), with the
+             Cygwin Linking Exception (see https://cygwin.com/licensing.html)
   Usage    : Runtime DLLs required by dsd-fme.exe on Windows. Distributed
              in tools/ alongside dsd-fme.exe. Not linked into FSP.DMRCrack.
 

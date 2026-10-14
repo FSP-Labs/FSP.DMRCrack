@@ -58,7 +58,7 @@ Capture and playback are handled by a bundled
 middle.
 
 ```
-[1 Capture]     WAV file, or RTL-SDR live  ──►  DSD-FME demodulates
+[1 Record]      WAV file you supply         ──►  DSD-FME demodulates
 [2 Demodulate]  encrypted AMBE bursts       ──►  .bin (per-burst MI, ALG, KID)
 [3 Crack]       GPU sweeps the keyspace      ──►  key5 (10 hex)
 [4 Listen]      DSD-FME with -1 <key5>        ──►  decrypted WAV + playback

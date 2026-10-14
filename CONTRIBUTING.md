@@ -71,6 +71,20 @@ Open an issue and include:
 - Exact error message or unexpected behavior
 - Steps to reproduce (anonymized `.bin` file if relevant)
 
+## Acceptable use of contributed data
+
+FSP.DMRCrack is for auditing systems you own or are explicitly authorized in
+writing to test. Keep that boundary in the project itself:
+
+- Do **not** attach, paste, or link captured radio traffic, payloads, or keys
+  from systems you do not own or are not authorized to test — in issues, pull
+  requests, discussions, or commits.
+- Sample data for a bug report must come from your own or an authorized system,
+  or be synthetic (see `tools/gen_hytera_synth.c`). Redact MI/key material that
+  is not yours.
+- The project does not host third-party captures or recovered keys, and PRs that
+  add any will be declined.
+
 ## License
 
 By contributing you agree that your work will be licensed under GPL v3.0 (see [LICENSE](LICENSE)).

@@ -1,20 +1,41 @@
-# FSP.DMRCrack
+<h1 align="center">FSP.DMRCrack</h1>
 
-**GPU-accelerated ARC4 key recovery for DMR Enhanced Privacy voice.**
+<p align="center"><b>GPU-accelerated ARC4 key recovery for DMR Enhanced Privacy voice.</b></p>
 
-FSP.DMRCrack performs an exhaustive 40-bit RC4 key search against captured DMR
-Enhanced Privacy voice frames. It ships as a native Windows GUI (with DSD-FME
-integration) and as a headless Linux CLI.
+<p align="center">
+  <a href="https://github.com/FSP-Labs/FSP.DMRCrack/actions/workflows/build.yml"><img src="https://github.com/FSP-Labs/FSP.DMRCrack/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPLv3"></a>
+  <a href="https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest"><img src="https://img.shields.io/github/v/release/FSP-Labs/FSP.DMRCrack?label=Download&color=green" alt="Download"></a>
+  <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-informational" alt="Platform: Windows | Linux">
+  <img src="https://img.shields.io/badge/GPU-CUDA%20%7C%20OpenCL%20%7C%20HIP-76B900" alt="GPU: CUDA | OpenCL | HIP">
+</p>
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
-[![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-blue)](https://github.com/FSP-Labs)
-[![Platform: Linux x64](https://img.shields.io/badge/Platform-Linux%20x64-orange)](https://github.com/FSP-Labs)
-[![Download](https://img.shields.io/github/v/release/FSP-Labs/FSP.DMRCrack?label=Download&color=green)](https://github.com/FSP-Labs/FSP.DMRCrack/releases/latest)
+<!-- Drop a GUI capture at docs/screenshot.png: the dashboard with a recovered
+     key shown CONFIRMED (amber), live throughput and the progress graphs. -->
+<p align="center">
+  <img src="docs/screenshot.png" width="820"
+       alt="FSP.DMRCrack GUI: a recovered DMR Enhanced Privacy key shown CONFIRMED, with live keys/sec throughput and progress graphs">
+</p>
 
 > **Use only on systems you own or are explicitly authorized in writing to test.
 > Unauthorized interception of radio communications is illegal in most
 > jurisdictions.** See [SECURITY.md](SECURITY.md) and
 > [Legal & responsible use](#legal--responsible-use).
+
+---
+
+## Features
+
+- Recovers the full **40-bit RC4 key** of DMR Enhanced Privacy from recorded voice
+- **MOTOTRBO** and **Hytera** Enhanced Privacy, auto-detected per capture
+- **Multi-backend:** CUDA, OpenCL and HIP/ROCm, with a CPU fallback
+- **Multi-GPU** work-queue that self-balances across asymmetric rigs
+- **Decode-accurate oracle** — a recovered key actually decrypts the audio
+- Reports a plain **CONFIRMED / UNVERIFIED / no-key** verdict, not a raw score
+- **Dictionary + mask** modes, with hashcat-style potfile auto-skip
+- Checkpoint/resume, benchmark mode, and JSON output
+- Native **Windows GUI** (record -> crack -> listen) and a headless **Linux CLI**
+- Free and open source, under the GPLv3
 
 ---
 
@@ -64,17 +85,18 @@ For the CUDA and ROCm/HIP back-ends and the Windows build, see
 
 ## Usage
 
-### GUI (Windows): capture → crack → listen
+### GUI (Windows): record → crack → listen
 
-1. Record a WAV of the DMR RF signal (discriminator audio, 48 kHz mono).
-2. Select it in **Capture** and click **Demodulate** — DSD-FME extracts the
-   encrypted voice payloads into a `.bin`.
+1. Record a WAV of the DMR RF signal (discriminator audio, 48 kHz mono) with
+   your own SDR software (e.g. SDR#).
+2. Select the WAV and click **Demodulate** — DSD-FME extracts the encrypted
+   voice payloads into a `.bin`.
 3. Click **Start** to run the GPU search; watch keys/sec, best score and ETA.
 4. On recovery the candidate tile shows **CONFIRMED** (a wrong or dictionary key
    never reaches that verdict). Click **Listen** to decrypt and play back.
 
-Direct RTL-SDR live capture exists in the GUI but is experimental and not yet
-hardware-validated; the offline WAV workflow is the supported path.
+FSP.DMRCrack has no radio-capture capability of its own: it works on a recording
+you supply, never over the air.
 
 ### CLI (Linux)
 
