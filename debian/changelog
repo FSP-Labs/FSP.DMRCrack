@@ -1,3 +1,22 @@
+dmrcrack (0.5.2+dfsg-1) unstable; urgency=medium
+
+  * New upstream releases 0.5.1 and 0.5.2.
+  * Fix the wrong Message Indicator on multi-transmission (repeater) captures,
+    the main cause of "finds nothing on a real capture": each burst now maps to
+    the Privacy Indicator of its own call, and the MI is back-extrapolated when
+    voice is decoded before the first clean PI header.
+  * Fix the GPU never running on the CLI default: "--samples 0" (use all
+    payloads) left the per-device payload limit at 0, so every GPU worker bailed
+    and the scan fell back to CPU-only scoring.
+  * Fix a heap overflow when staging payloads for the legacy kernel on captures
+    beyond ~249 bursts (most multi-minute recordings).
+  * Classify ALG 0x26 (Caltta Basic Privacy) as unsupported instead of starting
+    a scan it cannot win; only ALG 0x02 is Hytera Enhanced Privacy.
+  * Stop over-tagging silence frames so the KPA pre-filter no longer discards the
+    correct key on layouts that emit a per-burst CACH marker.
+
+ -- Felix Sasian Pacheco <sasianfelix@gmail.com>  Tue, 14 Oct 2026 00:00:00 +0000
+
 dmrcrack (0.5.0+dfsg-1) unstable; urgency=medium
 
   * Re-derive the per-burst detection floor so a noisy real-world capture no

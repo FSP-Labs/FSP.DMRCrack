@@ -17,10 +17,10 @@
 #ifndef VERSION_H
 #define VERSION_H
 
-#define DMRCRACK_VERSION       "0.5.1"
+#define DMRCRACK_VERSION       "0.5.2"
 #define DMRCRACK_VERSION_MAJOR  0
 #define DMRCRACK_VERSION_MINOR  5
-#define DMRCRACK_VERSION_PATCH  1
+#define DMRCRACK_VERSION_PATCH  2
 
 /* Wide-string version for WinSparkle API */
 #define WIDE_(x) L##x

@@ -10,6 +10,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.2] - 2026-10-14
+
+### Added
+- **First-run terms-of-use gate.** On first launch (and again after each update)
+  the GUI asks the operator to confirm they will use the tool only on radio
+  systems they own or are explicitly authorized in writing to test; declining
+  exits. Shown in the system language (English or Spanish).
+- **Run log (`dmrcrack.log`).** The GUI now appends a timestamped line for each
+  scan start, checkpoint resume, result (recovered key + confidence verdict, or
+  "no key above the recovery threshold"), user stop and GPU error, written next
+  to the loaded `.bin` and flushed per line. An unattended run can be left alone
+  and its outcome read afterwards; a "Scan started" with no matching "Scan
+  complete" means it was interrupted (e.g. a reboot). (GitHub #47.)
+- **Statement of intended use** in `SECURITY.md` — what the tool is for and what
+  it deliberately does not do — alongside the existing vulnerability-reporting
+  policy.
+
+### Removed
+- **In-app RTL-SDR live capture.** The GUI no longer tunes, receives, or records
+  over the air; the RTL-SDR capture button, its config dialog and the unattended
+  capture-and-crack pipeline are gone. The tool now works only on a recording you
+  supply (record with your own SDR software, e.g. SDR#), keeping it to offline
+  key recovery with no radio-interception capability of its own.
+
+### Fixed
+- Corrected the Cygwin runtime license in `NOTICE`/`README` — it is **LGPLv3+ with
+  the Cygwin linking exception**, not LGPL-2.1+.
+
+---
+
 ## [0.5.1] - 2026-10-04
 
 ### Fixed
