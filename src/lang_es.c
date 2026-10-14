@@ -43,7 +43,7 @@ const Lang g_lang_es = {
     .tile_progress_meta_fmt   = "%s claves   \xb7   ETA  %s   \xb7   transcurrido  %s",
     .tile_gpu_temp_fmt        = "GPU  %d C",
     .tile_gpu_temp_paused_fmt = "GPU  %d C  \xb7  enfriando, en pausa",
-    .empty_hint               = "Carga un .bin o captura en vivo, luego pulsa Start",
+    .empty_hint               = "Carga un .bin o demodula una grabacion, luego pulsa Start",
     .no_candidate_hint        = "Sin clave sobre el umbral",
     .diag_best_fmt            = "mejor visto  %.1f/burst en %d bursts",
     .status_idle              = "En reposo",
@@ -60,7 +60,9 @@ const Lang g_lang_es = {
     /* Barra de estado */
     .status_backend_cuda = "GPU CUDA",
     .status_backend_cpu  = "CPU",
+    .status_no_gpu       = "Sin GPU",
     .msg_cuda_fallback   = "Error CUDA \x97 continuando en CPU",
+    .confirm_run_anyway  = "\r\n\r\nIniciar la busqueda de todos modos?",
     /* Validacion de payloads */
     .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
     .val_align_warn      = "! Advertencia de alineamiento",
@@ -113,32 +115,6 @@ const Lang g_lang_es = {
     .err_listen_no_source       = "Selecciona el WAV de origen (campo de audio) para reproducir el audio desencriptado",
     .err_listen_no_key          = "Aun no hay clave recuperada - ejecuta una busqueda primero",
     .msg_listen_ok_fmt          = "Audio desencriptado: %s",
-
-    /* ---- Captura en vivo (RTL-SDR, supervisada desatendida) ---- */
-    .btn_capture_start          = "Captura en vivo",
-    .btn_capture_stop           = "Detener captura",
-    .err_capture_no_spec        = "Indica un spec RTL-SDR en el campo Audio, p.ej. rtl:0:451.2M:22",
-    .err_capture_launch         = "No se pudo iniciar la captura en vivo (revisa DSD-FME / RTL-SDR)",
-    .err_capture_no_device      = "RTL-SDR no abierto: conectado? driver WinUSB (Zadig)? cerrado en SDR#/otra app SDR?",
-    .err_capture_died           = "dsd-fme salio antes de tiempo - mira live.log en la carpeta de sesion",
-    .cap_sync_ok                = "senal OK",
-    .cap_sync_none              = "sin senal",
-    .cap_status_fmt             = "Captura en vivo | %s | %zu tramas cifradas | %s",
-    .cap_target_fmt             = "Objetivo alcanzado (%zu tramas) - iniciando crackeo",
-    .cap_dlg_title              = "Escuchar un canal de radio",
-    .cap_intro                  = "Conecta tu receptor SDR y la antena, y escribe la frecuencia que\r\nquieres escuchar. La app captura las llamadas cifradas sola y\r\nempieza a descifrar cuando tiene suficiente. Pulsa Iniciar y espera.",
-    .cap_lbl_freq               = "Frecuencia de radio",
-    .cap_freq_hint              = "En MHz - por ejemplo  461.8375",
-    .cap_adv_show               = "Mas opciones",
-    .cap_adv_hide               = "Menos opciones",
-    .cap_lbl_dev                = "Numero de dispositivo SDR",
-    .cap_hint_dev               = "Deja 0 si tienes un solo SDR",
-    .cap_lbl_gain               = "Ganancia de senal",
-    .cap_hint_gain              = "0 = automatica (recomendado)",
-    .cap_lbl_ppm                = "Correccion de frecuencia",
-    .cap_hint_ppm               = "Deja 0 si no estas seguro",
-    .cap_btn_ok                 = "Iniciar",
-    .cap_btn_cancel             = "Cancelar",
 
     /* ---- Errores de validacion de fuerza bruta ---- */
     .err_no_bin_selected   = "Selecciona un archivo .bin de payloads primero",
@@ -268,5 +244,25 @@ const Lang g_lang_es = {
 "  - GPU NVIDIA recomendada. El modo CPU es mucho mas lento.\r\n"
 "  - Minimo 6 payloads necesarios, 60+ recomendados.\r\n"
 "  - El WAV debe ser mono, 48000 Hz, 16-bit PCM.\r\n",
+
+    /* ---- Terms-of-use gate ---- */
+    .gate_title = "FSP.DMRCrack - Condiciones de uso",
+    .gate_body =
+"FSP.DMRCrack es una herramienta de auditoria de seguridad para DMR\n"
+"Enhanced Privacy. Esta destinada UNICAMENTE a:\n"
+"\n"
+"  - sistemas de radio que poseas,\n"
+"  - sistemas que estes autorizado POR ESCRITO a probar,\n"
+"  - recuperar claves de tus propias comunicaciones, o\n"
+"  - investigacion de seguridad y educacion.\n"
+"\n"
+"La interceptacion o descifrado no autorizado de comunicaciones de\n"
+"radio es ilegal en la mayoria de jurisdicciones (p. ej. la Wiretap Act\n"
+"de EE.UU., el art. 197 del Codigo Penal espanol, la Investigatory\n"
+"Powers Act del Reino Unido) y es responsabilidad exclusivamente tuya.\n"
+"\n"
+"Al elegir Si confirmas que usaras esta herramienta solo como se indica.\n"
+"\n"
+"Aceptas estas condiciones?   (Si = continuar,  No = salir)",
 
 };

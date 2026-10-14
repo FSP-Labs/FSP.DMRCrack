@@ -25,6 +25,11 @@ extern "C" {
 
 int run_gui(HINSTANCE instance, int cmd_show);
 
+/* First-run terms-of-use gate. Shows an authorized-use affirmation (in the
+ * system language) that must be accepted before the app runs; the acceptance is
+ * recorded per version. Returns 1 to proceed, 0 if the user declined (exit). */
+int gui_require_terms_acceptance(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "../include/bruteforce.h"
 #include "../include/lang.h"
@@ -86,18 +87,6 @@
 #define ID_BTN_HELP     1017
 #define ID_BTN_LANG     1018
 #define ID_BTN_LISTEN   1019
-#define ID_BTN_CAPTURE  1020
-
-/* Posted by the capture monitor thread to the main thread when an unattended
- * capture has accumulated enough encrypted voice frames and the .bin is ready. */
-#define WM_APP_CAPTURE_READY (WM_APP + 2)
-
-/* Unattended live-capture: stop capturing and auto-crack once this many
- * encrypted voice frames (ALG+MI present) have accumulated. ~10 superframes,
- * far above the >7 sigma detection threshold. */
-#define LIVE_CAPTURE_TARGET_FRAMES 60
-/* How often the monitor samples the growing DSP/log (ms). */
-#define LIVE_CAPTURE_POLL_MS       1500
 #define ID_EDIT_GPU_PCT  1028
 #define ID_SPIN_GPU      1029
 #define ID_EDIT_TEMP_LIMIT 1030
@@ -159,7 +148,6 @@ typedef struct {
     HWND demod_label;
     HWND btn_copy_key;
     HWND btn_listen;
-    HWND btn_capture;
     HWND payload_label;
     HWND btn_help;
     HWND hwnd_help;
@@ -213,17 +201,6 @@ typedef struct {
     HANDLE demod_thread;
     volatile LONG listen_running;
     HANDLE listen_thread;
-
-    /* Live capture (RTL-SDR, unattended supervised) */
-    volatile LONG capture_running;     /* 1 while the monitor/capture is active */
-    volatile LONG capture_stop_flag;   /* set to request the monitor to stop */
-    HANDLE capture_monitor_thread;
-    HANDLE capture_proc;               /* dsd-fme process handle */
-    HANDLE capture_job;                /* Job Object owning the dsd-fme tree */
-    int    capture_auto_mode;          /* 1 = auto crack+listen pipeline engaged */
-    char   capture_session_dir[MAX_PATH];
-    char   capture_raw_wav[MAX_PATH];  /* -6 re-playable 48k recording */
-    char   capture_bin[MAX_PATH];      /* finalized payload .bin */
 
     HFONT ui_font;
     HFONT ui_font_bold;
@@ -329,7 +306,7 @@ static void copy_key_to_clipboard(HWND hwnd)
 }
 
 /* --- Layout: reposition controls for current window size.
- *   Single-column layout: capture row at top (WAV + Demodulate + Export),
+ *   Single-column layout: audio row at top (WAV + Demodulate + Export),
  *   then bruteforce config, then two tile rows, graphs, status strip at bottom. */
 static void layout_controls(int cw, int ch)
 {
@@ -351,13 +328,12 @@ static void layout_controls(int cw, int ch)
     /* === Capture row === */
     y = HEADER_H + 18;
     {
-        /* Layout: [WAV: lbl][edit........][..][Demodulate][Export][Live capture] */
-        int demod_w = 110, export_w = 80, cap_w = 120, browse_w = 30;
-        int btns_w = demod_w + 6 + export_w + 6 + cap_w;
+        /* Layout: [WAV: lbl][edit........][..][Demodulate][Export] */
+        int demod_w = 110, export_w = 80, browse_w = 30;
+        int btns_w = demod_w + 6 + export_w;
         int browse_x = R - btns_w - 6 - browse_w;
         int demod_x = R - btns_w;
         int export_x = demod_x + demod_w + 6;
-        int cap_x = export_x + export_w + 6;
         int wav_label_w = 42;
         int wav_edit_w = browse_x - (L + wav_label_w + 4) - 4;
 
@@ -366,7 +342,6 @@ static void layout_controls(int cw, int ch)
         if (g_app.btn_browse_wav) MoveWindow(g_app.btn_browse_wav, browse_x,           y,     browse_w,    24, TRUE);
         if (g_app.btn_demod)      MoveWindow(g_app.btn_demod,      demod_x,            y,     demod_w,     24, TRUE);
         if (g_app.btn_export)     MoveWindow(g_app.btn_export,     export_x,           y,     export_w,    24, TRUE);
-        if (g_app.btn_capture)    MoveWindow(g_app.btn_capture,    cap_x,              y,     cap_w,       24, TRUE);
     }
     y += 28;
     if (g_app.demod_label) MoveWindow(g_app.demod_label, L, y, W, 16, TRUE);
@@ -585,7 +560,7 @@ static void draw_header(HDC hdc, int cw)
         }
         tr.left = 214;
         SetTextColor(hdc, CLR_WARN);
-        DrawTextA(hdc, "No GPU", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextA(hdc, g_lang.status_no_gpu, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         SelectObject(hdc, old);
     }
 }
@@ -1748,272 +1723,6 @@ static void start_listen(HWND hwnd)
     }
 }
 
-/* ===================== Live capture (RTL-SDR, unattended) =====================
- *
- * dsd-fme runs continuously on the RTL-SDR (a long-lived process), writing the
- * structured -Q DSP output + a re-playable -6 recording. A monitor thread tails
- * those outputs; once enough encrypted voice frames accumulate it stops the
- * capture, finalizes the .bin and triggers the crack on the main thread.
- *
- * VALIDATION NOTE (no RTL-SDR available at build time): the -i rtl:... input
- * and the assumption that the -6 WAV is re-feedable to -i for the decrypt step
- * must be verified on real hardware. The orchestration/monitoring is hardware
- * independent. */
-
-/* Launch a long-lived process, stdout+stderr -> log, inside a Job Object so the
- * whole (Cygwin) process tree dies when we terminate the job. Non-blocking. */
-static int launch_capture_process(const char *cmdline, const char *log_path,
-                                   const char *working_dir,
-                                   HANDLE *out_proc, HANDLE *out_job)
-{
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
-    SECURITY_ATTRIBUTES sa;
-    HANDLE hLog = INVALID_HANDLE_VALUE, hJob = NULL;
-    char cmd[4096];
-
-    *out_proc = NULL;
-    *out_job  = NULL;
-
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = NULL;
-    sa.bInheritHandle = TRUE;
-
-    ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
-    si.cb = sizeof(si);
-
-    if (log_path && log_path[0]) {
-        hLog = CreateFileA(log_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                           &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (hLog != INVALID_HANDLE_VALUE) {
-            si.hStdError  = hLog;
-            si.hStdOutput = hLog;
-            si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-            si.dwFlags |= STARTF_USESTDHANDLES;
-        }
-    }
-
-    hJob = CreateJobObjectA(NULL, NULL);
-    if (hJob) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli;
-        ZeroMemory(&jeli, sizeof(jeli));
-        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation,
-                                &jeli, sizeof(jeli));
-    }
-
-    snprintf(cmd, sizeof(cmd), "%s", cmdline);
-    if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
-                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP,
-                        NULL, (working_dir && working_dir[0]) ? working_dir : NULL,
-                        &si, &pi)) {
-        if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
-        if (hJob) CloseHandle(hJob);
-        return 0;
-    }
-    if (hJob) AssignProcessToJobObject(hJob, pi.hProcess);
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
-    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
-
-    *out_proc = pi.hProcess;
-    *out_job  = hJob;
-    return 1;
-}
-
-/* dsd-fme writes the -Q file either under <dir>\DSP\<name> or <dir>\<name>. */
-static int find_capture_dsp(const char *base_dir, const char *qname,
-                            char *out, size_t out_len)
-{
-    char cand[MAX_PATH];
-    snprintf(cand, sizeof(cand), "%s\\DSP\\%s", base_dir, qname);
-    if (file_exists(cand)) { snprintf(out, out_len, "%s", cand); return 1; }
-    snprintf(cand, sizeof(cand), "%s\\%s", base_dir, qname);
-    if (file_exists(cand)) { snprintf(out, out_len, "%s", cand); return 1; }
-    return 0;
-}
-
-/* Count payload lines carrying both ALG id and MI (i.e. usable encrypted voice). */
-static size_t count_encrypted_frames(const char *bin_path)
-{
-    PayloadSet tmp;
-    char e[256] = {0};
-    size_t enc = 0;
-    payload_set_init(&tmp);
-    if (load_payload_file(bin_path, 0, &tmp, e, sizeof(e))) {
-        for (size_t i = 0; i < tmp.count; ++i)
-            if (tmp.items[i].has_mi && tmp.items[i].has_algid) enc++;
-    }
-    payload_set_free(&tmp);
-    return enc;
-}
-
-static DWORD WINAPI capture_monitor_proc(LPVOID param)
-{
-    char dsp[MAX_PATH], snap_dsp[MAX_PATH], snap_bin[MAX_PATH];
-    char logfile[MAX_PATH], tail[512], status[400], elapsed[32];
-    DWORD t0 = GetTickCount();
-    (void)param;
-
-    snprintf(logfile,  sizeof(logfile),  "%s\\live.log",      g_app.capture_session_dir);
-    snprintf(snap_dsp, sizeof(snap_dsp), "%s\\snapshot.dsp",  g_app.capture_session_dir);
-    snprintf(snap_bin, sizeof(snap_bin), "%s\\snapshot.bin",  g_app.capture_session_dir);
-
-    while (!g_app.capture_stop_flag) {
-        Sleep(LIVE_CAPTURE_POLL_MS);
-        if (g_app.capture_stop_flag) break;
-
-        size_t enc = 0;
-        if (find_capture_dsp(g_app.capture_session_dir, "live.dsp", dsp, sizeof(dsp))) {
-            /* Snapshot the (still-growing) DSP so a partial tail line can't break parsing. */
-            if (CopyFileA(dsp, snap_dsp, FALSE)) {
-                char cerr[256] = {0};
-                if (dsp_convert_to_bin(snap_dsp, snap_bin, logfile, cerr, sizeof(cerr)))
-                    enc = count_encrypted_frames(snap_bin);
-            }
-        }
-
-        /* Signal presence from the log tail */
-        tail[0] = '\0';
-        read_log_tail(logfile, tail, sizeof(tail));
-        const char *sync = (strstr(tail, "Sync: +") != NULL)
-                         ? g_lang.cap_sync_ok : g_lang.cap_sync_none;
-
-        DWORD secs = (GetTickCount() - t0) / 1000;
-        snprintf(elapsed, sizeof(elapsed), "%02lu:%02lu:%02lu",
-                 (secs / 3600), (secs % 3600) / 60, secs % 60);
-        snprintf(status, sizeof(status), g_lang.cap_status_fmt, sync, enc, elapsed);
-        SetWindowTextA(g_app.demod_label, status);
-
-        /* dsd-fme launches fine but exits within milliseconds when it cannot
-         * open the RTL-SDR (no device / no WinUSB driver / device busy). Without
-         * this check the status bar would just sit at 0 frames forever. Detect
-         * the early exit and surface the real cause from the log. */
-        if (!g_app.capture_stop_flag && enc < LIVE_CAPTURE_TARGET_FRAMES &&
-            g_app.capture_proc &&
-            WaitForSingleObject(g_app.capture_proc, 0) == WAIT_OBJECT_0) {
-            char ltail[1024] = {0};
-            read_log_tail(logfile, ltail, sizeof(ltail));
-            if (strstr(ltail, "No supported devices") ||
-                strstr(ltail, "Failed to open rtlsdr") ||
-                strstr(ltail, "RTL Input")) {
-                SetWindowTextA(g_app.demod_label, g_lang.err_capture_no_device);
-            } else {
-                SetWindowTextA(g_app.demod_label, g_lang.err_capture_died);
-            }
-            /* dsd-fme is already gone; reset the toggle button and release the
-             * dead process/job handles so the next capture starts clean. */
-            SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_start);
-            if (g_app.capture_job)  { CloseHandle(g_app.capture_job);  g_app.capture_job  = NULL; }
-            if (g_app.capture_proc) { CloseHandle(g_app.capture_proc); g_app.capture_proc = NULL; }
-            break;
-        }
-
-        if (enc >= LIVE_CAPTURE_TARGET_FRAMES) {
-            /* Good capture: stop dsd-fme, finalize the .bin, hand off to main thread. */
-            char fin_dsp[MAX_PATH], cerr[256] = {0};
-            snprintf(status, sizeof(status), g_lang.cap_target_fmt, enc);
-            SetWindowTextA(g_app.demod_label, status);
-
-            if (g_app.capture_job) { TerminateJobObject(g_app.capture_job, 0); Sleep(300); }
-            if (find_capture_dsp(g_app.capture_session_dir, "live.dsp", fin_dsp, sizeof(fin_dsp)))
-                dsp_convert_to_bin(fin_dsp, g_app.capture_bin, logfile, cerr, sizeof(cerr));
-
-            PostMessageA(g_app.hwnd, WM_APP_CAPTURE_READY, 0, 0);
-            break;
-        }
-    }
-
-    InterlockedExchange(&g_app.capture_running, 0);
-    return 0;
-}
-
-static void stop_capture(HWND hwnd)
-{
-    (void)hwnd;
-    InterlockedExchange(&g_app.capture_stop_flag, 1);
-    if (g_app.capture_job) TerminateJobObject(g_app.capture_job, 0);
-    if (g_app.capture_monitor_thread) {
-        WaitForSingleObject(g_app.capture_monitor_thread, 5000);
-        CloseHandle(g_app.capture_monitor_thread);
-        g_app.capture_monitor_thread = NULL;
-    }
-    if (g_app.capture_proc) { CloseHandle(g_app.capture_proc); g_app.capture_proc = NULL; }
-    if (g_app.capture_job)  { CloseHandle(g_app.capture_job);  g_app.capture_job  = NULL; }
-    InterlockedExchange(&g_app.capture_running, 0);
-    SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_start);
-}
-
-static void start_capture(HWND hwnd)
-{
-    char spec[512], dsd_path[MAX_PATH], cmdline[4096], logfile[MAX_PATH];
-    char cwd[MAX_PATH];
-    SYSTEMTIME st;
-
-    if (g_app.capture_running) { stop_capture(hwnd); return; }   /* toggle off */
-
-    /* Collect tuning parameters via the dialog and build the rtl:... spec. */
-    if (!prompt_rtl_config(hwnd, spec, sizeof(spec)))
-        return;   /* cancelled */
-    if (spec[0] == '\0') {
-        SetWindowTextA(g_app.demod_label, g_lang.err_capture_no_spec);
-        return;
-    }
-    if (strchr(spec, '"')) { SetWindowTextA(g_app.demod_label, g_lang.err_path_has_quotes); return; }
-
-    if (!resolve_tool_path("tools\\dsd-fme.exe", dsd_path, sizeof(dsd_path))) {
-        SetWindowTextA(g_app.demod_label, g_lang.err_dsd_missing);
-        MessageBoxA(hwnd, g_lang.err_dsd_missing_detail, APP_TITLE, MB_ICONERROR);
-        return;
-    }
-
-    /* Build a per-session folder: <cwd>\captures\session_YYYYMMDD_HHMMSS\ */
-    if (GetCurrentDirectoryA(sizeof(cwd), cwd) == 0) { cwd[0] = '.'; cwd[1] = '\0'; }
-    GetLocalTime(&st);
-    {
-        char captures[MAX_PATH];
-        snprintf(captures, sizeof(captures), "%s\\captures", cwd);
-        CreateDirectoryA(captures, NULL);
-        snprintf(g_app.capture_session_dir, sizeof(g_app.capture_session_dir),
-                 "%s\\session_%04u%02u%02u_%02u%02u%02u", captures,
-                 st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        if (!CreateDirectoryA(g_app.capture_session_dir, NULL) &&
-            GetLastError() != ERROR_ALREADY_EXISTS) {
-            SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
-            return;
-        }
-    }
-    snprintf(g_app.capture_raw_wav, sizeof(g_app.capture_raw_wav),
-             "%s\\session_raw.wav", g_app.capture_session_dir);
-    snprintf(g_app.capture_bin, sizeof(g_app.capture_bin),
-             "%s\\session.bin", g_app.capture_session_dir);
-    snprintf(logfile, sizeof(logfile), "%s\\live.log", g_app.capture_session_dir);
-
-    /* Continuous capture: -Q structured frames, -6 re-playable 48k recording.
-     * -F relaxes RAS/CRC gating so RAS-masked or marginal PIs still surface
-     * their MI (see the demod path for the full rationale). */
-    snprintf(cmdline, sizeof(cmdline),
-             "\"%s\" -fs -F -i \"%s\" -Q live.dsp -Z -V 3 -6 \"%s\"",
-             dsd_path, spec, g_app.capture_raw_wav);
-
-    InterlockedExchange(&g_app.capture_stop_flag, 0);
-    if (!launch_capture_process(cmdline, logfile, g_app.capture_session_dir,
-                                &g_app.capture_proc, &g_app.capture_job)) {
-        SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
-        return;
-    }
-
-    InterlockedExchange(&g_app.capture_running, 1);
-    g_app.capture_monitor_thread = CreateThread(NULL, 0, capture_monitor_proc, NULL, 0, NULL);
-    if (!g_app.capture_monitor_thread) {
-        stop_capture(hwnd);
-        SetWindowTextA(g_app.demod_label, g_lang.err_capture_launch);
-        return;
-    }
-    SetWindowTextA(g_app.btn_capture, g_lang.btn_capture_stop);
-}
-
 static void export_bin_file(HWND owner)
 {
     OPENFILENAMEA ofn;
@@ -2127,6 +1836,49 @@ static void apply_thermal_autopause(void)
     }
 }
 
+/* --- Unattended-run log (GitHub #47) -------------------------------------
+ * A persistent, append-only text log so an operator who leaves a scan running
+ * can tell afterwards whether it finished, what key (if any) was recovered, and
+ * whether it was restarted. Written next to the loaded .bin (else the cwd), and
+ * opened/closed per line so a crash or reboot still leaves a complete record.
+ * A "Scan started" with no matching "Scan complete" means it was interrupted. */
+static char g_log_path[MAX_PATH] = {0};
+
+static void log_set_path(const char *binpath)
+{
+    char dir[MAX_PATH], *sep;
+    if (binpath && binpath[0]) {
+        strncpy(dir, binpath, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
+        sep = strrchr(dir, '\\');
+        { char *fs = strrchr(dir, '/'); if (fs > sep) sep = fs; }
+        if (sep) {
+            *sep = '\0';
+            snprintf(g_log_path, sizeof(g_log_path), "%s\\dmrcrack.log", dir);
+            return;
+        }
+    }
+    snprintf(g_log_path, sizeof(g_log_path), "dmrcrack.log");
+}
+
+static void log_line(const char *fmt, ...)
+{
+    FILE *f;
+    SYSTEMTIME t;
+    va_list ap;
+    if (!g_log_path[0]) snprintf(g_log_path, sizeof(g_log_path), "dmrcrack.log");
+    f = fopen(g_log_path, "a");
+    if (!f) return;
+    GetLocalTime(&t);
+    fprintf(f, "%04d-%02d-%02d %02d:%02d:%02d  ",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
 static void refresh_snapshot_and_ui(void)
 {
     LARGE_INTEGER now;
@@ -2183,7 +1935,19 @@ static void refresh_snapshot_and_ui(void)
     /* Key-found notification: flash taskbar when search completes with a
      * CONFIRMED result (not a statistical latch). */
     if (g_app.snapshot.finished && !g_app.notified_completion) {
+        int v = g_app.confidence.verdict;
         g_app.notified_completion = 1;
+        if (v == CONF_LIKELY_REAL || v == CONF_UNCERTAIN)
+            log_line("Scan complete. Recovered key: %010llX  (%s, %.1f sigma over %d bursts)",
+                     (unsigned long long)g_app.snapshot.best_key,
+                     v == CONF_LIKELY_REAL ? "CONFIRMED" : "uncertain",
+                     g_app.confidence.sigma, g_app.confidence.bursts);
+        else
+            log_line("Scan complete. No key above the recovery threshold "
+                     "(best candidate %010llX, %.1f sigma -- likely a capture/MI issue).",
+                     (unsigned long long)g_app.snapshot.best_key, g_app.confidence.sigma);
+        if (g_app.snapshot.gpu_error[0])
+            log_line("GPU note: %s", g_app.snapshot.gpu_error);
         if (g_app.confidence.verdict == CONF_LIKELY_REAL) {
             FLASHWINFO fwi;
             fwi.cbSize = sizeof(fwi);
@@ -2193,11 +1957,6 @@ static void refresh_snapshot_and_ui(void)
             fwi.dwTimeout = 0;
             FlashWindowEx(&fwi);
             MessageBeep(MB_ICONINFORMATION);
-            /* Unattended pipeline: decrypt the recording to audio automatically */
-            if (g_app.capture_auto_mode) {
-                g_app.capture_auto_mode = 0;
-                start_listen(g_app.hwnd);
-            }
         }
     }
 
@@ -2280,15 +2039,15 @@ static int start_bruteforce(HWND hwnd)
     {
         char cmsg[160]; int crackable = 0;
         PayloadClass cls = payload_classify(&g_app.payloads, &crackable, cmsg, sizeof(cmsg));
-        if (cls == PAYLOAD_CLASS_UNSUPPORTED && !g_app.capture_auto_mode) {
+        if (cls == PAYLOAD_CLASS_UNSUPPORTED) {
             /* AES and other non-RC4 ciphers cannot be brute-forced -- inform
              * and refuse (bruteforce_start would reject it anyway). */
             MessageBoxA(hwnd, cmsg, APP_TITLE, MB_OK | MB_ICONERROR);
             return 0;
         }
-        if (!crackable && !g_app.capture_auto_mode) {
+        if (!crackable) {
             char q[256];
-            snprintf(q, sizeof(q), "%s\n\nStart the search anyway?", cmsg);
+            snprintf(q, sizeof(q), "%s%s", cmsg, g_lang.confirm_run_anyway);
             if (MessageBoxA(hwnd, q, APP_TITLE, MB_YESNO | MB_ICONWARNING) == IDNO)
                 return 0;
         }
@@ -2370,6 +2129,18 @@ static int start_bruteforce(HWND hwnd)
         MessageBoxA(hwnd, warn_msg, APP_TITLE, MB_ICONWARNING);
     }
 
+    log_set_path(file);
+    log_line("=== Scan started ===  file=%s  payloads=%zu  range=%010llX-%010llX  backend=%s",
+             file, g_app.payloads.count,
+             (unsigned long long)start_key, (unsigned long long)end_key,
+             g_app.engine.cuda_active ? "GPU" : "CPU");
+    if (cfg.has_resume_context)
+        log_line("Resumed from a saved checkpoint at key %010llX "
+                 "(seeded best %010llX).", (unsigned long long)cfg.start_key,
+                 (unsigned long long)cfg.seed_best_key);
+    if (g_app.engine.cuda_error[0])
+        log_line("GPU note: %s", g_app.engine.cuda_error);
+
     g_app.last_cfg = cfg;
     g_app.fallback_triggered = 0;
     g_app.fallback_banner_ticks = 0;
@@ -2397,6 +2168,7 @@ static void on_pause_resume(void)
 
 static void on_stop(void)
 {
+    log_line("Scan stopped by user.");
     bruteforce_stop(&g_app.engine);
     refresh_snapshot_and_ui();
 }
@@ -2524,8 +2296,6 @@ static void apply_language(void)
     SetWindowTextA(g_app.btn_stop,     g_lang.btn_stop);
     SetWindowTextA(g_app.btn_copy_key, g_lang.btn_copy_key);
     SetWindowTextA(g_app.btn_listen,   g_lang.btn_listen);
-    SetWindowTextA(g_app.btn_capture,
-                   g_app.capture_running ? g_lang.btn_capture_stop : g_lang.btn_capture_start);
     SetWindowTextA(g_app.btn_lang,
         (g_lang_ptr == &g_lang_es) ? "EN" : "ES");
     {
@@ -2606,240 +2376,6 @@ static LRESULT CALLBACK help_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM
     }
     }
     return DefWindowProcA(hwnd, msg, wparam, lparam);
-}
-
-/* ===================== RTL-SDR capture config dialog =====================
- * A small modal popup that collects the tuning parameters and builds the
- * dsd-fme `-i rtl:dev:freq:gain:ppm:bw` spec, so the user never types it by
- * hand. Only the frequency is required; everything else defaults. Entering a
- * .wav path (or an explicit rtl:... spec) passes through verbatim for dry-run
- * testing without a dongle. */
-#define RTLDLG_CLASS_NAME "FSPDMRRtlDlg"
-#define IDC_RTL_FREQ 101
-#define IDC_RTL_DEV  102
-#define IDC_RTL_GAIN 103
-#define IDC_RTL_PPM  104
-#define IDC_RTL_ADV  105
-
-/* Collapsed dialog shows only the frequency; the technical fields hide behind a
- * "More options" toggle so a non-technical user only deals with one field. */
-#define RTL_W            440
-#define RTL_H_COLLAPSED  280
-#define RTL_H_EXPANDED   440
-#define RTL_ADV_Y        186   /* top of the advanced section (client coords) */
-#define RTL_BTN_Y_OPEN   356   /* OK/Cancel row when advanced is shown          */
-#define RTL_BTN_Y_SHUT   196   /* OK/Cancel row when advanced is hidden          */
-
-static struct {
-    HWND ed_freq, ed_dev, ed_gain, ed_ppm;
-    HWND lbl_freq, lbl_intro, lbl_freqhint;
-    HWND btn_adv, btn_ok, btn_cancel;
-    HWND adv[9];        /* advanced labels + edits + hints, shown/hidden together */
-    HWND dim[5];        /* statics drawn in the muted colour (intro + hints)      */
-    int  n_adv, n_dim;
-    int  advanced_shown;
-    int  done, accepted;
-} g_rtldlg;
-
-/* Reposition the toggle/OK/Cancel and resize the window for the current state. */
-static void rtl_dlg_relayout(HWND hwnd)
-{
-    int shown = g_rtldlg.advanced_shown;
-    int btn_y = shown ? RTL_BTN_Y_OPEN : RTL_BTN_Y_SHUT;
-    int i;
-    for (i = 0; i < g_rtldlg.n_adv; ++i)
-        ShowWindow(g_rtldlg.adv[i], shown ? SW_SHOW : SW_HIDE);
-    SetWindowTextA(g_rtldlg.btn_adv, shown ? g_lang.cap_adv_hide : g_lang.cap_adv_show);
-    MoveWindow(g_rtldlg.btn_ok,     230, btn_y, 90, 28, TRUE);
-    MoveWindow(g_rtldlg.btn_cancel, 326, btn_y, 90, 28, TRUE);
-    SetWindowPos(hwnd, NULL, 0, 0, RTL_W,
-                 shown ? RTL_H_EXPANDED : RTL_H_COLLAPSED,
-                 SWP_NOMOVE | SWP_NOZORDER);
-    InvalidateRect(hwnd, NULL, TRUE);
-}
-
-static LRESULT CALLBACK rtl_dlg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
-{
-    switch (msg) {
-    case WM_CREATE:
-    {
-        HFONT f = g_app.ui_font ? g_app.ui_font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        HMODULE mod = GetModuleHandleA(NULL);
-        int LX = 16, W = RTL_W - 40;   /* left margin + usable width */
-        g_rtldlg.n_adv = g_rtldlg.n_dim = 0;
-
-        #define MKSTATIC(txt, x, yy, ww, hh) \
-            CreateWindowExA(0, "STATIC", (txt), WS_CHILD | WS_VISIBLE | SS_LEFT, \
-                (x), (yy), (ww), (hh), hwnd, NULL, mod, NULL)
-        #define MKEDIT(def, id, x, yy, ww) \
-            CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", (def), \
-                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, \
-                (x), (yy), (ww), 24, hwnd, (HMENU)(INT_PTR)(id), mod, NULL)
-
-        /* Plain-language intro (muted) */
-        g_rtldlg.lbl_intro = MKSTATIC(g_lang.cap_intro, LX, 12, W, 58);
-        g_rtldlg.dim[g_rtldlg.n_dim++] = g_rtldlg.lbl_intro;
-
-        /* The one field that matters: the frequency (highlighted) */
-        g_rtldlg.lbl_freq = MKSTATIC(g_lang.cap_lbl_freq, LX, 78, W, 18);
-        g_rtldlg.ed_freq  = MKEDIT("461.8375", IDC_RTL_FREQ, LX, 98, W);
-        g_rtldlg.lbl_freqhint = MKSTATIC(g_lang.cap_freq_hint, LX, 128, W, 16);
-        g_rtldlg.dim[g_rtldlg.n_dim++] = g_rtldlg.lbl_freqhint;
-
-        /* "More options" toggle (ghost button) */
-        g_rtldlg.btn_adv = CreateWindowExA(0, "BUTTON", g_lang.cap_adv_show,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            LX, 150, 150, 26, hwnd, (HMENU)(INT_PTR)IDC_RTL_ADV, mod, NULL);
-
-        /* Advanced section (created here, shown/hidden by rtl_dlg_relayout) */
-        {
-            int y = RTL_ADV_Y, EX = 252, EW = RTL_W - EX - 24;
-            struct { const char *lbl; const char *hint; int id; const char *def; HWND *out; } a[] = {
-                { g_lang.cap_lbl_dev,  g_lang.cap_hint_dev,  IDC_RTL_DEV,  "0", &g_rtldlg.ed_dev  },
-                { g_lang.cap_lbl_gain, g_lang.cap_hint_gain, IDC_RTL_GAIN, "0", &g_rtldlg.ed_gain },
-                { g_lang.cap_lbl_ppm,  g_lang.cap_hint_ppm,  IDC_RTL_PPM,  "0", &g_rtldlg.ed_ppm  },
-            };
-            for (int i = 0; i < 3; ++i) {
-                HWND lb = MKSTATIC(a[i].lbl,  LX, y,      EX - LX - 8, 18);
-                HWND ed = MKEDIT (a[i].def, a[i].id, EX, y - 2, EW);
-                HWND hn = MKSTATIC(a[i].hint, LX, y + 19, EX - LX - 8, 16);
-                *a[i].out = ed;
-                g_rtldlg.adv[g_rtldlg.n_adv++] = lb;
-                g_rtldlg.adv[g_rtldlg.n_adv++] = ed;
-                g_rtldlg.adv[g_rtldlg.n_adv++] = hn;   /* shown/hidden with the section */
-                g_rtldlg.dim[g_rtldlg.n_dim++] = hn;   /* and drawn in the muted colour  */
-                y += 50;
-            }
-        }
-
-        g_rtldlg.btn_ok = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_ok,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON | BS_OWNERDRAW,
-            230, RTL_BTN_Y_SHUT, 90, 28, hwnd, (HMENU)(INT_PTR)IDOK, mod, NULL);
-        g_rtldlg.btn_cancel = CreateWindowExA(0, "BUTTON", g_lang.cap_btn_cancel,
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
-            326, RTL_BTN_Y_SHUT, 90, 28, hwnd, (HMENU)(INT_PTR)IDCANCEL, mod, NULL);
-
-        /* font on every child */
-        { HWND c = GetWindow(hwnd, GW_CHILD);
-          while (c) { SendMessageA(c, WM_SETFONT, (WPARAM)f, FALSE); c = GetWindow(c, GW_HWNDNEXT); } }
-
-        g_rtldlg.advanced_shown = 0;
-        rtl_dlg_relayout(hwnd);   /* start collapsed */
-        #undef MKSTATIC
-        #undef MKEDIT
-        return 0;
-    }
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = (HDC)wparam;
-        SetTextColor(hdc, CLR_TEXT);
-        SetBkColor(hdc, CLR_INPUT);
-        return (LRESULT)g_app.br_input;
-    }
-    case WM_CTLCOLORSTATIC:
-    {
-        HDC hdc = (HDC)wparam;
-        HWND c = (HWND)lparam;
-        COLORREF col = CLR_TEXT;           /* advanced field labels: readable */
-        if (c == g_rtldlg.lbl_freq) {
-            col = CLR_BRIGHT;              /* the one required field leads */
-        } else {
-            int i;                         /* intro + hints recede */
-            for (i = 0; i < g_rtldlg.n_dim; ++i)
-                if (c == g_rtldlg.dim[i]) { col = CLR_DIM; break; }
-        }
-        SetTextColor(hdc, col);
-        SetBkColor(hdc, CLR_BG);
-        return (LRESULT)g_app.br_bg;
-    }
-    case WM_ERASEBKGND:
-    {
-        RECT rc; GetClientRect(hwnd, &rc);
-        FillRect((HDC)wparam, &rc, g_app.br_bg);
-        return 1;
-    }
-    case WM_DRAWITEM:
-    {
-        DRAWITEMSTRUCT *dis = (DRAWITEMSTRUCT *)lparam;
-        if (dis->CtlType == ODT_BUTTON) { draw_button(dis); return TRUE; }
-        break;
-    }
-    case WM_COMMAND:
-        switch (LOWORD(wparam)) {
-        case IDC_RTL_ADV:
-            g_rtldlg.advanced_shown = !g_rtldlg.advanced_shown;
-            rtl_dlg_relayout(hwnd);
-            return 0;
-        case IDOK:     g_rtldlg.accepted = 1; g_rtldlg.done = 1; return 0;
-        case IDCANCEL: g_rtldlg.accepted = 0; g_rtldlg.done = 1; return 0;
-        }
-        break;
-    case WM_CLOSE:
-        g_rtldlg.accepted = 0; g_rtldlg.done = 1;
-        return 0;
-    }
-    return DefWindowProcA(hwnd, msg, wparam, lparam);
-}
-
-/* Returns 1 and fills out_spec with the dsd-fme -i argument, or 0 if cancelled. */
-static int prompt_rtl_config(HWND parent, char *out_spec, size_t out_len)
-{
-    RECT pr;
-    HWND hdlg;
-    MSG m;
-    char freq[256] = {0}, dev[32] = {0}, gain[32] = {0}, ppm[32] = {0};
-    int ok;
-
-    ZeroMemory(&g_rtldlg, sizeof(g_rtldlg));
-    GetWindowRect(parent, &pr);
-
-    hdlg = CreateWindowExA(WS_EX_DLGMODALFRAME, RTLDLG_CLASS_NAME, g_lang.cap_dlg_title,
-        WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        pr.left + 120, pr.top + 120, RTL_W, RTL_H_COLLAPSED,
-        parent, NULL, GetModuleHandleA(NULL), NULL);
-    if (!hdlg) return 0;
-    { BOOL dark = TRUE; DwmSetWindowAttribute(hdlg, 20, &dark, sizeof(dark)); }
-
-    EnableWindow(parent, FALSE);
-    ShowWindow(hdlg, SW_SHOW);
-    UpdateWindow(hdlg);
-    SetFocus(g_rtldlg.ed_freq);
-
-    /* Suspend the main UI refresh timer: this loop pumps the whole thread's
-     * queue, so an IDT_UI_REFRESH tick would otherwise run engine/auto-listen
-     * side effects on the disabled main window while the dialog is open. */
-    KillTimer(parent, IDT_UI_REFRESH);
-    while (!g_rtldlg.done && GetMessageA(&m, NULL, 0, 0) > 0) {
-        if (!IsDialogMessageA(hdlg, &m)) {
-            TranslateMessage(&m);
-            DispatchMessageA(&m);
-        }
-    }
-    SetTimer(parent, IDT_UI_REFRESH, 200, NULL);
-
-    ok = g_rtldlg.accepted;
-    if (ok) {
-        GetWindowTextA(g_rtldlg.ed_freq, freq, sizeof(freq));
-        GetWindowTextA(g_rtldlg.ed_dev,  dev,  sizeof(dev));
-        GetWindowTextA(g_rtldlg.ed_gain, gain, sizeof(gain));
-        GetWindowTextA(g_rtldlg.ed_ppm,  ppm,  sizeof(ppm));
-    }
-    EnableWindow(parent, TRUE);
-    DestroyWindow(hdlg);
-    SetForegroundWindow(parent);
-
-    if (!ok || freq[0] == '\0') return 0;
-
-    /* Dry-run / advanced: a .wav path or explicit rtl: spec is used verbatim. */
-    if (strstr(freq, ".wav") || strstr(freq, ".WAV") || strncmp(freq, "rtl", 3) == 0) {
-        snprintf(out_spec, out_len, "%s", freq);
-    } else {
-        if (dev[0]  == '\0') strcpy(dev,  "0");
-        if (gain[0] == '\0') strcpy(gain, "0");
-        if (ppm[0]  == '\0') strcpy(ppm,  "0");
-        snprintf(out_spec, out_len, "rtl:%s:%s:%s:%s:12", dev, freq, gain, ppm);
-    }
-    return 1;
 }
 
 static void show_help_dialog(HWND parent)
@@ -2947,9 +2483,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         g_app.btn_export = CreateWindowA("BUTTON", g_lang.btn_export,
             WS_CHILD | WS_VISIBLE | WS_DISABLED | BS_OWNERDRAW,
             730, y, 60, 24, hwnd, (HMENU)ID_BTN_EXPORT, NULL, NULL);
-        g_app.btn_capture = CreateWindowA("BUTTON", g_lang.btn_capture_start,
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            792, y, 120, 24, hwnd, (HMENU)ID_BTN_CAPTURE, NULL, NULL);
         g_app.btn_help = CreateWindowA("BUTTON", g_lang.btn_help,
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             800, y, 55, 24, hwnd, (HMENU)ID_BTN_HELP, NULL, NULL);
@@ -3137,20 +2670,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         break;
     }
 
-    case WM_APP_CAPTURE_READY:
-        /* Unattended capture hit its target: clean up the capture, point the
-         * brute-force at the freshly written .bin and the recording, then start
-         * the crack. capture_auto_mode makes the completion handler auto-listen. */
-        stop_capture(hwnd);
-        SetWindowTextA(g_app.edit_file, g_app.capture_bin);
-        SetWindowTextA(g_app.edit_wav,  g_app.capture_raw_wav);
-        SetWindowTextA(g_app.edit_start, "0000000000");
-        SetWindowTextA(g_app.edit_end,   "FFFFFFFFFF");
-        g_app.capture_auto_mode  = 1;
-        g_app.notified_completion = 0;
-        PostMessageA(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_START, 0), 0);
-        return 0;
-
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case ID_BTN_BROWSE:     choose_file(hwnd); return 0;
@@ -3162,7 +2681,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
         case ID_BTN_STOP:       on_stop(); return 0;
         case ID_BTN_COPY_KEY:   copy_key_to_clipboard(hwnd); return 0;
         case ID_BTN_LISTEN:     start_listen(hwnd); return 0;
-        case ID_BTN_CAPTURE:    start_capture(hwnd); return 0;
         case ID_BTN_HELP:       show_help_dialog(hwnd); return 0;
         case ID_BTN_LANG:
             g_lang_ptr = (g_lang_ptr == &g_lang_es) ? &g_lang_en : &g_lang_es;
@@ -3303,14 +2821,50 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
             CloseHandle(g_app.listen_thread);
             g_app.listen_thread = NULL;
         }
-        if (g_app.capture_running || g_app.capture_monitor_thread)
-            stop_capture(hwnd);
         updater_cleanup();
         PostQuitMessage(0);
         return 0;
     }
 
     return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* First-run terms-of-use gate: an authorized-use affirmation the user must accept
+ * before the app runs, recorded per version under HKCU so each update re-affirms.
+ * Shown in the system language because it precedes the main window's ES/EN toggle.
+ * Returns 1 to proceed, 0 if the user declined (caller exits). */
+int gui_require_terms_acceptance(void)
+{
+    const Lang *L = (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH)
+                        ? &g_lang_es : &g_lang_en;
+    HKEY  key;
+    char  accepted[32] = {0};
+    DWORD sz = (DWORD)sizeof(accepted), type = 0;
+    int   already = 0;
+
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, "Software\\FSP-Labs\\FSP.DMRCrack",
+                      0, KEY_READ, &key) == ERROR_SUCCESS) {
+        if (RegQueryValueExA(key, "AcceptedTermsVersion", NULL, &type,
+                             (LPBYTE)accepted, &sz) == ERROR_SUCCESS && type == REG_SZ) {
+            accepted[sizeof(accepted) - 1] = '\0';
+            if (strcmp(accepted, DMRCRACK_VERSION) == 0) already = 1;
+        }
+        RegCloseKey(key);
+    }
+    if (already) return 1;
+
+    if (MessageBoxA(NULL, L->gate_body, L->gate_title,
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_SETFOREGROUND) != IDYES)
+        return 0;
+
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, "Software\\FSP-Labs\\FSP.DMRCrack",
+                        0, NULL, 0, KEY_WRITE, NULL, &key, NULL) == ERROR_SUCCESS) {
+        RegSetValueExA(key, "AcceptedTermsVersion", 0, REG_SZ,
+                       (const BYTE *)DMRCRACK_VERSION,
+                       (DWORD)(strlen(DMRCRACK_VERSION) + 1));
+        RegCloseKey(key);
+    }
+    return 1;
 }
 
 int run_gui(HINSTANCE instance, int cmd_show)
@@ -3341,15 +2895,6 @@ int run_gui(HINSTANCE instance, int cmd_show)
     wc.lpfnWndProc = help_wnd_proc;
     wc.hInstance = instance;
     wc.lpszClassName = HELP_CLASS_NAME;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL;
-    RegisterClassA(&wc);
-
-    /* Register RTL-SDR capture config dialog class */
-    ZeroMemory(&wc, sizeof(wc));
-    wc.lpfnWndProc = rtl_dlg_wnd_proc;
-    wc.hInstance = instance;
-    wc.lpszClassName = RTLDLG_CLASS_NAME;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = NULL;
     RegisterClassA(&wc);

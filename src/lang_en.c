@@ -44,7 +44,7 @@ const Lang g_lang_en = {
     .tile_progress_meta_fmt   = "%s keys   \xb7   ETA  %s   \xb7   elapsed  %s",
     .tile_gpu_temp_fmt        = "GPU  %d C",
     .tile_gpu_temp_paused_fmt = "GPU  %d C  \xb7  cooling, paused",
-    .empty_hint               = "Load a .bin or capture live, then press Start",
+    .empty_hint               = "Load a .bin or demodulate a recording, then press Start",
     .no_candidate_hint        = "No key above the recovery threshold",
     .diag_best_fmt            = "best seen  %.1f/burst over %d bursts",
     .status_idle              = "Idle",
@@ -61,7 +61,9 @@ const Lang g_lang_en = {
     /* Status strip */
     .status_backend_cuda = "CUDA GPU",
     .status_backend_cpu  = "CPU",
+    .status_no_gpu       = "No GPU",
     .msg_cuda_fallback   = "CUDA error \x97 continued on CPU",
+    .confirm_run_anyway  = "\r\n\r\nStart the search anyway?",
     /* Payload validation */
     .val_payloads_ok     = "%zu payloads  \xb7  KMI9: %zu/%zu  \xb7  KID=%02X",
     .val_align_warn      = "! Burst alignment warning",
@@ -114,32 +116,6 @@ const Lang g_lang_en = {
     .err_listen_no_source       = "Select the source WAV (audio field) to play decrypted audio",
     .err_listen_no_key          = "No recovered key yet - run a search first",
     .msg_listen_ok_fmt          = "Decrypted audio: %s",
-
-    /* ---- Live capture (RTL-SDR, unattended supervised) ---- */
-    .btn_capture_start          = "Live capture",
-    .btn_capture_stop           = "Stop capture",
-    .err_capture_no_spec        = "Enter an RTL-SDR spec in the Audio field, e.g. rtl:0:451.2M:22",
-    .err_capture_launch         = "Could not start live capture (check DSD-FME / RTL-SDR)",
-    .err_capture_no_device      = "RTL-SDR not opened: plugged in? WinUSB driver (Zadig)? Closed in SDR#/other SDR app?",
-    .err_capture_died           = "dsd-fme exited early - see live.log in the session folder",
-    .cap_sync_ok                = "signal OK",
-    .cap_sync_none              = "no signal",
-    .cap_status_fmt             = "Live capture | %s | %zu encrypted frames | %s",
-    .cap_target_fmt             = "Target reached (%zu frames) - starting crack",
-    .cap_dlg_title              = "Listen to a radio channel",
-    .cap_intro                  = "Plug in your SDR receiver and antenna, then type the frequency you\r\nwant to listen to. The app captures encrypted calls on its own and\r\nstarts cracking once it has enough. Just press Start and wait.",
-    .cap_lbl_freq               = "Radio frequency",
-    .cap_freq_hint              = "In MHz - for example  461.8375",
-    .cap_adv_show               = "More options",
-    .cap_adv_hide               = "Fewer options",
-    .cap_lbl_dev                = "SDR device number",
-    .cap_hint_dev               = "Leave 0 if you have a single SDR",
-    .cap_lbl_gain               = "Signal gain",
-    .cap_hint_gain              = "0 = automatic (recommended)",
-    .cap_lbl_ppm                = "Frequency correction",
-    .cap_hint_ppm               = "Leave 0 if you are not sure",
-    .cap_btn_ok                 = "Start",
-    .cap_btn_cancel             = "Cancel",
 
     /* ---- Brute-force validation errors ---- */
     .err_no_bin_selected  = "Select a .bin payload file first",
@@ -268,5 +244,25 @@ const Lang g_lang_en = {
 "  - NVIDIA GPU recommended. CPU fallback is much slower.\r\n"
 "  - Minimum 6 payloads needed, 60+ recommended.\r\n"
 "  - WAV must be mono, 48000 Hz, 16-bit PCM.\r\n",
+
+    /* ---- Terms-of-use gate ---- */
+    .gate_title = "FSP.DMRCrack - Terms of Use",
+    .gate_body =
+"FSP.DMRCrack is a security-auditing tool for DMR Enhanced Privacy.\n"
+"It is intended ONLY for:\n"
+"\n"
+"  - radio systems you own,\n"
+"  - systems you are explicitly authorized IN WRITING to test,\n"
+"  - recovering keys to your own communications, or\n"
+"  - security research and education.\n"
+"\n"
+"Unauthorized interception or decryption of radio communications is\n"
+"illegal in most jurisdictions (e.g. the US Wiretap Act, Spain's Codigo\n"
+"Penal art. 197, the UK Investigatory Powers Act) and is solely your\n"
+"responsibility.\n"
+"\n"
+"By choosing Yes you confirm you will use this tool only as stated above.\n"
+"\n"
+"Do you accept these terms?   (Yes = continue,  No = exit)",
 
 };

@@ -49,7 +49,7 @@ typedef struct {
     const char *tile_gpu_temp_paused_fmt; /* "GPU  %d C - cooling (paused)" */
 
     /* ---- Empty / idle states ---- */
-    const char *empty_hint;               /* "Load a .bin or capture live, then Start" */
+    const char *empty_hint;               /* "Load a .bin or demodulate a recording, then Start" */
     const char *no_candidate_hint;        /* "No key found above threshold" */
     const char *diag_best_fmt;            /* "best seen  %.1f/burst over %d bursts" */
     const char *status_idle;              /* "Idle" */
@@ -69,7 +69,9 @@ typedef struct {
     /* ---- Status strip ---- */
     const char *status_backend_cuda; /* "CUDA GPU" */
     const char *status_backend_cpu;  /* "CPU" */
+    const char *status_no_gpu;       /* "No GPU" header badge when GPU init fails */
     const char *msg_cuda_fallback;   /* "CUDA error - continued on CPU" */
+    const char *confirm_run_anyway;  /* appended to a classify warning before a Yes/No prompt */
 
     /* ---- Payload validation ---- */
     const char *val_payloads_ok;     /* "%zu payloads . KMI9: %zu/%zu . KID=%02X" */
@@ -119,33 +121,6 @@ typedef struct {
     const char *err_listen_no_source;         /* "Select the source WAV to play decrypted audio" */
     const char *err_listen_no_key;            /* "No recovered key yet"                       */
     const char *msg_listen_ok_fmt;            /* "Decrypted audio: %s" */
-
-    /* ---- Live capture (RTL-SDR, unattended supervised) ---- */
-    const char *btn_capture_start;            /* "Live capture"                               */
-    const char *btn_capture_stop;             /* "Stop capture"                               */
-    const char *err_capture_no_spec;          /* "Enter an RTL-SDR spec in the Audio field..." */
-    const char *err_capture_launch;           /* "Could not start live capture"               */
-    const char *err_capture_no_device;        /* "RTL-SDR not opened: driver / plugged / busy" */
-    const char *err_capture_died;             /* "dsd-fme exited early - see live.log"         */
-    const char *cap_sync_ok;                  /* "signal OK"                                  */
-    const char *cap_sync_none;                /* "no signal"                                  */
-    const char *cap_status_fmt;               /* "Live capture | %s | %zu encrypted | %s"     */
-    const char *cap_target_fmt;               /* "Target reached (%zu) - starting crack"      */
-    /* RTL-SDR config dialog */
-    const char *cap_dlg_title;                /* "Live capture - RTL-SDR"                     */
-    const char *cap_intro;                    /* plain-language instructions (top of dialog)  */
-    const char *cap_lbl_freq;                 /* "Radio frequency"                            */
-    const char *cap_freq_hint;                /* "In MHz, e.g. 461.8375 ..."                  */
-    const char *cap_adv_show;                 /* "More options"                               */
-    const char *cap_adv_hide;                 /* "Fewer options"                              */
-    const char *cap_lbl_dev;                  /* "SDR device number"                          */
-    const char *cap_hint_dev;                 /* "0 if you have one SDR"                       */
-    const char *cap_lbl_gain;                 /* "Signal gain"                                */
-    const char *cap_hint_gain;                /* "0 = automatic (recommended)"                */
-    const char *cap_lbl_ppm;                  /* "Frequency correction"                       */
-    const char *cap_hint_ppm;                 /* "0 if you are not sure"                       */
-    const char *cap_btn_ok;                   /* "Start listening"                            */
-    const char *cap_btn_cancel;               /* "Cancel"                                     */
 
     /* ---- Brute-force validation errors ---- */
     const char *err_no_bin_selected;
@@ -215,6 +190,10 @@ typedef struct {
     const char *btn_help;              /* "Help" (button label)               */
     const char *help_title;            /* Help window title                   */
     const char *help_content;          /* Full help text (scrollable)         */
+
+    /* ---- First-run terms-of-use acceptance gate ---- */
+    const char *gate_title;            /* "FSP.DMRCrack - Terms of Use"       */
+    const char *gate_body;             /* authorized-use affirmation (Yes/No) */
 
 } Lang;
 
